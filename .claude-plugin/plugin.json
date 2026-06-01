@@ -1,0 +1,21 @@
+{
+  "name": "agentic-rosetta",
+  "description": "Skills-as-code machinery that stops LLMs hallucinating niche frameworks. Bootstraps a two-layer knowledge base (compact JSON fact-graph + 3-lens progressive-disclosure docs) for any technology, then validates and upgrades it. Ships the machinery, not the knowledge.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Justin Rich",
+    "email": "justin@formulist.ai"
+  },
+  "homepage": "https://github.com/justincrich/agentic-rosetta",
+  "repository": "https://github.com/justincrich/agentic-rosetta",
+  "license": "MIT",
+  "keywords": [
+    "skills",
+    "knowledge-base",
+    "fact-graph",
+    "rosetta",
+    "agents",
+    "hallucination",
+    "cross-harness"
+  ]
+}

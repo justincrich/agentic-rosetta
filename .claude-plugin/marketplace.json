@@ -1,0 +1,19 @@
+{
+  "name": "agentic-rosetta",
+  "owner": {
+    "name": "Justin Rich",
+    "email": "justin@formulist.ai"
+  },
+  "metadata": {
+    "description": "Single-plugin marketplace for agentic-rosetta.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "agentic-rosetta",
+      "source": "./",
+      "description": "Skills-as-code machinery for building per-technology Rosetta knowledge bases (fact-graph + 3-lens docs) that stop LLMs hallucinating niche frameworks.",
+      "version": "0.1.0"
+    }
+  ]
+}
