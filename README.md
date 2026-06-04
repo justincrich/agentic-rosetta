@@ -22,7 +22,7 @@ It ships **four skills** — and **zero pre-installed language knowledge**. You 
 | `rosetta-bootstrap` | Create a new Rosetta KB for any technology (research → synthesize → fact-graph → 3-lens docs → scaffold agents) |
 | `rosetta-research` | Research an unknown tech with **graceful degradation** — delegates to `/assimilate` & `/deep-research` when present, uses `jina`/`exa` MCPs when provisioned, falls back to built-in web search. MCPs optional, never required. |
 | `rosetta-validate` | Stress-test a KB by challenging an agent to build with it, then adversarially review against 28 universal anti-patterns |
-| `rosetta-upgrade` | Before/after agent test → expand the fact graph with discovered gaps → you decide accept / improve / roll back |
+| `rosetta-upgrade` | Two modes. **Benchmark** (default): before/after agent test → expand the fact graph with discovered gaps. **Refresh** (`--url`): research a framework's current state → diff vs the KB → bump the fact graph + docs to the latest version → re-inject into the triad. Both gate on accept / improve / roll back |
 
 ## Install
 
@@ -50,7 +50,10 @@ The script drops `skills/<name>/SKILL.md` into the harness's skills directory. I
 # In your agent session — create a KB for your stack, then validate and upgrade:
 /rosetta-bootstrap "GPUI" --repo-url https://github.com/zed-industries/zed --base-framework React
 /rosetta-validate gpui
-/rosetta-upgrade agents/gpui-implementer/agent.md
+/rosetta-upgrade agents/gpui-implementer/agent.md          # Mode A — benchmark + expand
+
+# Later, when the framework ships a new version, refresh the KB from a URL:
+/rosetta-upgrade gpui --url https://zed.dev/docs/gpui      # Mode B — research latest, diff, bump, re-inject
 ```
 
 (Use the namespaced `/agentic-rosetta:rosetta-*` form if you installed the native Claude Code plugin.)
@@ -75,6 +78,27 @@ rosetta-bootstrap          rosetta-validate          rosetta-upgrade
         │   (never required)               discovered gaps
         └──────────────────────────────►  (accept / improve / roll back)
 ```
+
+### Keeping a KB current — `rosetta-upgrade --url` (Refresh mode)
+
+Bootstrapping pins a KB to a framework version. When the framework moves, point the same skill at a URL to bring the KB **and** the agents that embed it up to date:
+
+```
+/rosetta-upgrade electron --url https://www.electronjs.org/docs/latest/breaking-changes
+
+  snapshot old graph → research latest (rosetta-research) → diff → bump fact graph + docs
+  → re-inject into the planner/implementer/reviewer triad → re-validate → accept / improve / roll back
+```
+
+**How version history is held** — so the agent has context on what changed without bloating the always-on graph:
+
+| Artifact | Role |
+|---|---|
+| `.rosetta/docs/{tech}/fact-graph.json` | **Latest only** — stays lean (~800 tokens), always injected |
+| `.rosetta/docs/{tech}/.history/{date}-v{n}.json` | **Snapshot** of the prior graph before each refresh (audit + rollback) |
+| `.rosetta/docs/{tech}/MIGRATION.md` | **Per-version changelog** — what's new / changed / deprecated (old→new), loaded on demand |
+
+The agent learns the "new hotness" because every old→new transition is folded into the fact graph's `x` (anti-pattern) section as a **version-tagged false friend** — e.g. `"electron-trpc (pre-v43)" → "native ipc (v43+)"` — so it actively avoids the deprecated API. Old transitions age out of the lean graph into `MIGRATION.md`.
 
 ## Research MCPs (optional)
 

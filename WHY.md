@@ -102,6 +102,26 @@ The `rosetta-upgrade` skill implements a continuous improvement cycle:
 
 This means the Rosetta KB improves with every use. The fact graph grows organically from discovered gaps rather than being hand-crafted in advance.
 
+## Keeping Knowledge Current: The Versioning Model
+
+The Dynamic Research Loop makes a KB *richer* at a fixed framework version. But frameworks move — and a KB pinned at bootstrap time silently rots. `rosetta-upgrade --url` (Refresh mode) moves the knowledge *forward in time*: research the current docs, diff against the KB, bump the fact graph, and re-inject into the agent triad.
+
+The design constraint is that `fact-graph.json` is injected **verbatim into every agent's working memory**, so it must stay lean. It cannot carry per-fact history (`added_in` / `deprecated_in` / `source` on every entry) without blowing the ~800-token budget that makes always-on injection viable. So history lives in three sidecar artifacts, each with one job:
+
+| Artifact | Job |
+|---|---|
+| `fact-graph.json` | **Latest only.** Always reflects the current version. Lean + always-on. |
+| `.history/{date}-v{n}.json` | **Hold old info.** A snapshot of the prior graph before each refresh — auditable, and the rollback target. |
+| `MIGRATION.md` | **Index the changes.** One section per refresh: new / changed / deprecated (old→new table) + sources. Loaded on demand. |
+
+The key insight: the most decision-relevant kind of version awareness for a code generator is *"the API I'd reflexively reach for is now deprecated."* That is structurally identical to an anti-pattern — a **wrong → right pair** — which already has a home in the fact graph's `x` section. So a version transition is recorded as a version-tagged anti-pattern:
+
+```json
+"x": { "electron-trpc (pre-v43)": "native ipc invoke/handle (v43+) — unmaintained" }
+```
+
+The agent avoids the stale API through the same channel it already trusts for false friends — no new mechanism, no extra always-on tokens beyond the single line. **Deprecation aging** keeps only the most recent transition in the lean graph; older ones retire to `MIGRATION.md`. This is the lean-current philosophy applied to time: the graph is always "now," and the past is one `git`-tracked snapshot and one on-demand doc away.
+
 ## What Rosetta Replaces
 
 | Without Rosetta | With Rosetta |
