@@ -1,7 +1,7 @@
 ---
 name: rosetta-research
 description: "Research an unknown technology for a Rosetta KB. 3-tier graceful degradation: delegate to /assimilate or /deep-research when present, else premium research MCPs (jina/exa) when provisioned, else built-in WebSearch/WebFetch/Read — always emits the same normalized research artifact. Trigger: /rosetta-research {tech} [{repo-url}]"
-allowed-tools: WebSearch, WebFetch, Read, Task, mcp__jina__search_web, mcp__jina__parallel_search_web, mcp__jina__read_url, mcp__jina__parallel_read_url, mcp__jina__expand_query, mcp__jina__extract_pdf, mcp__exa__web_search_exa, mcp__exa__get_code_context_exa, mcp__holocron__storeDocumentTool, mcp__holocron__hybridSearchTool
+allowed-tools: WebSearch, WebFetch, Read, Task, mcp__jina__search_web, mcp__jina__parallel_search_web, mcp__jina__read_url, mcp__jina__parallel_read_url, mcp__jina__expand_query, mcp__jina__extract_pdf, mcp__exa__web_search_exa, mcp__holocron__storeDocumentTool, mcp__holocron__hybridSearchTool
 ---
 
 # Rosetta Research
@@ -65,7 +65,7 @@ TIER 1 — DELEGATE TO RESEARCH SKILLS (best fidelity, optional)
 TIER 2 — SELF-CONTAINED LOOP ON PREMIUM MCPs (optional)
   Detected by try-and-fallback on first call (never a precondition flag).
   REPO ANALYSIS:
-    TRY mcp__exa__get_code_context_exa(
+    TRY mcp__exa__web_search_exa(
           query="{tech} architecture state routing async testing", repo hint)
     + mcp__jina__read_url on README / docs / key files discovered
     FALLBACK to Tier-3 fetch if a call errors.
