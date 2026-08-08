@@ -104,6 +104,27 @@ The agent learns the "new hotness" because every old→new transition is folded 
 
 `rosetta-research` is better with [Jina](https://jina.ai) and [Exa](https://exa.ai) MCP servers and a holocron store, but **requires none of them**. With nothing configured, it runs entirely on the built-in `WebSearch` / `WebFetch` / `Read` tools. Every fact it returns traces to a real source — it never fabricates or stubs; unknowns are recorded as gaps.
 
+## Where things get stored
+
+By default everything stays in the project you run a skill in — install and change nothing, and
+nothing moves. If you'd rather keep research notes (or probe catalogs, or knowledge bases) centrally,
+each class is independently configurable:
+
+```jsonc
+// ~/.rosetta/config.json   (created by install.sh; a project can override it)
+{ "version": 1, "roots": { "default": "project", "research": "~/Projects/my-brain" } }
+```
+
+Precedence: CLI flag > project config > device config > built-in `project`. Root values are
+`project`, `device` (`~/.rosetta`), or any path. See **[CONFIG.md](CONFIG.md)** for the schema,
+the read-side search order, `doctor` (find + move stranded artifacts), and one real caveat about
+pointing `docs` away from the repo that owns your agents.
+
+```bash
+python3 ~/.rosetta/bin/rosetta_config.py show --format plain   # what are my roots?
+python3 ~/.rosetta/bin/rosetta_config.py doctor                # anything stranded?
+```
+
 ## Uninstall
 
 ```bash

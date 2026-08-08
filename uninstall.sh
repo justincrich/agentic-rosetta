@@ -28,6 +28,16 @@ harness_root_for() {
   esac
 }
 
+PURGE=0
+ARGS=""
+for a in "$@"; do
+  case "$a" in
+    --purge) PURGE=1 ;;
+    *) ARGS="$ARGS $a" ;;
+  esac
+done
+set -- $ARGS
+
 ARG="${1:-all}"
 case "$ARG" in
   all)
@@ -40,7 +50,10 @@ case "$ARG" in
     TARGETS="$ARG"
     ;;
   -h|--help)
-    echo "Usage: ./uninstall.sh [claude|codex|opencode|pi|droid|all]"
+    echo "Usage: ./uninstall.sh [claude|codex|opencode|pi|droid|all] [--purge]"
+    echo "  --purge  also delete \$ROSETTA_HOME (default ~/.rosetta): your config and any"
+    echo "           artifacts stored under the 'device' root. Off by default — that"
+    echo "           directory holds YOUR data, not the plugin's."
     exit 0
     ;;
   *)
@@ -70,4 +83,16 @@ for h in $TARGETS; do
   echo
 done
 
+ROSETTA_HOME_DIR="${ROSETTA_HOME:-$HOME/.rosetta}"
+if [ "$PURGE" = "1" ]; then
+  if [ -d "$ROSETTA_HOME_DIR" ]; then
+    rm -rf "${ROSETTA_HOME_DIR:?}"     # ${VAR:?} guards against an empty variable
+    echo "purged $ROSETTA_HOME_DIR (config + any device-root artifacts)"
+  else
+    echo "(absent) $ROSETTA_HOME_DIR"
+  fi
+elif [ -d "$ROSETTA_HOME_DIR" ]; then
+  echo "Kept $ROSETTA_HOME_DIR (your config + device-root artifacts). Remove with --purge."
+fi
+echo
 echo "Done. (Your project .rosetta/ KBs were left untouched.)"

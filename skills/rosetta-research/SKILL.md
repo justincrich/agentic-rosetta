@@ -80,7 +80,8 @@ TIER 2 — SELF-CONTAINED LOOP ON PREMIUM MCPs (optional)
 TIER 3 — BUILT-IN FLOOR (always works) — see § Floor Loop
   WebSearch + WebFetch + Read only. SAME query set, SAME artifact.
 
-STORAGE (§ Storage): holocron if present, else .rosetta/research/{tech_slug}.md. Never blocks.
+STORAGE (§ Storage): holocron if present, else the RESOLVED research path (rosetta_config.py —
+  project by default, configurable to device or any path). Never blocks.
 
 BLOCKER (only if Tier 3 itself impossible):
   IF WebSearch AND WebFetch both unavailable AND repo_url unreadable:
@@ -102,7 +103,8 @@ Modeled on `deep-research` and `research` graceful-degradation patterns.
 | URL read timeout (>30s) | read error | skip URL, continue | stay in tier |
 | PDF extract fails | extract_pdf error | fall back to WebFetch / Read | stay/drop |
 | Zero search results | empty across providers | broaden query / variations; if still empty mark topic LOW + record gap | note gap, continue |
-| holocron store fails | store error | save `.rosetta/research/{tech}.md` | non-blocking |
+| holocron store fails | store error | save to the **resolved** research path (§ Storage) | non-blocking |
+| storage resolver absent | no `rosetta_config.py` on any lookup path | use `{PROJECT}/.rosetta/research/{tech}.md` and record `resolved_by: fallback:no-resolver` | non-blocking |
 | **Floor itself impossible** | WebSearch+WebFetch absent & no repo | **EMIT BLOCKER, do not stub** | return to caller |
 
 ---
@@ -176,7 +178,8 @@ depth: "quick|normal|deep"
 status: "complete | partial | BLOCKED"
 overall_confidence: "HIGH|MEDIUM|LOW"
 date: "{ISO-8601}"
-storage: { holocron_id: "{id|null}", local_path: ".rosetta/research/{tech_slug}.md" }
+storage: { holocron_id: "{id|null}", local_path: "{RESOLVED absolute path — see § Storage}",
+           resolved_by: "cli|project|device|builtin-default|project-fallback|fallback:no-resolver" }
 ---
 
 # Rosetta Research: {tech}
@@ -230,21 +233,53 @@ storage: { holocron_id: "{id|null}", local_path: ".rosetta/research/{tech_slug}.
 
 ## Storage (optional, non-blocking)
 
+> **NEVER hardcode the path.** Where an artifact lands is a configured decision, resolved by CODE so
+> it happens the same way every run. Ask the resolver; write where it says.
+
 ```
-TRY mcp__holocron__storeDocumentTool({
-      title: "Rosetta Research: {tech}",
-      content: {NRRA markdown},
-      metadata: { type:"research", method:"rosetta-research",
-                  tech:"{tech_slug}", tier:"{research_tier}",
-                  confidence:"{overall}", date:"{ISO}" }
-    })
-    → on success: set storage.holocron_id, DISPLAY id
-FALLBACK (holocron tool absent OR store errors):
-    SAVE NRRA to {PROJECT}/.rosetta/research/{tech_slug}.md
+[S1] RESOLVE THE DESTINATION (deterministic — always do this before writing)
+     RESOLVER=$(first existing of:
+        "$ROSETTA_CONFIG"                                  # explicit override
+        "<this skill's dir>/assets/rosetta_config.py"      # ships with the skill
+        "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py")
+     IF found:
+        DEST=$(python3 "$RESOLVER" path --class research --slug {tech_slug} --ensure)
+        META=$(python3 "$RESOLVER" show)        # for the storage: provenance below
+     ELSE (resolver absent — e.g. a partial install):
+        DEST="{PROJECT}/.rosetta/research/{tech_slug}.md"   # legacy behavior
+        RECORD storage.resolved_by = "fallback:no-resolver" and SAY SO in the report.
+
+[S2] TRY mcp__holocron__storeDocumentTool({
+       title: "Rosetta Research: {tech}",
+       content: {NRRA markdown},
+       metadata: { type:"research", method:"rosetta-research",
+                   tech:"{tech_slug}", tier:"{research_tier}",
+                   confidence:"{overall}", date:"{ISO}" }
+     })
+     → on success: set storage.holocron_id, DISPLAY id
+
+[S3] FALLBACK (holocron tool absent OR store errors):
+     SAVE NRRA to $DEST
+
 NEVER block the caller on storage outcome. The caller consumes the in-memory NRRA regardless.
 ```
 
-This is the ONE filesystem write this skill makes, alongside the existing `.rosetta/` tree (`.rosetta/docs`, `.rosetta/probes`). New subdir: `.rosetta/research/`.
+**Where `$DEST` comes from** — precedence, highest first (see `CONFIG.md`):
+
+| # | Source | Key |
+|---|---|---|
+| 1 | CLI flag | `--research-root` / `--root` |
+| 2 | `<project>/.rosetta/config.json` | `roots.research`, then `roots.default` |
+| 3 | `${ROSETTA_HOME:-~/.rosetta}/config.json` | `roots.research`, then `roots.default` |
+| 4 | built-in default | `project` |
+
+A root value is `project` (the repo you are in — the default, and the historical behavior),
+`device` (`~/.rosetta` itself), or any path such as `~/Projects/brain`.
+
+**The artifact must not lie about where it went.** `storage.local_path` records the *resolved*
+absolute path and `storage.resolved_by` records which tier decided it. If the configured root was
+unwritable, the resolver falls back to the project and flags it — carry that flag through, do not
+silently present a fallback as the intended destination.
 
 ---
 

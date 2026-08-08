@@ -21,6 +21,22 @@ INPUT: repository_url (optional — auto-discover if omitted)
 INPUT: base_framework (e.g., "React", "SwiftUI", "Rust" — what to map FROM)
 INPUT: depth — quick | normal | deep
 
+[0] RESOLVE STORAGE ROOTS  (deterministic — do this FIRST, never hardcode a path)
+    Where artifacts land is configured, not assumed. Locate the resolver:
+        RESOLVER = first existing of
+          "$ROSETTA_CONFIG"                               # explicit override
+          "<this skill's dir>/assets/rosetta_config.py"    # ships with the skill
+          "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py"
+    Then bind the three roots used below:
+        KB_DIR     = $(python3 "$RESOLVER" path --class docs   --slug {tech_slug} --ensure)
+        PROBES_MD  = $(python3 "$RESOLVER" path --class probes --slug {tech_slug} --ensure)
+        RESEARCH_MD= $(python3 "$RESOLVER" path --class research --slug {tech_slug})
+    Precedence: CLI flag > <project>/.rosetta/config.json > ~/.rosetta/config.json > "project".
+    Root values: "project" (default) | "device" | any path (e.g. ~/Projects/brain). See CONFIG.md.
+    IF the resolver is absent (partial install): fall back to the legacy project-local paths
+    ({PROJECT}/.rosetta/docs/{tech_slug}/ etc.) and SAY SO in the [9] REPORT — never pretend a
+    fallback was the configured destination.
+
 [1] PARSE
     • Convert technology_name → kebab-case tech_slug (this is the directory name)
     • If no repo_url → web search for canonical repository
@@ -38,8 +54,8 @@ INPUT: depth — quick | normal | deep
       and returns the Normalized Rosetta Research Artifact (NRRA): mental-model
       registers, components, hard rules, API signatures, anti-patterns, traits,
       version pins, gaps, sources.
-    • Storage is handled INSIDE rosetta-research (holocron if present, else
-      .rosetta/research/{tech_slug}.md). Do NOT block on it.
+    • Storage is handled INSIDE rosetta-research (holocron if present, else $RESEARCH_MD —
+      the resolved research path from [0]). Do NOT block on it.
     • CONSUME the NRRA as the assimilation context for steps [4]-[5].
 
 [3] GAP RESEARCH (if needed)  (delegates to rosetta-research — topic path)
@@ -63,7 +79,7 @@ INPUT: depth — quick | normal | deep
     • Identify false friends — patterns that LOOK correct but are SILENT TRAPS
 
 [5] EXTRACT FACT GRAPH
-    Create .rosetta/docs/{tech_slug}/fact-graph.json with 6 sections:
+    Create $KB_DIR/fact-graph.json with 6 sections:   ($KB_DIR from [0])
 
     v — VERSION: pkg name, version, commit hash, pinned date
     w — WIDGETS/COMPONENTS: catalog of building blocks
@@ -91,7 +107,7 @@ INPUT: depth — quick | normal | deep
     - Procedure with ordered steps → prose markdown
 
 [6] CREATE PROGRESSIVE-DISCLOSURE DOCS
-    Create .rosetta/docs/{tech_slug}/:
+    Create $KB_DIR/:   ($KB_DIR from [0] — NOT a hardcoded .rosetta/docs path)
 
     README.md — Router + Bootstrap
       - Header: "Why this exists" — training-coverage gap
@@ -119,7 +135,7 @@ INPUT: depth — quick | normal | deep
           (for reviewer agent)
       Each concept doc OPENS with its Rosetta row.
 
-    Probe catalog — .rosetta/probes/{tech_slug}.md
+    Probe catalog — $PROBES_MD   ($PROBES_MD from [0])
       - Seed from the plugin's reference/universal-anti-patterns.md (28 universal),
         specialized to {tech}'s idioms, plus any tech-specific traps the NRRA found
       - Format: id, name, pattern, required_fact, required_correction, severity

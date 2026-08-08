@@ -41,7 +41,7 @@ Both modes share the same safety spine: **back up before mutating, show the chan
 
 ```
 INPUT: agent_path       (e.g., agents/kotlin-implementer/agent.md)
-INPUT: rosetta_kb       (e.g., .rosetta/docs/kotlin/)
+INPUT: rosetta_kb       (optional explicit path; default = resolved $KB_DIR, see R1/[0])
 INPUT: challenge_id     (default: "universal-crud")
 
 ═══════════════ PHASE 1 — BACKUP ═══════════════
@@ -54,7 +54,8 @@ cp {agent_path} {agent_path}.pre-rosetta.bak
 [4] Scan output using the 28 UNIVERSAL ANTI-PATTERNS (carried inline in the
     rosetta-validate skill; canonical copy at the plugin's
     reference/universal-anti-patterns.md). If a per-tech probe catalog exists
-    at .rosetta/probes/{tech}.md, apply it too.
+    at the resolved probes path (`rosetta_config.py path --class probes --slug {tech}`),
+    apply it too.
 [5] Record baseline metrics:
     - anti_patterns_found: N
     - acceptance_criteria_passed: X/Y
@@ -125,21 +126,21 @@ For EACH remaining gap discovered in Phase 5:
      a) If it's a missing RULE:
         - Add to fact-graph.json → "r" section
         - Add to the "Hard Rules" section of the agent bootstrap
-        - Append to .rosetta/docs/{tech}/README.md hard rules list
+        - Append to $KB_DIR/README.md hard rules list
 
      b) If it's a missing ANTI-PATTERN:
         - Add to fact-graph.json → "x" section (wrong → right pair)
         - Add to the "False Friends" table of the agent bootstrap
-        - Append to .rosetta/docs/{tech}/ROSETTA.md
+        - Append to $KB_DIR/ROSETTA.md
 
      c) If a pattern is MISSING ENTIRELY (no existing concept doc):
         - Create a new concept doc in 3-lens format at
-          .rosetta/docs/{tech}/{concept-name}.md
+          $KB_DIR/{concept-name}.md
         - Add a "w" entry to fact-graph.json if it's a widget/component
         - Add to the doc map in agent bootstrap
 
      d) If it's a probe that SHOULD EXIST for this technology:
-        - Add to .rosetta/probes/{tech}.md
+        - Add to $PROBES_MD
         - This ensures future validate runs catch this gap
 
 [16] Example: discovered gap "Flow.collect inside suspend fun hangs forever"
@@ -222,11 +223,11 @@ This mode does **not** run a coding challenge. It is a *knowledge refresh*: rese
 
 The `fact-graph.json` is injected **verbatim into every agent's working memory**, so it must stay lean (~800 tokens). It therefore carries **no per-fact history**. Three artifacts hold and index version history instead, each with one job:
 
-| Artifact | Job | Lifetime |
+| Artifact (`$KB_DIR` = resolved docs root for this tech) | Job | Lifetime |
 |---|---|---|
-| `.rosetta/docs/{tech}/fact-graph.json` | **Latest only** — always reflects the current framework version. Stays lean + always-on. | overwritten each refresh |
-| `.rosetta/docs/{tech}/.history/{date}-v{kb_version}.json` | **Hold old info** — a deterministic snapshot of the prior fact graph, taken before each refresh. Auditable + enables rollback. | append-only archive |
-| `.rosetta/docs/{tech}/MIGRATION.md` | **Index the changes** — one section per refresh: what's new / changed / deprecated (old→new table) + source URLs. Loaded on demand. | append-only log |
+| `$KB_DIR/fact-graph.json` | **Latest only** — always reflects the current framework version. Stays lean + always-on. | overwritten each refresh |
+| `$KB_DIR/.history/{date}-v{kb_version}.json` | **Hold old info** — a deterministic snapshot of the prior fact graph, taken before each refresh. Auditable + enables rollback. | append-only archive |
+| `$KB_DIR/MIGRATION.md` | **Index the changes** — one section per refresh: what's new / changed / deprecated (old→new table) + source URLs. Loaded on demand. | append-only log |
 
 **How the agent becomes "aware of the new hotness" without bloating injection.** The most decision-relevant kind of version awareness for code generation is *"the thing I'd reflexively reach for is now deprecated."* That is exactly a **wrong → right pair**, which already has a home: the fact graph's `x` (anti-pattern) section. Every old→new transition becomes a **version-tagged `x` entry**:
 
@@ -248,23 +249,26 @@ INPUT: --base-framework  (optional; default: read from existing ROSETTA.md)
 INPUT: --depth           (quick | normal | deep — default: normal; passed through to rosetta-research)
 
 ═══════════════ R1 — RESOLVE & GUARD ═══════════════
-[1] Locate the KB: .rosetta/docs/{tech}/
+[1] RESOLVE ROOTS (as in rosetta-bootstrap [0]): bind $KB_DIR / $PROBES_MD via
+    `rosetta_config.py path --class docs|probes --slug {tech}`. Then LOCATE the KB with
+    `rosetta_config.py find --class docs --slug {tech}` (searches configured root, then
+    project, then device — so a KB written before the config existed is still found).
     IF missing → ERROR "No KB for {tech}. Run /rosetta-bootstrap {tech} first." STOP.
 [2] Read current state:
     - fact-graph.json  → capture v (version, pinned, kb_version)
       NOTE: KBs bootstrapped before Refresh mode may not carry kb_version in `v` — it lives in the
       README header ("KB version: 1.0.0"). If v.kb_version is absent, read it from the README line;
       default to "1.0.0". This first refresh ADDS kb_version (and supersedes) to the `v` section.
-    - README.md, ROSETTA.md, concept docs, .rosetta/probes/{tech}.md
+    - README.md, ROSETTA.md, concept docs, $PROBES_MD
 [3] Resolve the agent triad. Check BOTH layouts (same discovery Mode A uses for agent_path):
     - agents/{tech}-{planner,implementer,reviewer}/agent.md
     - .rosetta/sandbox/agents/{tech}-{role}/agent.md
     Record which roles actually exist; --role narrows the set (default: all existing).
 
 ═══════════════ R2 — SNAPSHOT (hold old info) ═══════════════   [deterministic]
-[4] cp .rosetta/docs/{tech}/fact-graph.json
-       → .rosetta/docs/{tech}/.history/{date}-v{old_kb_version}.json
-[5] Append to .rosetta/docs/{tech}/.history/manifest.json:
+[4] cp $KB_DIR/fact-graph.json
+       → $KB_DIR/.history/{date}-v{old_kb_version}.json
+[5] Append to $KB_DIR/.history/manifest.json:
        { "date": "{ISO}", "old_version": "{old_v}", "old_kb_version": "{old_kb}",
          "source_urls": [{--url values}], "status": "in-progress" }
     (This snapshot is the rollback target and the auditable record of "what it used to be.")
@@ -315,7 +319,7 @@ INPUT: --depth           (quick | normal | deep — default: normal; passed thro
        - PATTERNS & CODE lens → new API/snippets
        - REVIEW & GOTCHAS lens → add the deprecation as a false friend + scan-checklist item
        - Create a new concept doc (3-lens) for a genuinely new concept; add its row to the README doc map
-[14] Update probes: add the new version-transition anti-patterns to .rosetta/probes/{tech}.md
+[14] Update probes: add the new version-transition anti-patterns to $PROBES_MD
      (so future rosetta-validate runs catch a regression to the old API).
 [15] Write MIGRATION.md — PREPEND a section:
        ## {old_version} → {new_version} ({date})
