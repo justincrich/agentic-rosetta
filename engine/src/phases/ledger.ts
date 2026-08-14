@@ -20,6 +20,7 @@ export function buildLedger(opts: {
   spentUsd?: number;
   circuitBroken?: boolean;
   unabsorbedPointers?: number;
+  provenance?: import("../contract.ts").ProvenanceManifest;
 }): Ledger {
   const byId = new Map(opts.reports.map((r) => [r.directiveId, r]));
   const gapIds = new Set(opts.gaps.map((g) => g.directiveId).filter(Boolean));
@@ -67,6 +68,7 @@ export function buildLedger(opts: {
     warnings: opts.warnings ?? [],
     spentUsd: opts.spentUsd,
     circuitBroken: opts.circuitBroken ?? false,
+    provenance: opts.provenance,
   });
 }
 

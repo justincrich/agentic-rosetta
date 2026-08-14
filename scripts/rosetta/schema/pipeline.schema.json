@@ -259,10 +259,16 @@
       "maxUnits": {
         "type": "number"
       },
+      "docsMaxUnits": {
+        "type": "number"
+      },
       "maxBytes": {
         "type": "number"
       },
       "censusOnly": {
+        "type": "boolean"
+      },
+      "probeSources": {
         "type": "boolean"
       },
       "depth": {
@@ -847,6 +853,105 @@
       },
       "circuitBroken": {
         "type": "boolean"
+      },
+      "provenance": {
+        "type": "object",
+        "properties": {
+          "pins": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "repo",
+                    "docs"
+                  ]
+                },
+                "url": {
+                  "type": "string"
+                },
+                "ref": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": "string"
+                },
+                "describe": {
+                  "type": "string"
+                },
+                "fetched_at": {
+                  "type": "string"
+                },
+                "units": {
+                  "type": "number"
+                },
+                "corpus_sha256": {
+                  "type": "string"
+                },
+                "manifest_version": {
+                  "type": "string"
+                },
+                "version_source": {
+                  "type": "string"
+                },
+                "unitPins": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "locator": {
+                        "type": "string"
+                      },
+                      "sha256": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "number"
+                      },
+                      "etag": {
+                        "type": "string"
+                      },
+                      "lastModified": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "locator",
+                      "sha256"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "etag": {
+                  "type": "string"
+                },
+                "lastModified": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "fetched_at",
+                "units",
+                "corpus_sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "corpus_sha256": {
+            "type": "string"
+          },
+          "fetched_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pins",
+          "corpus_sha256"
+        ],
+        "additionalProperties": false
       }
     },
     "required": [
@@ -1044,6 +1149,105 @@
           },
           "circuitBroken": {
             "type": "boolean"
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "pins": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "repo",
+                        "docs"
+                      ]
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "ref": {
+                      "type": "string"
+                    },
+                    "commit": {
+                      "type": "string"
+                    },
+                    "describe": {
+                      "type": "string"
+                    },
+                    "fetched_at": {
+                      "type": "string"
+                    },
+                    "units": {
+                      "type": "number"
+                    },
+                    "corpus_sha256": {
+                      "type": "string"
+                    },
+                    "manifest_version": {
+                      "type": "string"
+                    },
+                    "version_source": {
+                      "type": "string"
+                    },
+                    "unitPins": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "locator": {
+                            "type": "string"
+                          },
+                          "sha256": {
+                            "type": "string"
+                          },
+                          "bytes": {
+                            "type": "number"
+                          },
+                          "etag": {
+                            "type": "string"
+                          },
+                          "lastModified": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "locator",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "etag": {
+                      "type": "string"
+                    },
+                    "lastModified": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "fetched_at",
+                    "units",
+                    "corpus_sha256"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "corpus_sha256": {
+                "type": "string"
+              },
+              "fetched_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pins",
+              "corpus_sha256"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -1199,6 +1403,105 @@
       },
       "blockReason": {
         "type": "string"
+      },
+      "provenance": {
+        "type": "object",
+        "properties": {
+          "pins": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "repo",
+                    "docs"
+                  ]
+                },
+                "url": {
+                  "type": "string"
+                },
+                "ref": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": "string"
+                },
+                "describe": {
+                  "type": "string"
+                },
+                "fetched_at": {
+                  "type": "string"
+                },
+                "units": {
+                  "type": "number"
+                },
+                "corpus_sha256": {
+                  "type": "string"
+                },
+                "manifest_version": {
+                  "type": "string"
+                },
+                "version_source": {
+                  "type": "string"
+                },
+                "unitPins": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "locator": {
+                        "type": "string"
+                      },
+                      "sha256": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "number"
+                      },
+                      "etag": {
+                        "type": "string"
+                      },
+                      "lastModified": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "locator",
+                      "sha256"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "etag": {
+                  "type": "string"
+                },
+                "lastModified": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "fetched_at",
+                "units",
+                "corpus_sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "corpus_sha256": {
+            "type": "string"
+          },
+          "fetched_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pins",
+          "corpus_sha256"
+        ],
+        "additionalProperties": false
       }
     },
     "required": [
@@ -1207,6 +1510,213 @@
       "nrra",
       "ledger",
       "reports"
+    ],
+    "additionalProperties": false
+  },
+  "CorpusUnit": {
+    "title": "CorpusUnit",
+    "type": "object",
+    "properties": {
+      "locator": {
+        "type": "string"
+      },
+      "sha256": {
+        "type": "string"
+      },
+      "bytes": {
+        "type": "number"
+      },
+      "etag": {
+        "type": "string"
+      },
+      "lastModified": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "locator",
+      "sha256"
+    ],
+    "additionalProperties": false
+  },
+  "SourcePin": {
+    "title": "SourcePin",
+    "type": "object",
+    "properties": {
+      "kind": {
+        "type": "string",
+        "enum": [
+          "repo",
+          "docs"
+        ]
+      },
+      "url": {
+        "type": "string"
+      },
+      "ref": {
+        "type": "string"
+      },
+      "commit": {
+        "type": "string"
+      },
+      "describe": {
+        "type": "string"
+      },
+      "fetched_at": {
+        "type": "string"
+      },
+      "units": {
+        "type": "number"
+      },
+      "corpus_sha256": {
+        "type": "string"
+      },
+      "manifest_version": {
+        "type": "string"
+      },
+      "version_source": {
+        "type": "string"
+      },
+      "unitPins": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "locator": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "number"
+            },
+            "etag": {
+              "type": "string"
+            },
+            "lastModified": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "locator",
+            "sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "etag": {
+        "type": "string"
+      },
+      "lastModified": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "fetched_at",
+      "units",
+      "corpus_sha256"
+    ],
+    "additionalProperties": false
+  },
+  "ProvenanceManifest": {
+    "title": "ProvenanceManifest",
+    "type": "object",
+    "properties": {
+      "pins": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "repo",
+                "docs"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "ref": {
+              "type": "string"
+            },
+            "commit": {
+              "type": "string"
+            },
+            "describe": {
+              "type": "string"
+            },
+            "fetched_at": {
+              "type": "string"
+            },
+            "units": {
+              "type": "number"
+            },
+            "corpus_sha256": {
+              "type": "string"
+            },
+            "manifest_version": {
+              "type": "string"
+            },
+            "version_source": {
+              "type": "string"
+            },
+            "unitPins": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "locator": {
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "type": "string"
+                  },
+                  "bytes": {
+                    "type": "number"
+                  },
+                  "etag": {
+                    "type": "string"
+                  },
+                  "lastModified": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "locator",
+                  "sha256"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "etag": {
+              "type": "string"
+            },
+            "lastModified": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "fetched_at",
+            "units",
+            "corpus_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "corpus_sha256": {
+        "type": "string"
+      },
+      "fetched_at": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "pins",
+      "corpus_sha256"
     ],
     "additionalProperties": false
   }

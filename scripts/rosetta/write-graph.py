@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """write-graph.py — the ONLY writer of fact-graph.json.
 
-  write-graph.py --create <tech> --nrra <f> --ledger <f> [--root DIR] [--out PATH]
+  write-graph.py --create <tech> --nrra <f> --ledger <f> [--root DIR] [--out PATH] [--source-repo DIR]
   write-graph.py --update <tech> --changeset <f> --ledger <f> [--nrra <f>] [--root DIR]
   write-graph.py --check  <tech> [--root DIR]
+  write-graph.py --adopt  <tech> [--root DIR]
 
-Gate (before either write mode acts):
+Gate (before create/update acts):
   1. ledger closed — closed + named-gap rows == censused
   2. ledger run_id matches the NRRA's run_id
   3. decoder_ring_hash present on both
 Any failure: exit non-zero, write nothing, name the failed check.
 
+--adopt stamps recoverable fields on a legacy graph; no ledger required.
 --check on an unstamped (legacy) graph warns, does not fail.
 """
 from __future__ import annotations
@@ -32,7 +34,9 @@ try:
 except ImportError:
     R = None  # type: ignore
 
-WRITER = "write-graph.py@1.0.0"
+import provenance as P
+
+WRITER = "write-graph.py@1.1.0"
 R_VERDICTS = {"r", "nr", "REJECT"}
 
 
@@ -113,12 +117,10 @@ def validate_graph(graph: dict) -> None:
     v = graph.get("v")
     if not isinstance(v, dict):
         _die("schema", "v missing")
-    for key in ("pkg", "version"):
-        if not v.get(key) and not v.get("kb_version"):
-            # kb_version is seeded on create; pkg/version may live under other keys
-            pass
-    if not v.get("kb_version") and not v.get("version"):
-        _die("schema", "v needs kb_version or version")
+    if not v.get("kb_version"):
+        _die("schema", "v needs kb_version")
+    if v.get("version") == "0.0.0":
+        _die("schema", 'v.version must not be the fake "0.0.0"')
     w = graph.get("w") or {}
     if not isinstance(w, dict):
         _die("schema", "w must be an object")
@@ -149,12 +151,27 @@ def validate_graph(graph: dict) -> None:
     for k, val in a.items():
         if not isinstance(val, str) or not val.strip():
             _die("schema", f"a.{k} must be a non-empty string")
+    t = graph.get("t")
+    if t is None:
+        graph["t"] = {}
+        t = graph["t"]
+    if not isinstance(t, dict):
+        _die("schema", "t must be an object")
+    for k, val in t.items():
+        if isinstance(val, str):
+            if not val.strip():
+                _die("schema", f"t.{k} must be a non-empty string")
+        elif isinstance(val, dict):
+            if not val:
+                _die("schema", f"t.{k} empty")
+        else:
+            _die("schema", f"t.{k} must be a string or object")
 
 
 def seed_from_nrra(nrra_text: str, tech: str) -> dict:
-    """Pull the §9 JSON seed if present; otherwise empty sections."""
+    """Pull the §9 JSON seed if present; otherwise empty sections. Never seeds 0.0.0."""
     m = re.search(r"## 9\. Fact-Graph Seed[\s\S]*?```json\n([\s\S]*?)```", nrra_text)
-    seed = {"v": {}, "w": {}, "r": {}, "a": {}, "x": {}, "t": {}}
+    seed: dict = {"v": {}, "w": {}, "r": {}, "a": {}, "x": {}, "t": {}}
     if m:
         try:
             parsed = json.loads(m.group(1))
@@ -166,10 +183,19 @@ def seed_from_nrra(nrra_text: str, tech: str) -> dict:
             pass
     v = seed["v"] if isinstance(seed["v"], dict) else {}
     v.setdefault("pkg", tech)
-    v.setdefault("version", "0.0.0")
+    if v.get("version") == "0.0.0":
+        v.pop("version", None)
     v["kb_version"] = "1.0.0"
     seed["v"] = v
     return seed
+
+
+def apply_derived_version(graph: dict, pins: list[dict], repo_path: Path | None) -> None:
+    ver, src = P.derive_upstream_version(pins, repo_path=repo_path)
+    v = graph.setdefault("v", {})
+    v["version"] = ver
+    v["version_source"] = src
+    v["pinned_date"] = date.today().isoformat()
 
 
 def stamp(graph: dict, ledger: dict) -> dict:
@@ -191,6 +217,11 @@ def stamp(graph: dict, ledger: dict) -> dict:
     return out
 
 
+def graph_sha(graph: dict) -> str:
+    body = {k: v for k, v in graph.items() if k != "_meta"}
+    return sha256_bytes(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
+
+
 def atomic_write(path: Path, obj: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
@@ -198,7 +229,42 @@ def atomic_write(path: Path, obj: dict) -> None:
     tmp.replace(path)
 
 
-def cmd_create(tech: str, nrra_path: Path, ledger_path: Path, root: Path, out: Path | None) -> int:
+def persist_siblings(
+    dest: Path,
+    graph: dict,
+    pins: list[dict],
+    fact_sources: dict,
+    status: str,
+) -> dict:
+    kb_dir = dest.parent
+    v = graph.get("v") or {}
+    prov = P.build_provenance(
+        kb_version=str(v.get("kb_version") or ""),
+        upstream_version=v.get("version"),
+        pins=pins,
+        status=status,
+        graph_sha256=graph_sha(graph),
+    )
+    P.write_siblings(kb_dir, provenance=prov, fact_sources=fact_sources)
+    P.upsert_readme_kb_line(kb_dir, graph, prov)
+    return prov
+
+
+def nrra_pins_and_sources(nrra_text: str) -> tuple[list[dict], dict]:
+    prov = P.parse_provenance_block(nrra_text)
+    pins = list(prov.get("pins") or prov.get("sources") or [])
+    sources = P.parse_fact_sources(nrra_text)
+    return pins, sources if isinstance(sources, dict) else {}
+
+
+def cmd_create(
+    tech: str,
+    nrra_path: Path,
+    ledger_path: Path,
+    root: Path,
+    out: Path | None,
+    source_repo: Path | None,
+) -> int:
     dest = out or graph_path(root, tech)
     if dest.is_file():
         _die("create", f"refusing to overwrite existing {dest}")
@@ -208,37 +274,60 @@ def cmd_create(tech: str, nrra_path: Path, ledger_path: Path, root: Path, out: P
     assert_ledger_closed(ledger)
     assert_ids_match(ledger, meta)
     graph = seed_from_nrra(nrra, tech)
+    pins, fact_sources = nrra_pins_and_sources(nrra)
+    apply_derived_version(graph, pins, source_repo)
     graph["_meta"] = {"technology": tech, "slug": tech}
     validate_graph(graph)
     graph = stamp(graph, ledger)
     atomic_write(dest, graph)
+    persist_siblings(dest, graph, pins, fact_sources, status="created")
     print(f"[write-graph] created {dest} kb_version={graph['v']['kb_version']}")
     return 0
 
 
-def cmd_update(tech: str, changeset_path: Path, ledger_path: Path, nrra_path: Path | None,
-               root: Path) -> int:
+def cmd_update(
+    tech: str,
+    changeset_path: Path,
+    ledger_path: Path,
+    nrra_path: Path | None,
+    root: Path,
+    source_repo: Path | None,
+) -> int:
     dest = graph_path(root, tech)
     if not dest.is_file():
         _die("update", f"no graph at {dest}")
     ledger = load_json(ledger_path)
+    pins: list[dict] = []
+    extra_sources: dict = {}
     if nrra_path:
-        meta = parse_nrra_frontmatter(nrra_path.read_text(encoding="utf-8"))
+        nrra_text = nrra_path.read_text(encoding="utf-8")
+        meta = parse_nrra_frontmatter(nrra_text)
         assert_ids_match(ledger, meta)
+        pins, extra_sources = nrra_pins_and_sources(nrra_text)
     else:
         if not ledger.get("run_id") or not ledger.get("decoder_ring_hash"):
             _die("decoder_ring_hash", "absent on ledger (pass --nrra to cross-check)")
     assert_ledger_closed(ledger)
     current = load_json(dest)
-    # Snapshot FIRST, before any mutation.
-    kb = str((current.get("v") or {}).get("kb_version") or "0.0.0")
+    old_snapshot = json.loads(json.dumps(current))
+    kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
     hist = dest.parent / ".history"
     hist.mkdir(parents=True, exist_ok=True)
     snap = hist / f"{date.today().isoformat()}-v{kb}.json"
     shutil.copy2(dest, snap)
 
     cs = load_json(changeset_path)
-    # only ≥ MEDIUM; never auto-apply needs_review
+    fact_sources: dict[str, dict] = {}
+    existing_fs = dest.parent / P.FACT_SOURCES_NAME
+    if existing_fs.is_file():
+        try:
+            loaded = json.loads(existing_fs.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                fact_sources = loaded
+        except json.JSONDecodeError:
+            fact_sources = {}
+    fact_sources.update(extra_sources)
+
     for section in ("v", "w", "r", "a", "x", "t"):
         added = (cs.get("added") or {}).get(section) or {}
         changed = (cs.get("changed") or {}).get(section) or {}
@@ -248,34 +337,87 @@ def cmd_update(tech: str, changeset_path: Path, ledger_path: Path, nrra_path: Pa
             bucket = {}
             current[section] = bucket
         for k, val in {**added, **changed}.items():
-            bucket[k] = val
+            core, src, conf = P.split_source(val)
+            bucket[k] = core
+            if src:
+                fact_sources[f"{section}:{k}"] = {
+                    "source": src,
+                    "confidence": conf or "MEDIUM",
+                }
         for k in deprecated:
             bucket.pop(k, None)
+            fact_sources.pop(f"{section}:{k}", None)
 
-    # age old x into MIGRATION.md (keep current-major only — we just append a section)
-    mig = dest.parent / "MIGRATION.md"
-    dep = (cs.get("deprecated") or {})
+    dep = cs.get("deprecated") or {}
     if dep:
-        block = f"\n## {date.today().isoformat()} ← v{kb}\n\n"
+        lines = []
         for section, items in dep.items():
             for k, val in (items or {}).items():
-                block += f"- deprecated `{section}.{k}`: {val}\n"
-        with mig.open("a", encoding="utf-8") as f:
-            f.write(block)
+                lines.append(f"- deprecated `{section}.{k}`: {val}")
+        srcs = P.source_urls(pins)
+        P.prepend_migration(
+            dest.parent / "MIGRATION.md",
+            f"{date.today().isoformat()} ← v{kb}",
+            lines,
+            srcs,
+        )
 
-    # bump
-    parts = kb.split(".")
-    try:
-        parts[-1] = str(int(parts[-1]) + 1)
-        new_kb = ".".join(parts)
-    except ValueError:
-        new_kb = kb + ".1"
+    apply_derived_version(current, pins, source_repo)
+    old_up = (old_snapshot.get("v") or {}).get("version")
+    new_up = (current.get("v") or {}).get("version")
+    new_kb = P.bump_kb_version(kb, old_snapshot, current, old_up, new_up)
     current.setdefault("v", {})["kb_version"] = new_kb
     current["v"]["supersedes"] = kb
     validate_graph(current)
     current = stamp(current, ledger)
     atomic_write(dest, current)
+    persist_siblings(dest, current, pins, fact_sources, status="updated")
     print(f"[write-graph] updated {dest} {kb} → {new_kb} (snapshot {snap.name})")
+    return 0
+
+
+def _readme_kb(kb_dir: Path) -> str | None:
+    readme = kb_dir / "README.md"
+    if not readme.is_file():
+        return None
+    m = re.search(r"\*\*KB version\*\*:\s*([0-9]+(?:\.[0-9]+)*)", readme.read_text(encoding="utf-8"))
+    return m.group(1) if m else None
+
+
+def cmd_adopt(tech: str, root: Path) -> int:
+    dest = graph_path(root, tech)
+    if not dest.is_file():
+        _die("adopt", f"no graph at {dest}")
+    graph = load_json(dest)
+    v = graph.setdefault("v", {})
+    if not isinstance(v, dict):
+        _die("adopt", "v is not an object")
+    if not v.get("kb_version"):
+        v["kb_version"] = _readme_kb(dest.parent) or "1.0.0"
+    if not v.get("pinned_date"):
+        v["pinned_date"] = str(v.get("pinned") or date.today().isoformat())
+    ver = v.get("version")
+    if ver in (None, "", "0.0.0"):
+        v["version"] = None
+        v["version_source"] = "legacy-unknown"
+    else:
+        v.setdefault("version_source", "legacy-unknown")
+    graph.setdefault("t", {})
+    try:
+        validate_graph(graph)
+    except GateError as e:
+        # Legacy graphs may predate current section checks; still stamp recoverables.
+        print(f"write-graph: WARN adopt schema ({tech}): {e}", file=sys.stderr)
+    atomic_write(dest, graph)
+    pins = [{
+        "kind": "legacy",
+        "status": "legacy-unknown",
+        "fetched_at": date.today().isoformat(),
+        "units": 0,
+        "corpus_sha256": P.corpus_digest([]),
+    }]
+    persist_siblings(dest, graph, pins, {}, status="legacy-unknown")
+    print(f"[write-graph] adopted {dest} kb_version={v['kb_version']} version_source={v['version_source']}")
     return 0
 
 
@@ -305,10 +447,12 @@ def main(argv: list[str]) -> int:
     p.add_argument("--create", metavar="TECH")
     p.add_argument("--update", metavar="TECH")
     p.add_argument("--check", metavar="TECH")
+    p.add_argument("--adopt", metavar="TECH")
     p.add_argument("--nrra", type=Path)
     p.add_argument("--ledger", type=Path)
     p.add_argument("--changeset", type=Path)
     p.add_argument("--out", type=Path, help="override dest path (create only)")
+    p.add_argument("--source-repo", type=Path, help="local tree used to derive v.version")
     args = p.parse_args(argv)
 
     root = Path(args.root).expanduser().resolve() if args.root else Path(
@@ -321,11 +465,13 @@ def main(argv: list[str]) -> int:
         if args.create:
             if not args.nrra or not args.ledger:
                 _die("usage", "--create needs --nrra and --ledger")
-            return cmd_create(args.create, args.nrra, args.ledger, root, args.out)
+            return cmd_create(args.create, args.nrra, args.ledger, root, args.out, args.source_repo)
         if args.update:
             if not args.changeset or not args.ledger:
                 _die("usage", "--update needs --changeset and --ledger")
-            return cmd_update(args.update, args.changeset, args.ledger, args.nrra, root)
+            return cmd_update(args.update, args.changeset, args.ledger, args.nrra, root, args.source_repo)
+        if args.adopt:
+            return cmd_adopt(args.adopt, root)
         if args.check:
             return cmd_check(args.check, root)
     except GateError as e:

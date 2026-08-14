@@ -126,6 +126,39 @@ export const LedgerMerge = z.object({
 });
 export type LedgerMerge = z.infer<typeof LedgerMerge>;
 
+export const CorpusUnit = z.object({
+  locator: z.string().min(1),
+  sha256: z.string().min(16),
+  bytes: z.number().int().nonnegative().optional(),
+  etag: z.string().optional(),
+  lastModified: z.string().optional(),
+});
+export type CorpusUnit = z.infer<typeof CorpusUnit>;
+
+export const SourcePin = z.object({
+  kind: z.enum(["repo", "docs"]),
+  url: z.string().optional(),
+  ref: z.string().optional(),
+  commit: z.string().optional(),
+  describe: z.string().optional(),
+  fetched_at: z.string().min(1),
+  units: z.number().int().nonnegative(),
+  corpus_sha256: z.string().min(16),
+  manifest_version: z.string().optional(),
+  version_source: z.string().optional(),
+  unitPins: z.array(CorpusUnit).optional(),
+  etag: z.string().optional(),
+  lastModified: z.string().optional(),
+});
+export type SourcePin = z.infer<typeof SourcePin>;
+
+export const ProvenanceManifest = z.object({
+  pins: z.array(SourcePin),
+  corpus_sha256: z.string().min(16),
+  fetched_at: z.string().optional(),
+});
+export type ProvenanceManifest = z.infer<typeof ProvenanceManifest>;
+
 export const Ledger = z.object({
   run_id: z.string(),
   tech: z.string(),
@@ -140,6 +173,7 @@ export const Ledger = z.object({
   warnings: z.array(z.string()).default([]),
   spentUsd: z.number().optional(),
   circuitBroken: z.boolean().default(false),
+  provenance: ProvenanceManifest.optional(),
 });
 export type Ledger = z.infer<typeof Ledger>;
 
@@ -162,6 +196,7 @@ export const ResearchRequest = z.object({
   docsMaxUnits: z.number().int().default(10),
   maxBytes: z.number().int().default(250_000),
   censusOnly: z.boolean().default(false),
+  probeSources: z.boolean().default(false),
   depth: z.enum(["quick", "normal", "deep"]).default("normal"),
   budget: z
     .object({
@@ -179,6 +214,7 @@ export const ResearchResult = z.object({
   ledger: Ledger,
   reports: z.array(WorkerReport),
   blockReason: z.string().optional(),
+  provenance: ProvenanceManifest.optional(),
 });
 export type ResearchResult = z.infer<typeof ResearchResult>;
 

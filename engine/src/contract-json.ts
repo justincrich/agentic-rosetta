@@ -5,12 +5,15 @@ import { fileURLToPath } from "node:url";
 import { zodToJsonSchema } from "./zod-json-schema.ts";
 import {
   CallerIdentity,
+  CorpusUnit,
   DecoderRing,
   Fact,
   Ledger,
+  ProvenanceManifest,
   ResearchDirective,
   ResearchRequest,
   ResearchResult,
+  SourcePin,
   WorkerReport,
 } from "./contract.ts";
 
@@ -27,6 +30,9 @@ const schemas = {
   WorkerReport,
   Ledger,
   ResearchResult,
+  CorpusUnit,
+  SourcePin,
+  ProvenanceManifest,
 } as const;
 
 const bundle: Record<string, unknown> = {

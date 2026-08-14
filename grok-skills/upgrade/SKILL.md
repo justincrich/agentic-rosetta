@@ -20,7 +20,7 @@ This skill has **two modes**, selected by whether `--url` is present:
 
 ```
 INVOCATION DISPATCH
-  IF args contain --url  → run § Mode B — Refresh Algorithm (R1–R8)
+  IF args contain --url  → run § Mode B — Refresh Algorithm (R0–R8)
   ELSE                   → run § Mode A — Benchmark Algorithm (Phases 1–7)
 ```
 
@@ -223,6 +223,17 @@ INPUT: --url             (1+ URLs: release notes / breaking-changes / migration 
 INPUT: --role            (planner | implementer | reviewer | all — default: all)
 INPUT: --base-framework  (optional; default: read from existing ROSETTA.md)
 INPUT: --depth           (quick | normal | deep — default: normal; passed through to rosetta-research)
+INPUT: --force           (optional; run the refresh even when the staleness probe reports *current*)
+
+═══════════════ R0 — PREFLIGHT (skip fanout when the source has not moved) ═══════════════   [deterministic]
+[0] IF $KB_DIR/provenance.json exists:
+       python3 "$PLUGIN/scripts/rosetta/provenance.py" --check-stale {tech} --root "$PROJECT"
+       exit 0  → sources are current. STOP unless --force is set.
+                 Report "KB already current (corpus unchanged); pass --force to re-research."
+       exit 10 → sources moved; continue to R1. Name the moved sources in the run log.
+       exit 1  → undeterminable (legacy-unknown / ls-remote failed). Continue to R1
+                 (do not treat as current).
+    IF no provenance.json (legacy graph): continue to R1.
 
 ═══════════════ R1 — RESOLVE & GUARD ═══════════════
 [1] RESOLVE + LOCATE THE KB (never hardcode the path)
@@ -275,11 +286,22 @@ INPUT: --depth           (quick | normal | deep — default: normal; passed thro
 
     CHANGESET {
       version_delta: { old: {v}, new: {v} },
-      added:    [ { section, key, value, source } ],          # in fresh, absent in current; ≥ MEDIUM confidence ONLY
-      changed:  [ { section, key, old, new, source } ],       # same key, new value (API moved, rule flipped, version bumped)
-      deprecated:[ { key, old, new, source } ],               # current facts the research marks superseded/removed
-      needs_review: [ { note, why } ]                         # unconfirmed / LOW confidence — surfaced, never auto-applied
+      # dict keyed by section (NOT a list). write-graph.py reads
+      # (cs.get("added") or {}).get(section). Canonical shape:
+      # scripts/rosetta/test_write_graph.py
+      added: {
+        "r": { "new-rule": { "verdict": "r", "rule": "…", "source": "https://…", "confidence": "HIGH" } }
+      },
+      changed: {
+        "a": { "open": { "value": "open()", "source": "README.md:1", "confidence": "MEDIUM" } }
+      },
+      deprecated: {
+        "x": { "old-pair": "replacement" }
+      },
+      needs_review: [ { note, why } ]   # unconfirmed / LOW — surfaced, never auto-applied
     }
+    The mandated `source` field is stripped out of the graph value and written to
+    fact-sources.json keyed "section:key". Do NOT put source/confidence inside fact-graph.json.
 
     RULES:
     - Demote LOW-confidence findings to needs_review (mirror bootstrap's JSON-vs-prose rule).

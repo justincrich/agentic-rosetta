@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.3] — 2026-08-14
+
+### Added
+- **Source identity.** Census records git HEAD / `describe` / per-unit hashes (and
+  docs ETag / Last-Modified / body hash) as a `corpus_sha256`. Sibling
+  `provenance.json`, `fact-sources.json`, and `.history/manifest.json` sit next
+  to `fact-graph.json` — not inside it.
+- **`provenance.py --check-stale`.** Exit 0 current / 10 stale / 1 undeterminable.
+  `git ls-remote` for repos; conditional GET for docs.
+- **`--adopt`** stamps recoverable version fields on legacy graphs.
+- **`--probe-sources`** / `--repo-url` without a local path (shallow-clones or
+  names the clone failure).
+- Excerpt markers carry `upstream=` and `corpus=`. Shared `version_label.py`
+  accepts both `v.pinned` and `v.pinned_date`.
+
+### Changed
+- `kb_version` bump is derived (major / minor / patch) from the section diff.
+  Never write `"0.0.0"` as a fake upstream version.
+- Registry validate reports stored-vs-recomputed `kb_version` drift.
+- `rosetta-upgrade` Mode B gains R0 PREFLIGHT; R4 changeset is dict-keyed-by-section.
+
 ## [0.4.2] — 2026-08-14
 
 ### Fixed

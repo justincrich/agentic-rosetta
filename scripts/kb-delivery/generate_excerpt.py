@@ -40,6 +40,11 @@ import os
 import sys
 from pathlib import Path
 
+_ROSETTA = Path(__file__).resolve().parent.parent / "rosetta"
+if str(_ROSETTA) not in sys.path:
+    sys.path.insert(0, str(_ROSETTA))
+from version_label import format_kb_version  # noqa: E402
+
 
 def discover_repo_root(explicit: str | Path | None = None) -> Path:
     """Resolve the target project. Never hardcodes ~/Projects/brain.
@@ -223,25 +228,43 @@ def resolve_graphs(agent_name_or_path: str) -> tuple[list[tuple[Path, str]], str
 
 
 def kb_version(graph: dict, raw_bytes: bytes) -> str:
-    """Stable version label: human version + pinned date + short content hash.
+    """Stable version label — shared with registry via version_label.py.
 
-    The content hash detects graph drift: if the file changes, kb_version changes, and the
-    warehouse can see that two 'full' sessions ran against different graphs."""
-    meta = graph.get("_meta", {})
-    version = (
-        graph.get("v", {}).get("kb_version")
-        or meta.get("version")
-        or graph.get("v", {}).get("version")
-        or "unknown"
+    Accepts ``v.pinned_date`` (new writes) or ``v.pinned`` (legacy)."""
+    return format_kb_version(graph, raw_bytes)
+
+
+def _corpus_short(path: Path | None) -> str:
+    if path is None:
+        return ""
+    prov = Path(path).parent / "provenance.json"
+    if not prov.is_file():
+        return ""
+    try:
+        return str(json.loads(prov.read_text(encoding="utf-8")).get("corpus_sha256") or "")[:8]
+    except Exception:
+        return ""
+
+
+def _upstream(graph: dict) -> str:
+    ver = (graph.get("v") or {}).get("version")
+    return "" if ver is None else str(ver)
+
+
+def begin_marker(
+    domain: str,
+    role: str,
+    version: str,
+    graph: dict,
+    path: Path | None = None,
+    fmt: str | None = None,
+) -> str:
+    extra = f' fmt="{fmt}"' if fmt else ""
+    return (
+        f'{BEGIN_MARKER} domain="{domain}" role="{role}" '
+        f'kb_version="{version}" upstream="{_upstream(graph)}" '
+        f'corpus="{_corpus_short(path)}"{extra}>'
     )
-    pinned = (
-        graph.get("v", {}).get("pinned_date")
-        or meta.get("pinned_date")
-        or ""
-    )
-    sha8 = hashlib.sha256(raw_bytes).hexdigest()[:8]
-    pinned_part = f" @ {pinned}" if pinned else ""
-    return f"{version}{pinned_part} sha:{sha8}"
 
 
 def condensed_excerpt(graph: dict, domain: str) -> str:
@@ -291,7 +314,7 @@ def _identity_block(graph: dict, domain: str) -> list[str]:
         or TECH_BY_DOMAIN.get(domain)
         or domain.replace("-", " ").title()
     )
-    skip = {"pinned_date"}
+    skip = {"pinned_date", "pinned", "version_source"}
     lines = [f"# {tech} — FULL fact-graph excerpt", ""]
     lines.append("## Platform identity")
     shown = 0
@@ -377,13 +400,13 @@ def full_excerpt(graph: dict, domain: str, role: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_embed(graph: dict, raw_bytes: bytes, domain: str, role: str) -> str:
+def render_embed(graph: dict, raw_bytes: bytes, domain: str, role: str, path: Path | None = None) -> str:
     """The body block embedded in ``agent.md``: dense render wrapped in rosetta-kb sentinels
     with kb_version stamped in the opening marker (so the drift guard can read the version
     without parsing the body)."""
     body = full_excerpt(graph, domain, role)
     version = kb_version(graph, raw_bytes)
-    begin = f'{BEGIN_MARKER} domain="{domain}" role="{role}" kb_version="{version}">'
+    begin = begin_marker(domain, role, version, graph, path)
     return f"{begin}\n{body}{END_MARKER}"
 
 
@@ -399,18 +422,23 @@ def _composite_version(items: list[tuple[dict, bytes, str]]) -> str:
     return f"merge[{len(items)}] sha:{h.hexdigest()[:8]}"
 
 
-def render_embed_multi(items: list[tuple[dict, bytes, str]], role: str) -> str:
+def render_embed_multi(
+    items: list[tuple[dict, bytes, str]],
+    role: str,
+    paths: list[Path | None] | None = None,
+) -> str:
     """Embed block for one or more graphs. N==1 renders exactly as ``render_embed`` (clean, no
     prefix). N>1 merges: a unioned REJECT quick-reference at the top (every domain's
     will-break-at-runtime rules surfaced first), then each graph's full per-role render under its
     own ``[slug]`` banner — separate sections mean no key can silently overwrite another."""
+    paths = paths or [None] * len(items)
     if len(items) == 1:
         graph, raw, slug = items[0]
-        return render_embed(graph, raw, slug, role)
+        return render_embed(graph, raw, slug, role, paths[0])
 
     slugs = [s for _, _, s in items]
     version = _composite_version(items)
-    begin = f'{BEGIN_MARKER} domain="{"|".join(slugs)}" role="{role}" kb_version="{version}">'
+    begin = begin_marker("|".join(slugs), role, version, items[0][0], paths[0])
 
     lines: list[str] = [f"# Merged fact-graph excerpt ({len(items)} graphs)", "", f"_Role: **{role}**_", ""]
     lines.append("## Hard rules — REJECT (unioned across all graphs; will break at runtime)")
@@ -445,7 +473,11 @@ def _strip_meta(graph: dict) -> dict:
     return {k: v for k, v in graph.items() if k != "_meta"}
 
 
-def render_embed_json(items: list[tuple[dict, bytes, str]], role: str) -> str:
+def render_embed_json(
+    items: list[tuple[dict, bytes, str]],
+    role: str,
+    paths: list[Path | None] | None = None,
+) -> str:
     """Embed block carrying the fact-graph(s) as minified JSON (the delivery default).
 
     N==1 → the bare graph object (minus ``_meta``), minified. N>1 → a slug-keyed map
@@ -456,6 +488,7 @@ def render_embed_json(items: list[tuple[dict, bytes, str]], role: str) -> str:
     Serialization is deterministic: ``json.loads`` preserves the file's key order and ``json.dumps``
     re-emits it with fixed separators, so the embedded form is a canonical minified copy regardless
     of the source file's whitespace — the drift guard's regenerate-and-compare stays stable."""
+    paths = paths or [None] * len(items)
     slugs = [s for _, _, s in items]
     version = _composite_version(items)
     domain_attr = "|".join(slugs)
@@ -470,7 +503,7 @@ def render_embed_json(items: list[tuple[dict, bytes, str]], role: str) -> str:
         raise ValueError(
             f"fact-graph for {domain_attr!r} contains the literal 'rosetta-kb:end' sentinel; refusing to embed"
         )
-    begin = f'{BEGIN_MARKER} domain="{domain_attr}" role="{role}" kb_version="{version}" fmt="json">'
+    begin = begin_marker(domain_attr, role, version, items[0][0], paths[0], fmt="json")
     return f"{begin}\n{body}\n{END_MARKER}"
 
 
@@ -500,24 +533,28 @@ def main(argv: list[str]) -> int:
 
     path: Path | None = None
     items: list[tuple[dict, bytes, str]] = []
+    item_paths: list[Path | None] = []
     role = args.role
     try:
         if args.agent:
             graph_paths, role = resolve_graphs(args.agent)
             if "--role" in argv:
                 role = args.role
-            for p, slug in graph_paths:
-                g, raw = _load_graph(p)
+            for pth, slug in graph_paths:
+                g, raw = _load_graph(pth)
                 items.append((g, raw, slug))
+                item_paths.append(pth)
             path = graph_paths[0][0]
         elif args.graph:
             path = Path(args.graph)
             g, raw = _load_graph(path)
             items.append((g, raw, args.domain))
+            item_paths.append(path)
         else:
             path = fact_graph_path(args.domain)
             g, raw = _load_graph(path)
             items.append((g, raw, args.domain))
+            item_paths.append(path)
     except FileNotFoundError as e:
         msg = str(e)
         if path is not None and str(path) in msg:
@@ -537,9 +574,9 @@ def main(argv: list[str]) -> int:
 
     if args.embed:
         if args.embed_format == "markdown":
-            print(render_embed_multi(items, role))
+            print(render_embed_multi(items, role, item_paths))
         else:
-            print(render_embed_json(items, role))
+            print(render_embed_json(items, role, item_paths))
         return 0
 
     # plain (non-embed) output: single-graph only (the A/B apparatus path)

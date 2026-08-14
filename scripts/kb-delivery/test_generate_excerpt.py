@@ -72,6 +72,8 @@ def main() -> int:
         check("embed-role", 'role="implementer"' in emb)
         check("embed-fmt-json", bool(emb_lines) and 'fmt="json"' in emb_lines[0])
         check("embed-version-in-marker", bool(emb_lines) and 'kb_version="' in emb_lines[0])
+        check("embed-upstream-attr", bool(emb_lines) and "upstream=" in emb_lines[0])
+        check("embed-corpus-attr", bool(emb_lines) and "corpus=" in emb_lines[0])
         check("embed-single-begin", emb.count("rosetta-kb:begin") == 1)
         check("embed-single-end", emb.count("rosetta-kb:end") == 1)
         check("embed-three-lines", len(emb_lines) == 3, f"(got {len(emb_lines)} lines)")
@@ -105,6 +107,18 @@ def main() -> int:
         cr = run("--agent", "cloudflare-rust-implementer", "--print-version").stdout.strip()
         cw = run("--domain", "cloudflare-workers", "--print-version").stdout.strip()
         check("agent-shared-graph", cr == cw, f"({cr} != {cw})")
+
+        # v.pinned (no pinned_date) still fills the @ date half
+        pinned_only = tmp / "pinned-only.json"
+        pinned_only.write_text(json.dumps({
+            "v": {"kb_version": "1.0.0", "pinned": "2026-03", "pkg": "toy"},
+            "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+        }))
+        sys.path.insert(0, str(PLUGIN / "scripts" / "kb-delivery"))
+        import generate_excerpt as GE  # noqa: E402
+        raw_p = pinned_only.read_bytes()
+        label = GE.kb_version(json.loads(raw_p), raw_p)
+        check("pinned-fallback-date", " @ 2026-03 " in label, f"({label})")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

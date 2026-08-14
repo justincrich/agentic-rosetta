@@ -1,13 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, posix, relative, sep } from "node:path";
 import {
   ResearchDirective,
   TerritoryClass,
   YIELDS_BY_CLASS,
+  type CorpusUnit,
   type ResearchRequest,
+  type SourcePin,
 } from "../contract.ts";
 import type { DecoderRing } from "../contract.ts";
+import { corpusDigest, sha256Bytes } from "../hash.ts";
 
 export type ClassifiedFile = {
   rel: string;
@@ -21,6 +25,7 @@ export type CensusResult = {
   merges: { kept: string; absorbed: string; class: TerritoryClass; reason: string }[];
   warnings: string[];
   perClass: Record<string, number>;
+  pins: SourcePin[];
 };
 
 const SKIP_DIR = new Set([
@@ -148,6 +153,129 @@ export function extractDocsUrls(text: string, baseHref: string): string[] {
     add(m[0]);
   }
   return out;
+}
+
+export function resolveRepoTree(sources: {
+  repoPath?: string;
+  repoUrl?: string;
+}): { path: string; cloned: boolean } {
+  if (sources.repoPath) return { path: sources.repoPath, cloned: false };
+  const url = sources.repoUrl;
+  if (!url) {
+    throw new Error(
+      "census: sourceMode includes repo but sources.repoPath is missing and sources.repoUrl is absent",
+    );
+  }
+  const dest = join(tmpdir(), `rosetta-clone-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const r = spawnSync("git", ["clone", "--depth", "1", url, dest], { encoding: "utf8" });
+  if (r.status !== 0) {
+    const detail = (r.stderr || r.stdout || "unknown error").trim();
+    throw new Error(`census: clone failed for ${url}: ${detail}`);
+  }
+  return { path: dest, cloned: true };
+}
+
+function gitOut(repo: string, args: string[]): string | undefined {
+  const r = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  if (r.status !== 0) return undefined;
+  const out = (r.stdout || "").trim();
+  return out || undefined;
+}
+
+function extractManifestVersion(repoPath: string): { version?: string; source?: string } {
+  const pkg = join(repoPath, "package.json");
+  if (existsSync(pkg)) {
+    try {
+      const ver = JSON.parse(readFileSync(pkg, "utf8")).version;
+      if (typeof ver === "string" && ver && ver !== "0.0.0") {
+        return { version: ver, source: "package.json" };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const cargo = join(repoPath, "Cargo.toml");
+  if (existsSync(cargo)) {
+    const m = readFileSync(cargo, "utf8").match(/^version\s*=\s*"([^"]+)"/m);
+    if (m && m[1] !== "0.0.0") return { version: m[1], source: "Cargo.toml" };
+  }
+  const py = join(repoPath, "pyproject.toml");
+  if (existsSync(py)) {
+    const m = readFileSync(py, "utf8").match(/^version\s*=\s*"([^"]+)"/m);
+    if (m && m[1] !== "0.0.0") return { version: m[1], source: "pyproject.toml" };
+  }
+  return {};
+}
+
+export function pinRepo(repoPath: string, url?: string): SourcePin {
+  const files = listRepoFiles(repoPath);
+  const units: CorpusUnit[] = [];
+  for (const f of files) {
+    const abs = join(repoPath, f.rel);
+    try {
+      const buf = readFileSync(abs);
+      units.push({ locator: f.rel, sha256: sha256Bytes(buf), bytes: buf.length });
+    } catch {
+      /* skip unreadable */
+    }
+  }
+  const digest = corpusDigest(units);
+  const manifest = extractManifestVersion(repoPath);
+  const describe = gitOut(repoPath, ["describe", "--tags", "--always"]);
+  const remote = gitOut(repoPath, ["remote", "get-url", "origin"]);
+  return {
+    kind: "repo",
+    url: url || remote,
+    ref: gitOut(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]) || "HEAD",
+    commit: gitOut(repoPath, ["rev-parse", "HEAD"]),
+    describe,
+    fetched_at: new Date().toISOString(),
+    units: units.length,
+    corpus_sha256: digest,
+    manifest_version: manifest.version,
+    version_source: manifest.source || (describe ? `git-describe:${describe}` : undefined),
+    unitPins: units,
+  };
+}
+
+async function fetchUnit(url: string): Promise<CorpusUnit | null> {
+  try {
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    return {
+      locator: url,
+      sha256: sha256Bytes(buf),
+      bytes: buf.length,
+      etag: res.headers.get("etag") ?? undefined,
+      lastModified: res.headers.get("last-modified") ?? undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function pinDocs(docsUrl: string, listed: { rel: string }[]): Promise<SourcePin> {
+  const units: CorpusUnit[] = [];
+  const primary = await fetchUnit(docsUrl);
+  if (primary) units.push(primary);
+  const extras = listed.map((f) => f.rel).filter((u) => u.startsWith("http") && u !== docsUrl);
+  const cap = extras.slice(0, 40);
+  const fetched = await Promise.all(cap.map((u) => fetchUnit(u)));
+  for (const u of fetched) {
+    if (u && !units.some((x) => x.locator === u.locator)) units.push(u);
+  }
+  const digest = corpusDigest(units);
+  return {
+    kind: "docs",
+    url: docsUrl,
+    fetched_at: new Date().toISOString(),
+    units: units.length,
+    corpus_sha256: digest,
+    etag: primary?.etag,
+    lastModified: primary?.lastModified,
+    unitPins: units,
+  };
 }
 
 export function unitsForTerritory(
@@ -447,7 +575,7 @@ export function groupIntoDirectives(
     warnings.push("zero enforcement AND zero scars rows — x will be thin; recorded, not blocking");
   }
 
-  return { directives, gaps, merges, warnings, perClass };
+  return { directives, gaps, merges, warnings, perClass, pins: [] };
 }
 
 export async function runCensus(
@@ -456,24 +584,27 @@ export async function runCensus(
 ): Promise<CensusResult> {
   const depth = bindDepth(req);
   const files: ClassifiedFile[] = [];
+  const pins: SourcePin[] = [];
 
   if (req.sourceMode === "repo" || req.sourceMode === "both") {
-    const repo = req.sources.repoPath;
-    if (!repo) throw new Error("census: sourceMode includes repo but sources.repoPath is missing");
-    for (const f of listRepoFiles(repo)) {
+    const tree = resolveRepoTree(req.sources);
+    for (const f of listRepoFiles(tree.path)) {
       files.push({ ...f, class: classifyPath(f.rel) });
     }
+    pins.push(pinRepo(tree.path, req.sources.repoUrl));
   }
   if (req.sourceMode === "docs" || req.sourceMode === "both") {
     const url = req.sources.docsUrl;
     if (!url) throw new Error("census: sourceMode includes docs but sources.docsUrl is missing");
-    for (const f of await listDocsUrls(url)) {
+    const listed = await listDocsUrls(url);
+    for (const f of listed) {
       files.push({
         rel: f.rel,
         bytes: f.bytes,
         class: f.rel.startsWith("http") ? classifyUrl(f.rel) : classifyPath(f.rel),
       });
     }
+    pins.push(await pinDocs(url, listed));
   }
 
   const groupOpts = {
@@ -484,11 +615,11 @@ export async function runCensus(
   };
 
   if (req.sourceMode === "docs") {
-    return groupIntoDirectives(files, {
+    return withPins(groupIntoDirectives(files, {
       ...groupOpts,
       kind: "urls",
       maxUnits: unitsForTerritory("urls", req),
-    });
+    }), pins);
   }
 
   if (req.sourceMode === "both") {
@@ -504,14 +635,18 @@ export async function runCensus(
       kind: "urls",
       maxUnits: unitsForTerritory("urls", req),
     });
-    return mergeCensusResults(pathResult, urlResult);
+    return withPins(mergeCensusResults(pathResult, urlResult), pins);
   }
 
-  return groupIntoDirectives(files, {
+  return withPins(groupIntoDirectives(files, {
     ...groupOpts,
     kind: "paths",
     maxUnits: unitsForTerritory("paths", { maxUnits: depth.maxUnits, docsMaxUnits: req.docsMaxUnits }),
-  });
+  }), pins);
+}
+
+function withPins(result: CensusResult, pins: SourcePin[]): CensusResult {
+  return { ...result, pins };
 }
 
 function mergeCensusResults(a: CensusResult, b: CensusResult): CensusResult {
@@ -531,6 +666,7 @@ function mergeCensusResults(a: CensusResult, b: CensusResult): CensusResult {
     merges: [...a.merges, ...b.merges],
     warnings: [...a.warnings, ...b.warnings],
     perClass,
+    pins: [...a.pins, ...b.pins],
   };
 }
 

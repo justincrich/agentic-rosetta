@@ -23,6 +23,19 @@ export function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+export function sha256Bytes(buf: Uint8Array | Buffer): string {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+/** Digest over sorted ``(locator, unit_sha256)`` pairs. Pure — no I/O. */
+export function corpusDigest(units: { locator: string; sha256: string }[]): string {
+  const pairs = units
+    .filter((u) => u.locator && u.sha256)
+    .map((u) => [u.locator, u.sha256] as const)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return sha256(canonicalJson(pairs));
+}
+
 export function hashDecoderRing(ring: Omit<DecoderRing, "hash">): string {
   return sha256(
     canonicalJson({

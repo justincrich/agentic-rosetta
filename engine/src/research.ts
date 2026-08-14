@@ -49,7 +49,8 @@ async function main(): Promise<number> {
   --max-directives N
   --max-usd N            circuit-breaker; omit = uncapped
   --census-only          A0–A2 only, spawn nothing
-  --out-dir DIR          write nrra.md + ledger.json
+  --probe-sources        census + source pins, spawn nothing; write provenance.json
+  --out-dir DIR          write nrra.md + ledger.json [+ provenance.json]
 `);
     return 0;
   }
@@ -105,6 +106,7 @@ async function main(): Promise<number> {
       ? Number(arg("--docs-max-units"))
       : (arg("--max-units") ? Number(arg("--max-units")) : 10),
     censusOnly: flag("--census-only"),
+    probeSources: flag("--probe-sources"),
     depth: (arg("--depth") as "quick" | "normal" | "deep") ?? "normal",
     budget: {
       maxDirectives: arg("--max-directives") ? Number(arg("--max-directives")) : 60,
@@ -123,6 +125,12 @@ async function main(): Promise<number> {
       blockReason: result.blockReason,
       ledger: result.ledger,
     }, null, 2) + "\n");
+    if (result.provenance) {
+      writeFileSync(
+        resolve(outDir, "provenance.json"),
+        JSON.stringify(result.provenance, null, 2) + "\n",
+      );
+    }
   }
 
   process.stdout.write(JSON.stringify({

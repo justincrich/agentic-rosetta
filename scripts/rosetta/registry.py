@@ -28,11 +28,12 @@ CLI:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
 from pathlib import Path
+
+from version_label import format_kb_version
 
 def discover_repo_root(explicit: str | Path | None = None) -> Path:
     """Resolve the target project. Never hardcodes ~/Projects/brain.
@@ -165,18 +166,34 @@ def _slug_for_agent(name: str, known_slugs: set[str] | None = None) -> str | Non
 
 
 def _kb_version(path: Path) -> str:
-    """Stable version label for a graph file (mirrors generate_excerpt.kb_version)."""
+    """Stable version label — shared with generate_excerpt via version_label.py."""
     try:
         raw = path.read_bytes()
         graph = json.loads(raw)
     except Exception:
         return "unknown"
-    meta = graph.get("_meta", {})
-    v = graph.get("v", {})
-    version = v.get("kb_version") or meta.get("version") or v.get("version") or "unknown"
-    pinned = v.get("pinned_date") or meta.get("pinned_date") or ""
-    sha8 = hashlib.sha256(raw).hexdigest()[:8]
-    return f"{version}{' @ ' + pinned if pinned else ''} sha:{sha8}"
+    return format_kb_version(graph, raw)
+
+
+def _provenance_fields(path: Path) -> tuple[object, object]:
+    """upstream_version + corpus_sha256 from the graph / sibling provenance.json."""
+    upstream = None
+    corpus = None
+    try:
+        graph = json.loads(path.read_bytes())
+        upstream = (graph.get("v") or {}).get("version")
+    except Exception:
+        pass
+    prov_path = path.parent / "provenance.json"
+    if prov_path.is_file():
+        try:
+            prov = json.loads(prov_path.read_text(encoding="utf-8"))
+            if upstream is None:
+                upstream = prov.get("upstream_version")
+            corpus = prov.get("corpus_sha256")
+        except Exception:
+            pass
+    return upstream, corpus
 
 
 def _technology(path: Path) -> str:
@@ -209,10 +226,13 @@ def scan() -> dict:
     for path, slug in _iter_fact_graphs():
         rel = str(path.relative_to(REPO_ROOT))
         if slug not in graphs:
+            upstream, corpus = _provenance_fields(path)
             graphs[slug] = {
                 "path": rel,
                 "technology": _technology(path),
                 "kb_version": _kb_version(path),
+                "upstream_version": upstream,
+                "corpus_sha256": corpus,
                 "shared_from": None,
             }
         else:
@@ -337,6 +357,18 @@ def validate() -> dict:
         for name in g.get("consumers", []):
             if not (AGENTS_DIR / name / "agent.md").is_file():
                 errors.append(f"consumer agent missing: {slug} -> {name}")
+
+    # stored kb_version label vs recomputed from the graph bytes
+    for slug, g in reg.get("graphs", {}).items():
+        p = REPO_ROOT / g.get("path", "")
+        if not p.is_file():
+            continue
+        stored = g.get("kb_version")
+        recomputed = _kb_version(p)
+        if stored and stored != recomputed:
+            errors.append(
+                f"kb_version drift {slug}: stored={stored!r} recomputed={recomputed!r}"
+            )
 
     return {"ok": not errors, "errors": errors}
 

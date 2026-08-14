@@ -1,4 +1,5 @@
-import type { DecoderRing, Ledger, ResearchRequest, WorkerReport } from "../contract.ts";
+import type { DecoderRing, Ledger, ProvenanceManifest, ResearchRequest, SourcePin, WorkerReport } from "../contract.ts";
+import { corpusDigest } from "../hash.ts";
 import { reconcile } from "./reconcile.ts";
 
 export function emitNrra(opts: {
@@ -8,6 +9,7 @@ export function emitNrra(opts: {
   reports: WorkerReport[];
   runId: string;
   status: "complete" | "partial" | "BLOCKED";
+  pins?: SourcePin[];
 }): string {
   const rec = reconcile(opts.reports);
   const v = rec.promoted.filter((f) => f.section === "v");
@@ -30,6 +32,20 @@ export function emitNrra(opts: {
     : rec.promoted.length ? "MEDIUM" : "LOW";
 
   const sources = [...new Set(rec.promoted.map((f) => f.source))];
+  const factSources: Record<string, { source: string; confidence: string }> = {};
+  for (const f of rec.promoted) {
+    factSources[`${f.section}:${f.key}`] = { source: f.source, confidence: f.confidence };
+  }
+  const pins = opts.pins ?? opts.ledger.provenance?.pins ?? [];
+  const provenance: ProvenanceManifest = opts.ledger.provenance ?? {
+    pins,
+    corpus_sha256: pins.length
+      ? (pins.length === 1 ? pins[0].corpus_sha256 : corpusDigest(
+          pins.flatMap((p) => (p.unitPins ?? []).map((u) => ({ locator: u.locator, sha256: u.sha256 }))),
+        ))
+      : corpusDigest([]),
+    fetched_at: new Date().toISOString(),
+  };
 
   return `---
 artifact: rosetta-research
@@ -88,11 +104,21 @@ ${opts.reports.map((rep) => `- ${rep.directiveId} ${rep.status} facts=${rep.fact
 ${JSON.stringify(seed, null, 2)}
 \`\`\`
 
-## 10. Gaps & Unknowns
+## 9b. Fact Sources
+\`\`\`json
+${JSON.stringify(factSources, null, 2)}
+\`\`\`
+
+## 10. Provenance
+\`\`\`json
+${JSON.stringify(provenance, null, 2)}
+\`\`\`
+
+## 11. Gaps & Unknowns
 ${opts.ledger.gaps.map((g) => `- ${g.territory}: ${g.reason}`).join("\n") || "- (none)"}
 ${rec.demoted.map((f) => `- LOW ${f.section}:${f.key} (${f.source})`).join("\n")}
 
-## 11. Sources
+## 12. Sources
 ${sources.map((s, i) => `[${i + 1}] ${s}`).join("\n") || "(none)"}
 
 ## Ledger

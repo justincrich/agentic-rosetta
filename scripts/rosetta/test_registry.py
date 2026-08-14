@@ -92,6 +92,14 @@ def main() -> int:
         res2 = R.validate()
         check("validate-catches-missing", not res2["ok"] and any("no-such-slug" in e for e in res2["errors"]),
               f"({res2})")
+        # stored kb_version disagrees with a recompute → drift
+        drifted = R.scan()
+        slug = next(iter(drifted["graphs"]))
+        drifted["graphs"][slug]["kb_version"] = "DRIFT-SENTINEL"
+        R.write(drifted)
+        res3 = R.validate()
+        check("validate-kb-version-drift", not res3["ok"] and any("kb_version drift" in e for e in res3["errors"]),
+              f"({res3})")
         R.write(R.scan())  # restore
 
         # CLI against the fixture root
