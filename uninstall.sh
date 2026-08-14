@@ -4,14 +4,15 @@
 # Never deletes a whole skills dir; never touches user KBs or .rosetta/.
 set -euo pipefail
 
-ROSETTA_SKILLS="rosetta-bootstrap rosetta-research rosetta-validate rosetta-upgrade"
-ALL_HARNESSES="claude codex opencode pi droid"
+ROSETTA_SKILLS="rosetta-bootstrap rosetta-research rosetta-validate rosetta-upgrade rosetta-sync rosetta-ab-test rosetta-stress-test"
+ALL_HARNESSES="claude codex opencode grok pi droid"
 
 skills_dir_for() {
   case "$1" in
     claude)   echo "$HOME/.claude/skills" ;;
     codex)    echo "$HOME/.codex/skills" ;;
     opencode) echo "$HOME/.config/opencode/skills" ;;
+    grok)     echo "$HOME/.grok/skills" ;;
     pi)       echo "$HOME/.pi/agent/skills" ;;
     droid)    echo "$HOME/.factory/skills" ;;
     *)        return 1 ;;
@@ -22,6 +23,7 @@ harness_root_for() {
     claude)   echo "$HOME/.claude" ;;
     codex)    echo "$HOME/.codex" ;;
     opencode) echo "$HOME/.config/opencode" ;;
+    grok)     echo "$HOME/.grok" ;;
     pi)       echo "$HOME/.pi/agent" ;;
     droid)    echo "$HOME/.factory" ;;
     *)        return 1 ;;
@@ -46,11 +48,11 @@ case "$ARG" in
       [ -d "$(harness_root_for "$h")" ] && TARGETS="$TARGETS $h"
     done
     ;;
-  claude|codex|opencode|pi|droid)
+  claude|codex|opencode|grok|pi|droid)
     TARGETS="$ARG"
     ;;
   -h|--help)
-    echo "Usage: ./uninstall.sh [claude|codex|opencode|pi|droid|all] [--purge]"
+    echo "Usage: ./uninstall.sh [claude|codex|opencode|grok|pi|droid|all] [--purge]"
     echo "  --purge  also delete \$ROSETTA_HOME (default ~/.rosetta): your config and any"
     echo "           artifacts stored under the 'device' root. Off by default — that"
     echo "           directory holds YOUR data, not the plugin's."

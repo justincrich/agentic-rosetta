@@ -1,0 +1,335 @@
+{
+  "_meta": {
+    "technology": "Cloudflare Workers",
+    "base_framework": "Node.js / Express",
+    "version": "wrangler@4, workers-runtime@2026-04",
+    "pinned_date": "2026-07-22",
+    "confidence": "HIGH",
+    "sources": [
+      "https://developers.cloudflare.com/workers/",
+      "https://developers.cloudflare.com/workers/platform/limits",
+      "https://developers.cloudflare.com/workers/wrangler/configuration",
+      "https://developers.cloudflare.com/workers/runtime-apis/bindings/",
+      "https://developers.cloudflare.com/durable-objects/api/",
+      "https://developers.cloudflare.com/d1/",
+      "https://developers.cloudflare.com/r2/",
+      "https://developers.cloudflare.com/kv/",
+      "https://developers.cloudflare.com/queues/",
+      "https://developers.cloudflare.com/workflows/",
+      "https://developers.cloudflare.com/workers-ai/",
+      "https://developers.cloudflare.com/vectorize/",
+      "https://developers.cloudflare.com/hyperdrive/",
+      "https://developers.cloudflare.com/browser-rendering/",
+      "https://developers.cloudflare.com/analytics/analytics-engine/"
+    ],
+    "docs_map": "Per-product deep docs in this folder (load the doc(s) matching the task's bindings): d1.md, r2.md, kv.md, queues.md, durable-objects.md, workflows.md, workers-ai.md, vectorize.md, hyperdrive.md, browser-rendering.md, analytics-engine.md, cache.md, wrangler-commands.md, bindings.md, ROSETTA.md, handlers.md, testing.md, anti-patterns.md, product-patterns.md, sandbox.md, rust-path.md"
+  },
+
+  "v": {
+    "package": "wrangler",
+    "version": "^4",
+    "runtime": "V8 isolates (NOT Node.js)",
+    "languages": ["JavaScript", "TypeScript", "Python (beta)", "Rust (wasm)"],
+    "pinned_date": "2026-07-22",
+    "coverage": "platform-wide (Workers + D1 + R2 + KV + Queues + Durable Objects + Workflows + Workers AI + Vectorize + Hyperdrive + Browser Run + Analytics Engine + Cache) — see docs_map for per-product deep docs"
+  },
+
+  "w": {
+    "ExportedHandler": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Main worker entry: export default { fetch, scheduled, queue, email }",
+      "src": "runtime-apis/handlers"
+    },
+    "WorkerEntrypoint": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Base class for RPC service bindings; extends to expose methods to calling Workers",
+      "src": "runtime-apis/bindings/service-bindings/rpc"
+    },
+    "DurableObject": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Base class for stateful singletons with SQLite storage; replaces in-memory global state",
+      "src": "durable-objects/api/base"
+    },
+    "KVNamespace": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Eventually-consistent global key-value; for config, sessions, A/B flags — NOT for critical state",
+      "src": "kv/api"
+    },
+    "R2Bucket": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "S3-compatible object storage; zero egress cost; for files, images, large blobs",
+      "src": "r2/api/workers/workers-api-reference"
+    },
+    "D1Database": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Serverless SQLite at the edge; read-heavy workloads; env.DB.prepare().bind().first()",
+      "src": "d1/worker-api/d1-database"
+    },
+    "DurableObjectNamespace": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Factory for DO stubs via newUniqueId(), idFromName(), idFromString(); stub.fetch() for RPC",
+      "src": "durable-objects/api/base"
+    },
+    "Queue": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Message queue binding; env.QUEUE.send(body) / sendBatch(messages); consumer gets MessageBatch",
+      "src": "queues/configuration/javascript-apis"
+    },
+    "Ai": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Workers AI binding; env.AI.run('@cf/meta/llama-3.1-8b-instruct', { prompt })",
+      "src": "workers-ai"
+    },
+    "VectorizeIndex": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Vector DB binding; env.VECTORIZE.upsert([{id,values,metadata}]).query(values, {topK})",
+      "src": "vectorize"
+    },
+    "Hyperdrive": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Connection pooling for external Postgres/MySQL; env.HYPERDRIVE.connectionString",
+      "src": "hyperdrive"
+    },
+    "ExecutionContext": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "ctx parameter: waitUntil(promise) for post-response work (30s max), passThroughOnException()",
+      "src": "runtime-apis/context"
+    },
+    "ScheduledController": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "scheduled handler arg: controller.cron, controller.scheduledTime, controller.type",
+      "src": "runtime-apis/handlers/scheduled"
+    },
+    "MessageBatch": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "queue handler arg: batch.messages[], batch.queue, batch.ackAll(), batch.retryAll()",
+      "src": "queues/configuration/javascript-apis"
+    },
+    "EmailMessage": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "email handler arg: message.from, message.to, message.headers, message.forward(), message.setReject()",
+      "src": "runtime-apis/handlers/email"
+    },
+    "wrangler": {
+      "t": "cli",
+      "i": "wrangler",
+      "note": "CLI: wrangler dev, deploy, tail, d1, kv, r2, pages, versions; config via wrangler.toml/jsonc",
+      "src": "wrangler"
+    },
+    "Hono": {
+      "t": "sf",
+      "i": "hono",
+      "note": "Recommended router (~12KB): middleware, CORS, auth, validation; app.get('/path', handler)",
+      "src": "framework-guides/web-applications/hono"
+    },
+    "Sandbox": {
+      "t": "sf",
+      "i": "@cloudflare/sandbox",
+      "note": "Isolated code execution environments (containers). Worker→DO→Container. exec(), startProcess(), readFile(), writeFile(), interpreter, ports, tunnels, storage, backups, sessions, terminal. Paid plan only",
+      "src": "sandbox"
+    },
+    "SandboxInstance": {
+      "t": "sf",
+      "i": "@cloudflare/sandbox",
+      "note": "Created via getSandbox(env.Sandbox, 'id'). Each sandbox = isolated Ubuntu container with Python, Node.js, Git. Managed by a Durable Object",
+      "src": "sandbox/api/lifecycle"
+    },
+    "Workflow": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Durable multi-step orchestration. export class W extends WorkflowEntrypoint<Env,Params> { async run(event, step) {} }. Trigger via env.MY_WF.create({params}); step.do/sleep/sleepUntil/waitForEvent",
+      "src": "workflows/build/workers-api"
+    },
+    "WorkflowInstance": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "From env.MY_WF.create()/get(): id, status(), pause(), resume(), terminate({rollback?}), restart({from?}), sendEvent({type,payload})",
+      "src": "workflows/build/workers-api"
+    },
+    "D1PreparedStatement": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "env.DB.prepare(sql).bind(...). Methods: first(col?), all(), run() (=all), raw({columnNames?}). first() => null if no rows; add LIMIT 1 manually",
+      "src": "d1/worker-api/prepared-statements"
+    },
+    "BrowserRun": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Headless Chromium. env.BROWSER.quickAction('screenshot'|'pdf'|'content'|'markdown'|'json'|...,{url}); or puppeteer.launch(env.MYBROWSER) (needs nodejs_compat). Paid/limited",
+      "src": "browser-rendering/get-started"
+    },
+    "AnalyticsEngineDataset": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "Time-series analytics. env.METRICS.writeDataPoint({blobs:[labels], doubles:[values], indexes:[ONE sampling key]}). Query via SQL/GraphQL API",
+      "src": "analytics/analytics-engine/get-started"
+    },
+    "Cache": {
+      "t": "sf",
+      "i": "cloudflare:workers",
+      "note": "caches.default (or await caches.open('name')). put(req,res)/match(req,{ignoreMethod?})/delete(req). PER-DATACENTER (not replicated); match() never origin-fetches",
+      "src": "workers/runtime-apis/cache"
+    }
+  },
+
+  "r": {
+    "r_es_modules": "r",
+    "r_note": "ES modules format required (export default { fetch() }); service worker format deprecated",
+    "r_no_global_mutable_state": "REJECT",
+    "r_no_global_mutable_state_note": "V8 isolates reuse contexts across requests; mutable globals cause race conditions. Store data in KV/D1/DO, not module-level variables",
+    "r_no_blocking_io": "REJECT",
+    "r_no_blocking_io_note": "No fs, no child_process, no sync APIs (except DO storage.sql.exec). All I/O is async via fetch/streams",
+    "r_cpu_limits": "r",
+    "r_cpu_limits_note": "Free: 10ms CPU/request; Paid: 30s default, up to 5min (300s). Network wait does NOT count toward CPU. Exceed → Error 1102",
+    "r_memory_128mb": "r",
+    "r_memory_128mb_note": "128MB per isolate (not configurable). Use TransformStream to avoid buffering. Exceed → Error 1102",
+    "r_subrequest_limits": "r",
+    "r_subrequest_limits_note": "Free: 50/request; Paid: 10,000/request (up to 10M). Each redirect in chain counts. 6 simultaneous connections",
+    "r_worker_size": "r",
+    "r_worker_size_note": "Free: 3MB compressed; Paid: 10MB compressed. Check: wrangler deploy --dry-run --outdir bundled/",
+    "r_startup_1s": "r",
+    "r_startup_1s_note": "Global scope must execute within 1 second. Avoid expensive top-level initialization",
+    "r_kv_eventual_consistency": "r",
+    "r_kv_eventual_consistency_note": "KV writes propagate globally in ~60s. DO NOT use KV for critical state requiring immediate consistency — use Durable Objects",
+    "r_waitUntil_30s": "r",
+    "r_waitUntil_30s_note": "ctx.waitUntil() extends execution max 30 seconds AFTER response sent or client disconnects",
+    "r_cron_15min": "r",
+    "r_cron_15min_note": "Cron/scheduled handlers have 15-minute wall-clock limit. CPU limit applies separately",
+    "r_compatibility_date": "r",
+    "r_compatibility_date_note": "Must set compatibility_date in wrangler.toml (e.g., '2026-04-25'). Controls API behavior changes",
+    "r_nodejs_compat": "nr",
+    "r_nodejs_compat_note": "Add compatibility_flags = ['nodejs_compat'] to use Node.js APIs (Buffer, process, streams, etc.)",
+    "r_stream_responses": "r",
+    "r_stream_responses_note": "Always stream large responses via TransformStream/ReadableStream. Never buffer entire payloads into memory",
+    "r_do_cpu_configurable": "r",
+    "r_do_cpu_configurable_note": "DO CPU per invocation is 30s default, configurable to 5min via limits.cpu_ms in wrangler.toml. Each incoming request/WebSocket message resets the CPU timer",
+    "r_do_sqlite_10gb": "r",
+    "r_do_sqlite_10gb_note": "SQLite-backed DO: 10GB storage per DO (Paid), 1GB (Free). SQLITE_FULL error on write when full; reads+deletes still work. SQL limits: 100 cols, 2MB row, 100KB statement, 100 params",
+    "r_sandbox_paid_only": "r",
+    "r_sandbox_paid_only_note": "Sandbox SDK requires Workers Paid plan. Sandboxes run as Durable Objects + Containers. Use WebSocket transport (SANDBOX_TRANSPORT=websocket) when making many concurrent SDK calls to avoid subrequest limits",
+    "r_r2_strong_consistency": "r",
+    "r_r2_strong_consistency_note": "R2 writes + deletes are STRONGLY consistent — globally visible once the put()/delete() promise resolves (unlike KV). get() returns null for a missing key (not an error). list() paginates on `truncated`, not array length",
+    "r_kv_write_rate": "r",
+    "r_kv_write_rate_note": "KV: max 1 write per key per second (else 429); eventually consistent (~60s global). list() paginates on `list_complete`, not array length. Value ≤25 MiB; bulk write only via Wrangler/REST (not the binding)",
+    "r_workflows_step_memoization": "r",
+    "r_workflows_step_memoization_note": "All I/O MUST be inside step.do() — only step callbacks are persisted/retried/memoized. run() re-executes on replay; keep it deterministic. 10,000 steps/instance (raise to 25,000 via limits.steps). step.sleep doesn't count",
+    "r_vectorize_fixed_dims": "r",
+    "r_vectorize_fixed_dims_note": "Vectorize index dimensions + metric (cosine|euclidean|dot-product) are FIXED at creation and immutable. Query vector length must match; pass data[0] (not the {shape,data} wrapper) from AI.run",
+    "r_d1_single_threaded": "r",
+    "r_d1_single_threaded_note": "Each D1 DB is single-threaded (one query at a time); throughput ≈ 1/query-duration. SQLite dialect, NOT Postgres. 30s max query/batch; 6 simultaneous D1 connections per invocation",
+    "r_analytics_single_index": "r",
+    "r_analytics_single_index_note": "Analytics Engine writeDataPoint: exactly ONE index (sampling key) per point — more than one silently drops it. blobs=labels/dimensions, doubles=values, ordered positional arrays",
+    "r_storage_decision_matrix": "r",
+    "r_storage_decision_matrix_note": "Pick by need: relational SQL → D1; blobs/files (zero egress) → R2; edge KV cache (eventual) → KV; strongly-consistent singleton/coordination/WebSockets → Durable Objects; vectors → Vectorize; long multi-step → Workflows; async jobs → Queues; external PG/MySQL → Hyperdrive"
+  },
+
+  "a": {
+    "fetch_handler": "export default { async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> }",
+    "scheduled_handler": "export default { async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> }",
+    "queue_handler": "export default { async queue(batch: MessageBatch, env: Env, ctx: ExecutionContext): Promise<void> }",
+    "email_handler": "export default { async email(message: EmailMessage, env: Env, ctx: ExecutionContext): Promise<void> }",
+    "kv_get": "const value = await env.KV.get('key', { type: 'json' })",
+    "kv_put": "await env.KV.put('key', JSON.stringify(data), { expirationTtl: 3600 })",
+    "kv_list": "const keys = await env.KV.list({ prefix: 'user:', limit: 100 })",
+    "kv_delete": "await env.KV.delete('key')",
+    "r2_get": "const object = await env.BUCKET.get('key')",
+    "r2_put": "await env.BUCKET.put('key', request.body, { httpMetadata: request.headers })",
+    "r2_delete": "await env.BUCKET.delete('key')",
+    "r2_list": "const listed = await env.BUCKET.list({ prefix: 'uploads/', limit: 100 })",
+    "d1_prepare_bind_first": "const result = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first()",
+    "d1_batch": "const results = await env.DB.batch([stmt1, stmt2, stmt3])",
+    "d1_exec": "await env.DB.exec('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)')",
+    "do_stub_fetch": "const stub = env.MY_DO.idFromName('user-123'); const resp = await stub.fetch(request)",
+    "do_stub_rpc": "const result = await env.MY_DO.getById('user-123').someMethod(arg1, arg2)",
+    "do_class": "export class MyDurableObject extends DurableObject { constructor(ctx: DurableObjectState, env: Env) { super(ctx, env) } async fetch(request: Request): Promise<Response> { ... } }",
+    "do_sqlite_exec": "const cursor = this.ctx.storage.sql.exec('SELECT * FROM table WHERE id = ?', id)",
+    "do_alarm_set": "await this.ctx.storage.setAlarm(Date.now() + 60_000)",
+    "do_websocket_hibernate": "this.ctx.acceptWebSocket(server); this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'))",
+    "queue_send": "await env.MY_QUEUE.send({ url: request.url, method: request.method })",
+    "queue_send_batch": "await env.MY_QUEUE.sendBatch([{ body: msg1 }, { body: msg2 }])",
+    "ai_run": "const answer = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', { prompt: 'Hello' })",
+    "vectorize_upsert": "await env.VECTORIZE.upsert([{ id: '1', values: [0.1, 0.2], metadata: { source: 'doc' } }])",
+    "vectorize_query": "const results = await env.VECTORIZE.query(values, { topK: 5, filter: { source: 'doc' } })",
+    "service_binding_fetch": "const resp = await env.SERVICE.fetch(request)",
+    "service_binding_rpc": "const result = await env.AUTH_SERVICE.verifyToken(token)",
+    "hyperdrive_connect": "const sql = postgres(env.HYPERDRIVE.connectionString)",
+    "waitUntil": "ctx.waitUntil(env.KV.put('log', JSON.stringify({ time: Date.now() })))",
+    "passThroughOnException": "ctx.passThroughOnException()",
+    "wrangler_dev": "npx wrangler dev",
+    "wrangler_deploy": "npx wrangler deploy",
+    "wrangler_tail": "npx wrangler tail",
+    "wrangler_d1_query": "npx wrangler d1 execute DB --remote --command='SELECT 1'",
+    "wrangler_types": "npx wrangler types",
+    "sandbox_get": "const sandbox = getSandbox(env.Sandbox, 'user-123')",
+    "sandbox_exec": "const result = await sandbox.exec('python script.py', { timeout: 30000 })",
+    "sandbox_exec_stream": "const stream = await sandbox.execStream('npm run build'); for await (const event of parseSSEStream(stream)) { ... }",
+    "sandbox_start_process": "const proc = await sandbox.startProcess('node server.js', { cwd: '/workspace', env: { PORT: '3000' } })",
+    "sandbox_process_wait_port": "await proc.waitForPort(3000, { mode: 'http', timeout: 30000 })",
+    "sandbox_process_wait_log": "const match = await proc.waitForLog(/Server listening/, 30000)",
+    "sandbox_process_wait_exit": "const { exitCode } = await proc.waitForExit(60000)",
+    "sandbox_read_file": "const content = await sandbox.readFile('/workspace/output.json')",
+    "sandbox_write_file": "await sandbox.writeFile('/workspace/input.txt', 'hello world')",
+    "sandbox_list_files": "const files = await sandbox.listFiles('/workspace', { recursive: true })",
+    "sandbox_mkdir": "await sandbox.mkdir('/workspace/new-dir', { recursive: true })",
+    "sandbox_rm": "await sandbox.rm('/workspace/old-file.txt', { recursive: false })",
+    "sandbox_ports": "const url = await sandbox.ports.get(3000)",
+    "sandbox_tunnels": "const url = await sandbox.tunnels.get(3000)",
+    "sandbox_kill_process": "await sandbox.killProcess(processId, 'SIGTERM')",
+    "sandbox_kill_all": "await sandbox.killAllProcesses()",
+    "d1_first": "const row = await env.DB.prepare('SELECT * FROM t WHERE id=?').bind(id).first()",
+    "d1_raw": "const rows = await env.DB.prepare('SELECT id,name FROM t').raw({ columnNames: true })",
+    "wrangler_d1_migrate": "npx wrangler d1 migrations apply DB --remote",
+    "r2_list_paginate": "let p = await env.BUCKET.list({limit:1000,prefix,cursor}); while(p.truncated){p=await env.BUCKET.list({limit:1000,prefix,cursor:p.cursor})}",
+    "kv_list": "let p = await env.KV.list({prefix:'user:',limit:1000}); while(!p.list_complete){p=await env.KV.list({prefix:'user:',limit:1000,cursor:p.cursor})}",
+    "vectorize_query": "const m = await env.INDEX.query(queryVec, { topK: 5, returnMetadata: 'all' })",
+    "vectorize_upsert": "await env.INDEX.upsert([{ id: '1', values: emb, metadata: { url: '/p/1' } }])",
+    "workflow_create": "const inst = await env.MY_WF.create({ id: 'order-1', params: { /*...*/ } })",
+    "workflow_step_do": "const v = await step.do('name', { retries: { limit: 3, delay: '10 seconds', backoff: 'exponential' } }, async (ctx) => { /*...*/ })",
+    "workflow_wait_for_event": "const ev = await step.waitForEvent('stripe', { type: 'stripe-webhook', timeout: '1 hour' })",
+    "browser_quickaction": "return await env.BROWSER.quickAction('screenshot', { url: 'https://example.com' })",
+    "analytics_write": "env.METRICS.writeDataPoint({ blobs: ['us', 'pro'], doubles: [42.0], indexes: ['user-123'] })",
+    "cache_put_match": "const cached = await caches.default.match(req); if (!cached) { const r = await fetch(req); ctx.waitUntil(caches.default.put(req, r.clone())); return r; } return cached;",
+    "hyperdrive_pg": "const client = new pg.Client({ connectionString: env.HYPERDRIVE.connectionString })"
+  },
+
+  "x": {
+    "Node.js fs/net/child_process": "Workers run in V8 isolates, not Node.js. Use KV/R2/D1 for persistence, fetch() for HTTP, connect() for TCP. Add nodejs_compat flag for subset of Node APIs",
+    "process.env": "Use env parameter (second handler arg) for bindings/secrets, not process.env. process.env only works with nodejs_compat flag",
+    "Global mutable state for caching": "V8 isolates reuse contexts across requests. Store data in KV/R2/D1/DO, not module-level variables. Globals are per-isolate, not per-request, and may be evicted",
+    "express() middleware pattern": "Use Hono: import { Hono } from 'hono'; const app = new Hono(); app.use(cors()); app.get('/path', handler). No express, no connect middleware",
+    "req/res callback pattern": "Workers use Request/Response Web standard API: return new Response(body, { status, headers }). No (req, res) => {} pattern",
+    "Synchronous I/O anywhere": "All I/O in Workers is async (except DO sqlite). No fs.readFileSync, no child_process.execSync. Use await fetch(), await kv.get()",
+    "KV for transactional/consistent state": "KV is eventually consistent (~60s propagation). Use Durable Objects for strong consistency, D1 for relational queries with transactions",
+    "Buffering entire response body": "Use TransformStream/ReadableStream to stream large responses. 128MB memory limit applies per isolate, not per request",
+    "setTimeout/setInterval for long work": "Use ctx.waitUntil() for post-response work (max 30s). For longer jobs use Cron Triggers, Queues, or Workflows",
+    "Service Worker format (addEventListener)": "ES modules format required: export default { fetch(request, env, ctx) }. Service Worker format is deprecated, lacks binding access",
+    "Embedding user input in sandbox.exec() shell commands": "Use stdin option instead: sandbox.exec('python validate.py', { stdin: userInput }). Prevents shell injection attacks",
+    "HTTP transport for high-frequency sandbox operations": "Use WebSocket transport (SANDBOX_TRANSPORT=websocket) when making many concurrent SDK calls. HTTP transport makes one subrequest per call, hitting Workers subrequest limits",
+    "Assuming sandbox state persists without R2": "Sandbox containers are ephemeral. Mount R2 buckets for persistent data: sandbox.storage.mount(). Otherwise data is lost on sandbox restart",
+    "DO SQLite storage without SQLITE_FULL handling": "SQLite-backed DOs have 10GB limit (Paid). Catch 'SQLITE_FULL' errors: try { sql.exec('INSERT...') } catch(e) { if(e.message.includes('SQLITE_FULL')) { /* delete old data */ } }"
+  },
+
+  "t": {
+    "ExportedHandler<Env>": "interface ExportedHandler<Env = unknown> { fetch?(request: Request, env: Env, ctx: ExecutionContext): Promise<Response>; scheduled?(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void>; queue?(batch: MessageBatch<unknown>, env: Env, ctx: ExecutionContext): Promise<void>; email?(message: EmailMessage, env: Env, ctx: ExecutionContext): Promise<void> }",
+    "Env": "interface Env { MY_KV: KVNamespace; MY_DB: D1Database; MY_BUCKET: R2Bucket; MY_DO: DurableObjectNamespace; MY_QUEUE: Queue; AI: Ai; VECTORIZE: VectorizeIndex; SERVICE: Service; [key: string]: any }",
+    "WorkerEntrypoint<Env>": "class WorkerEntrypoint<Env = unknown> { constructor(ctx: ExecutionContext, env: Env); env: Env; ctx: ExecutionContext }",
+    "DurableObject<Env>": "class DurableObject<Env = unknown> { constructor(ctx: DurableObjectState, env: Env); ctx: DurableObjectState; env: Env; fetch(request: Request): Promise<Response>; alarm?(alarmInfo: AlarmInvocationInfo): Promise<void> }",
+    "DurableObjectState": "interface DurableObjectState { storage: DurableObjectStorage; id: DurableObjectId; acceptWebSocket(ws: WebSocket, tags?: string[]): void; getWebSockets(tag?: string): WebSocket[]; setWebSocketAutoResponse(pair: WebSocketRequestResponsePair): void; blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T> }",
+    "SandboxInstance": "class SandboxInstance { exec(cmd: string, opts?: ExecOptions): Promise<ExecuteResponse>; execStream(cmd: string, opts?: ExecOptions): Promise<ReadableStream>; startProcess(cmd: string, opts?: ProcessOptions): Promise<Process>; readFile(path: string): Promise<string>; writeFile(path: string, content: string): Promise<void>; listFiles(path: string, opts?: { recursive?: boolean }): Promise<FileInfo[]>; mkdir(path: string, opts?: { recursive?: boolean }): Promise<void>; rm(path: string, opts?: { recursive?: boolean }): Promise<void>; killProcess(id: string, signal?: string): Promise<void>; killAllProcesses(): Promise<void>; ports: { get(port: number): Promise<string> }; tunnels: { get(port: number): Promise<string> }; storage: { mount(bucket: string, path: string): Promise<void> }; sessions: { create(): Promise<Session> }; terminal: { connect(): Promise<WebSocket> } }"
+  }
+}

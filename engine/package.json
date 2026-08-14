@@ -1,0 +1,21 @@
+{
+  "name": "@agentic-rosetta/engine",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "contract:json": "bun run src/contract-json.ts",
+    "research": "bun run src/research.ts"
+  },
+  "dependencies": {
+    "@mastra/acp": "0.4.0",
+    "@mastra/core": "1.59.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.19",
+    "typescript": "^5.9.2"
+  }
+}

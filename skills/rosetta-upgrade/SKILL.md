@@ -41,7 +41,7 @@ Both modes share the same safety spine: **back up before mutating, show the chan
 
 ```
 INPUT: agent_path       (e.g., agents/kotlin-implementer/agent.md)
-INPUT: rosetta_kb       (optional explicit path; default = resolved $KB_DIR, see R1/[0])
+INPUT: rosetta_kb       (e.g., .rosetta/docs/kotlin/)
 INPUT: challenge_id     (default: "universal-crud")
 
 ═══════════════ PHASE 1 — BACKUP ═══════════════
@@ -67,13 +67,14 @@ cp {agent_path} {agent_path}.pre-rosetta.bak
 [6] Read Rosetta KB:
     - {kb}/fact-graph.json
     - {kb}/README.md (extract hard rules, mental model, false friends)
-[7] Construct bootstrap section with:
-    - JSON fact graph (verbatim)
-    - Hard rules (prose)
-    - Quick reference (mental model + doc map)
-    - False friends table
-[8] Insert bootstrap between agent frontmatter (---) and existing content
-[9] Verify: agent JSON matches canonical fact-graph.json
+[7] Embed the generated knowledge block into each agent body:
+    /rosetta-sync {tech_slug}        # or: bash scripts/kb-delivery/embed-graph.sh --sync {tech_slug}
+    This hard-overwrites each consumer's body with a fresh dense per-role render of the
+    (now expanded) fact-graph between the rosetta-kb:begin/end sentinels (REJECT rules first).
+    Rosetta owns the distribution; agents know nothing. Generated, not hand-pasted.
+[8] (Handled by embed-graph.sh: the block is inserted/replaced between the sentinels,
+    or appended after the frontmatter if absent. Hand-authored prose is never touched.)
+[9] Verify: `scripts/kb-delivery/embed-graph.sh --check <agent>` exits 0 for each triad agent.
 
 ═══════════════ PHASE 4 — AFTER (with Rosetta) ═══════════════
 [10] Run SAME challenge + SAME anti-pattern scan from Phase 2
@@ -109,53 +110,26 @@ cp {agent_path} {agent_path}.pre-rosetta.bak
      ║    2. Filtering in view body (KB rule exists but weak)       ║
      ╚══════════════════════════════════════════════════════════════╝
 
-═══════════════ PHASE 6 — EXPAND FACT GRAPH ═══════════════
-For EACH remaining gap discovered in Phase 5:
+═══════════════ PHASE 6 — EXPAND VIA THE GATE (no in-place graph mutation) ═══════════════
+Measurement stays in Phases 1–5. Mutation is a follow-on research + write-graph run:
 
-[14] DETERMINE the correct pattern
-     Find the correct idiomatic pattern for the gap by RESEARCHING the
-     framework docs / canonical source. Prefer delegating to the
-     `rosetta-research` skill so research degrades gracefully (brain research
-     skills → jina/exa MCP → built-in WebSearch/WebFetch):
+[14] For EACH remaining gap, INVOKE
         /rosetta-research "{technology}" --topics "{gap description}"
-     (If your harness cannot invoke skills, execute skills/rosetta-research/SKILL.md
-     inline as a procedure — it is written as an algorithm, not an API.)
-     Never invent the pattern: every fix below must trace to a real source.
+     Collect the NRRA + ledger. Build a changeset (added/changed/deprecated) from
+     ≥ MEDIUM facts. needs_review[] is never auto-applied.
 
-[15] WRITE what's missing into the fact graph:
-     a) If it's a missing RULE:
-        - Add to fact-graph.json → "r" section
-        - Add to the "Hard Rules" section of the agent bootstrap
-        - Append to $KB_DIR/README.md hard rules list
+[15] WRITE only through the gate:
+        python3 "$PLUGIN/scripts/rosetta/write-graph.py" --update {tech_slug} \
+          --changeset {changeset.json} --ledger {ledger.json} --nrra {nrra.md} \
+          --root "$PROJECT"
+     Do NOT edit fact-graph.json by hand. The script snapshots to .history/ first,
+     applies ≥ MEDIUM entries, ages deprecations into MIGRATION.md, bumps kb_version.
 
-     b) If it's a missing ANTI-PATTERN:
-        - Add to fact-graph.json → "x" section (wrong → right pair)
-        - Add to the "False Friends" table of the agent bootstrap
-        - Append to $KB_DIR/ROSETTA.md
+[16] APPLY
+        /rosetta-sync {tech_slug}
+        bash "$PLUGIN/scripts/kb-delivery/embed-graph.sh" --root "$PROJECT" --check {agent}
 
-     c) If a pattern is MISSING ENTIRELY (no existing concept doc):
-        - Create a new concept doc in 3-lens format at
-          $KB_DIR/{concept-name}.md
-        - Add a "w" entry to fact-graph.json if it's a widget/component
-        - Add to the doc map in agent bootstrap
-
-     d) If it's a probe that SHOULD EXIST for this technology:
-        - Add to $PROBES_MD
-        - This ensures future validate runs catch this gap
-
-[16] Example: discovered gap "Flow.collect inside suspend fun hangs forever"
-     → RULE:   "Flow.collect inside suspend fun for one-shot read" → "REJECT"
-     → ANTI:   "Flow.collect inside suspend fun for one-shot read" → "Flow.first() or Flow.firstOrNull()"
-     → DOC:    Add section to .rosetta/docs/kotlin/coroutines-flow.md:
-               "⚠️ Infinite Flow: never call .collect on a Room Flow inside
-                a suspend fun. Use .first() for single emission."
-
-[17] UPDATE the agent bootstrap with expanded fact graph
-     Re-read: fact-graph.json (now expanded)
-     Re-inject: the new JSON + new rules + new false friends into agent.md
-
-[18] OPTIONAL: Re-run Phase 4-5 to verify gaps are now closed
-     If gaps remain → loop back to Phase 6 with new gaps.
+[17] OPTIONAL: re-run Phases 4–5. Remaining gaps → another --topics run, not a hand edit.
 
 ═══════════════ PHASE 7 — USER DECISION ═══════════════
 
@@ -221,11 +195,11 @@ This mode does **not** run a coding challenge. It is a *knowledge refresh*: rese
 
 ### The Versioning Model (how old info is held & indexed)
 
-The `fact-graph.json` is injected **verbatim into every agent's working memory**, so it must stay lean (~800 tokens). It therefore carries **no per-fact history**. Three artifacts hold and index version history instead, each with one job:
+The `fact-graph.json` is the **single source of truth**; a **generated** dense per-role render of it is embedded in each agent's body (via `embed-graph.sh`), so the graph's facts reach ~100% of sessions. The JSON itself may be arbitrarily rich — delivery is the generated render, sized per-role by `generate_excerpt.py`, and leanness is a *quality* goal for the render (front-loaded REJECT rules + role emphasis), **not a hard ceiling** on the graph. The graph therefore carries **no per-fact history**. Three artifacts hold and index version history instead, each with one job:
 
-| Artifact (`$KB_DIR` = resolved docs root for this tech) | Job | Lifetime |
+| Artifact | Job | Lifetime |
 |---|---|---|
-| `$KB_DIR/fact-graph.json` | **Latest only** — always reflects the current framework version. Stays lean + always-on. | overwritten each refresh |
+| `$KB_DIR/fact-graph.json` | **Latest only** — always reflects the current framework version. Source of truth for the generated render. | overwritten each refresh |
 | `$KB_DIR/.history/{date}-v{kb_version}.json` | **Hold old info** — a deterministic snapshot of the prior fact graph, taken before each refresh. Auditable + enables rollback. | append-only archive |
 | `$KB_DIR/MIGRATION.md` | **Index the changes** — one section per refresh: what's new / changed / deprecated (old→new table) + source URLs. Loaded on demand. | append-only log |
 
@@ -249,10 +223,15 @@ INPUT: --base-framework  (optional; default: read from existing ROSETTA.md)
 INPUT: --depth           (quick | normal | deep — default: normal; passed through to rosetta-research)
 
 ═══════════════ R1 — RESOLVE & GUARD ═══════════════
-[1] RESOLVE ROOTS (as in rosetta-bootstrap [0]): bind $KB_DIR / $PROBES_MD via
-    `rosetta_config.py path --class docs|probes --slug {tech}`. Then LOCATE the KB with
-    `rosetta_config.py find --class docs --slug {tech}` (searches configured root, then
-    project, then device — so a KB written before the config existed is still found).
+[1] RESOLVE + LOCATE THE KB (never hardcode the path)
+        RESOLVER = first existing of
+          "$ROSETTA_CONFIG"                               # explicit override
+          "<this skill's dir>/assets/rosetta_config.py"    # ships with the skill
+          "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py"
+    KB_DIR    = $(python3 "$RESOLVER" find --class docs   --slug {tech})   # searches
+                configured root, then project, then device — a KB written before the
+                config existed is still found. Empty/exit!=0 → the ERROR below.
+    PROBES_MD = $(python3 "$RESOLVER" path --class probes --slug {tech})
     IF missing → ERROR "No KB for {tech}. Run /rosetta-bootstrap {tech} first." STOP.
 [2] Read current state:
     - fact-graph.json  → capture v (version, pinned, kb_version)
@@ -308,9 +287,12 @@ INPUT: --depth           (quick | normal | deep — default: normal; passed thro
       Do NOT invent deprecations to look productive.
 
 ═══════════════ R5 — APPLY TO KB (update the knowledge graph; lean-current) ═══════════════   [deterministic writes]
-[9]  Bump v in fact-graph.json:
-       version → new, pinned → {date}, kb_version → incremented, supersedes → "{old_kb_version}"
-[10] Apply added / changed / removed to w/r/a/x/t so fact-graph.json reflects the LATEST ONLY.
+[9]  Build the changeset from the NRRA (added/changed/deprecated, ≥ MEDIUM only).
+[10] python3 "$PLUGIN/scripts/rosetta/write-graph.py" --update {tech} \
+        --changeset {changeset.json} --ledger {out}/ledger.json --nrra {out}/nrra.md \
+        --root "$PROJECT"
+     The script snapshots to .history/, applies the changeset, ages deprecations into
+     MIGRATION.md, bumps kb_version. Do not mutate fact-graph.json in the skill.
 [11] For each deprecation (and each changed API) → add a VERSION-TAGGED x entry:
        "x": { "{old} (pre-v{N})": "{new} (v{N}+) — {one-line why}" }
 [12] Apply DEPRECATION AGING: retire pre-(N-1) version-tagged x transitions OUT of the graph;
@@ -333,12 +315,12 @@ INPUT: --depth           (quick | normal | deep — default: normal; passed thro
 ═══════════════ R6 — RE-INJECT INTO THE TRIAD ═══════════════
 [17] FOR EACH role in scope:
        cp {agent_path} {agent_path}.pre-refresh.bak
-[18] Re-inject the updated bootstrap into each agent.md — same construction as Mode A [6]–[9]:
-       - JSON fact graph (verbatim, now bumped)
-       - Hard rules (prose)
-       - Quick reference (mental model + doc map)
-       - False friends table (now INCLUDING the version-tagged transitions)
-[19] VERIFY: the JSON embedded in each agent == the canonical fact-graph.json.
+[18] Re-embed the generated knowledge block from the now-bumped fact-graph (same path as Mode A):
+         scripts/kb-delivery/embed-graph.sh agents/{tech_slug}-{role}
+       The dense per-role render (incl. version-tagged transitions in x) is regenerated between
+       the rosetta-kb sentinels. Generated, not hand-pasted.
+[19] VERIFY: `scripts/kb-delivery/embed-graph.sh --check <agent>` exits 0 for each role
+       (the embedded block is byte-identical to the generator output for this graph+role).
 
 ═══════════════ R7 — VALIDATE (reuse the existing gate) ═══════════════
 [20] /rosetta-validate {tech}

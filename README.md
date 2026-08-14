@@ -15,14 +15,18 @@ Agentic Rosetta injects a **two-layer knowledge base** into the agent's session:
 1. A compact JSON **fact graph** (~800 tokens, always-on) that prevents structural anti-patterns
 2. Progressive-disclosure **concept docs** (loaded on demand) for reasoning and tradeoffs
 
-It ships **four skills** — and **zero pre-installed language knowledge**. You generate the knowledge base for *your* technology with `rosetta-bootstrap`.
+It ships **seven skills** and a **Mastra fanout engine** — and **zero pre-installed language knowledge**. You generate the knowledge base for *your* technology with `rosetta-bootstrap`.
 
 | Skill | What it does |
 |---|---|
-| `rosetta-bootstrap` | Create a new Rosetta KB for any technology (research → synthesize → fact-graph → 3-lens docs → scaffold agents) |
-| `rosetta-research` | Research an unknown tech with **graceful degradation** — delegates to `/assimilate` & `/deep-research` when present, uses `jina`/`exa` MCPs when provisioned, falls back to built-in web search. MCPs optional, never required. |
-| `rosetta-validate` | Stress-test a KB by challenging an agent to build with it, then adversarially review against 28 universal anti-patterns |
-| `rosetta-upgrade` | Two modes. **Benchmark** (default): before/after agent test → expand the fact graph with discovered gaps. **Refresh** (`--url`): research a framework's current state → diff vs the KB → bump the fact graph + docs to the latest version → re-inject into the triad. Both gate on accept / improve / roll back |
+| `rosetta-research` | **The only reader of the world.** Detects harness + model, shells out to `engine/` (`[A0]`–`[A6]`). Real ACP workers, closed ledger, NRRA. Fail closed — never a serial crawl. |
+| `rosetta-bootstrap` | Thin wrapper: research → `write-graph.py --create` → `rosetta-sync` |
+| `rosetta-upgrade` | Measure (benchmark) or refresh (`--url`). Graph writes go through `write-graph.py --update`. |
+| `rosetta-validate` | Stress-test a KB (reads graphs, never writes) |
+| `rosetta-sync` | Distribute graphs into agent bodies (`registry.py` + `embed-graph.sh`) |
+| `rosetta-ab-test` / `rosetta-stress-test` | Evaluation family |
+
+This repo is the **one true source**. Brain is a consumer of the graphs, not of the machinery.
 
 ## Install
 
@@ -35,11 +39,19 @@ It ships **four skills** — and **zero pre-installed language knowledge**. You 
 
 Skills appear namespaced: `/agentic-rosetta:rosetta-bootstrap`, etc.
 
+### This machine (skillshare — the local path)
+
+```bash
+./sync.sh               # extras + skillshare install + hash-identical copies on claude/codex/opencode/grok
+```
+
+`install.sh` is for **external** checkouts that are not skillshare-managed. It now includes `grok`, refuses to clobber a newer target unless `--force`, and runs `bun install` in `engine/`.
+
 ### Any harness (script)
 
 ```bash
 ./install.sh            # install into every detected harness
-./install.sh claude     # or a specific one: claude | codex | opencode | pi | droid
+./install.sh grok       # claude | codex | opencode | grok | pi | droid
 ```
 
 The script drops `skills/<name>/SKILL.md` into the harness's skills directory. It installs **machinery only** — no language knowledge bases, no edits to your project.
@@ -102,7 +114,7 @@ The agent learns the "new hotness" because every old→new transition is folded 
 
 ## Research MCPs (optional)
 
-`rosetta-research` is better with [Jina](https://jina.ai) and [Exa](https://exa.ai) MCP servers and a holocron store, but **requires none of them**. With nothing configured, it runs entirely on the built-in `WebSearch` / `WebFetch` / `Read` tools. Every fact it returns traces to a real source — it never fabricates or stubs; unknowns are recorded as gaps.
+`rosetta-research` shells out to the engine. Workers inherit this session's harness and model (`grok agent stdio`, `opencode acp`, or `claude-code-acp`). Search upgrades to jina / exa / firecrawl when those MCPs are present; otherwise the harness-native floor. If the engine or an ACP entrypoint is missing, the skill **STOPs** — it will not improvise a serial crawl.
 
 ## Where things get stored
 
@@ -140,4 +152,4 @@ See [WHY.md](./WHY.md) for the theory of operation: two-layer knowledge injectio
 
 ---
 
-*agentic-rosetta — Skills-as-code plugin for agentic IDEs (Claude Code, Codex, OpenCode, pi).*
+*agentic-rosetta — Skills-as-code plugin for agentic IDEs (Claude Code, Codex, OpenCode, Grok, pi).*

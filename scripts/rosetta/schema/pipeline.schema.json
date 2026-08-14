@@ -1,0 +1,1213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-rosetta.dev/schema/pipeline.json",
+  "title": "agentic-rosetta pipeline contract",
+  "generatedFrom": "engine/src/contract.ts",
+  "ResearchRequest": {
+    "title": "ResearchRequest",
+    "type": "object",
+    "properties": {
+      "tech": {
+        "type": "string"
+      },
+      "techSlug": {
+        "type": "string"
+      },
+      "baseFramework": {
+        "type": "string"
+      },
+      "sourceMode": {
+        "type": "string",
+        "enum": [
+          "repo",
+          "docs",
+          "both"
+        ]
+      },
+      "sources": {
+        "type": "object",
+        "properties": {
+          "repoPath": {
+            "type": "string"
+          },
+          "repoUrl": {
+            "type": "string"
+          },
+          "docsUrl": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "caller": {
+        "type": "object",
+        "properties": {
+          "harness": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "opencode",
+              "grok"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "acp": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "command",
+              "args"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "harness",
+          "model",
+          "acp"
+        ],
+        "additionalProperties": false
+      },
+      "decoderRing": {
+        "type": "object",
+        "properties": {
+          "purpose": {
+            "type": "string"
+          },
+          "nouns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "term": {
+                  "type": "string"
+                },
+                "means": {
+                  "type": "string"
+                },
+                "notTobeConfusedWith": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "term",
+                "means"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "traps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "theyCallIt": {
+                  "type": "string"
+                },
+                "itActuallyIs": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "theyCallIt",
+                "itActuallyIs"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "hash": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "purpose",
+          "nouns",
+          "traps",
+          "hash"
+        ],
+        "additionalProperties": false
+      },
+      "directives": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "wave": {
+              "type": "number"
+            },
+            "territory": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "paths",
+                    "urls"
+                  ]
+                },
+                "label": {
+                  "type": "string"
+                },
+                "include": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "exclude": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "unitCount": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "kind",
+                "label",
+                "include",
+                "unitCount"
+              ],
+              "additionalProperties": false
+            },
+            "class": {
+              "type": "string",
+              "enum": [
+                "orientation",
+                "reference",
+                "enforcement",
+                "scars",
+                "contracts",
+                "exemplars"
+              ]
+            },
+            "yields": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "v",
+                  "w",
+                  "r",
+                  "a",
+                  "x",
+                  "t"
+                ]
+              }
+            },
+            "question": {
+              "type": "string"
+            },
+            "mustFind": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "priorArt": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "decoderRingHash": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "territory",
+            "class",
+            "yields",
+            "question",
+            "decoderRingHash"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "concurrency": {
+        "type": "number"
+      },
+      "maxWaves": {
+        "type": "number"
+      },
+      "maxUnits": {
+        "type": "number"
+      },
+      "maxBytes": {
+        "type": "number"
+      },
+      "censusOnly": {
+        "type": "boolean"
+      },
+      "depth": {
+        "type": "string",
+        "enum": [
+          "quick",
+          "normal",
+          "deep"
+        ]
+      },
+      "budget": {
+        "type": "object",
+        "properties": {
+          "maxDirectives": {
+            "type": "number"
+          },
+          "maxUsd": {
+            "type": "number"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "tech",
+      "techSlug",
+      "sourceMode",
+      "sources",
+      "caller"
+    ],
+    "additionalProperties": false
+  },
+  "ResearchDirective": {
+    "title": "ResearchDirective",
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "wave": {
+        "type": "number"
+      },
+      "territory": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "paths",
+              "urls"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "include": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unitCount": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "kind",
+          "label",
+          "include",
+          "unitCount"
+        ],
+        "additionalProperties": false
+      },
+      "class": {
+        "type": "string",
+        "enum": [
+          "orientation",
+          "reference",
+          "enforcement",
+          "scars",
+          "contracts",
+          "exemplars"
+        ]
+      },
+      "yields": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "v",
+            "w",
+            "r",
+            "a",
+            "x",
+            "t"
+          ]
+        }
+      },
+      "question": {
+        "type": "string"
+      },
+      "mustFind": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "priorArt": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "decoderRingHash": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "territory",
+      "class",
+      "yields",
+      "question",
+      "decoderRingHash"
+    ],
+    "additionalProperties": false
+  },
+  "CallerIdentity": {
+    "title": "CallerIdentity",
+    "type": "object",
+    "properties": {
+      "harness": {
+        "type": "string",
+        "enum": [
+          "claude",
+          "codex",
+          "opencode",
+          "grok"
+        ]
+      },
+      "model": {
+        "type": "string"
+      },
+      "acp": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "command",
+          "args"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "harness",
+      "model",
+      "acp"
+    ],
+    "additionalProperties": false
+  },
+  "DecoderRing": {
+    "title": "DecoderRing",
+    "type": "object",
+    "properties": {
+      "purpose": {
+        "type": "string"
+      },
+      "nouns": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "term": {
+              "type": "string"
+            },
+            "means": {
+              "type": "string"
+            },
+            "notTobeConfusedWith": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "term",
+            "means"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "traps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "theyCallIt": {
+              "type": "string"
+            },
+            "itActuallyIs": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "theyCallIt",
+            "itActuallyIs"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "hash": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "purpose",
+      "nouns",
+      "traps",
+      "hash"
+    ],
+    "additionalProperties": false
+  },
+  "Fact": {
+    "title": "Fact",
+    "type": "object",
+    "properties": {
+      "section": {
+        "type": "string",
+        "enum": [
+          "v",
+          "w",
+          "r",
+          "a",
+          "x",
+          "t"
+        ]
+      },
+      "key": {
+        "type": "string"
+      },
+      "value": {},
+      "source": {
+        "type": "string"
+      },
+      "confidence": {
+        "type": "string",
+        "enum": [
+          "HIGH",
+          "MEDIUM",
+          "LOW"
+        ]
+      }
+    },
+    "required": [
+      "section",
+      "key",
+      "value",
+      "source",
+      "confidence"
+    ],
+    "additionalProperties": false
+  },
+  "WorkerReport": {
+    "title": "WorkerReport",
+    "type": "object",
+    "properties": {
+      "directiveId": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "closed",
+          "partial",
+          "failed"
+        ]
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "facts": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "section": {
+              "type": "string",
+              "enum": [
+                "v",
+                "w",
+                "r",
+                "a",
+                "x",
+                "t"
+              ]
+            },
+            "key": {
+              "type": "string"
+            },
+            "value": {},
+            "source": {
+              "type": "string"
+            },
+            "confidence": {
+              "type": "string",
+              "enum": [
+                "HIGH",
+                "MEDIUM",
+                "LOW"
+              ]
+            }
+          },
+          "required": [
+            "section",
+            "key",
+            "value",
+            "source",
+            "confidence"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "surprises": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "claim": {
+              "type": "string"
+            },
+            "contradicts": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "contradicts",
+            "source"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "pointers": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "territory": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            },
+            "suggestedClass": {
+              "type": "string",
+              "enum": [
+                "orientation",
+                "reference",
+                "enforcement",
+                "scars",
+                "contracts",
+                "exemplars"
+              ]
+            }
+          },
+          "required": [
+            "territory",
+            "why",
+            "suggestedClass"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "unitsRead": {
+        "type": "number"
+      }
+    },
+    "required": [
+      "directiveId",
+      "status",
+      "reason",
+      "facts",
+      "surprises",
+      "pointers",
+      "unitsRead"
+    ],
+    "additionalProperties": false
+  },
+  "Ledger": {
+    "title": "Ledger",
+    "type": "object",
+    "properties": {
+      "run_id": {
+        "type": "string"
+      },
+      "tech": {
+        "type": "string"
+      },
+      "source_mode": {
+        "type": "string",
+        "enum": [
+          "repo",
+          "docs",
+          "both",
+          "topics"
+        ]
+      },
+      "decoder_ring_hash": {
+        "type": "string"
+      },
+      "waves": {
+        "type": "number"
+      },
+      "censused": {
+        "type": "number"
+      },
+      "closed": {
+        "type": "number"
+      },
+      "rows": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "territory": {
+              "type": "string"
+            },
+            "class": {
+              "type": "string",
+              "enum": [
+                "orientation",
+                "reference",
+                "enforcement",
+                "scars",
+                "contracts",
+                "exemplars"
+              ]
+            },
+            "owner": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "open",
+                "closed",
+                "gap"
+              ]
+            },
+            "fact_count": {
+              "type": "number"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "territory",
+            "class",
+            "owner",
+            "status",
+            "fact_count",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "gaps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "territory": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "directiveId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "territory",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "merges": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "kept": {
+              "type": "string"
+            },
+            "absorbed": {
+              "type": "string"
+            },
+            "class": {
+              "type": "string",
+              "enum": [
+                "orientation",
+                "reference",
+                "enforcement",
+                "scars",
+                "contracts",
+                "exemplars"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kept",
+            "absorbed",
+            "class",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "warnings": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "spentUsd": {
+        "type": "number"
+      },
+      "circuitBroken": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "run_id",
+      "tech",
+      "source_mode",
+      "decoder_ring_hash",
+      "waves",
+      "censused",
+      "closed",
+      "rows",
+      "gaps"
+    ],
+    "additionalProperties": false
+  },
+  "ResearchResult": {
+    "title": "ResearchResult",
+    "type": "object",
+    "properties": {
+      "runId": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "complete",
+          "partial",
+          "BLOCKED"
+        ]
+      },
+      "nrra": {
+        "type": "string"
+      },
+      "ledger": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "tech": {
+            "type": "string"
+          },
+          "source_mode": {
+            "type": "string",
+            "enum": [
+              "repo",
+              "docs",
+              "both",
+              "topics"
+            ]
+          },
+          "decoder_ring_hash": {
+            "type": "string"
+          },
+          "waves": {
+            "type": "number"
+          },
+          "censused": {
+            "type": "number"
+          },
+          "closed": {
+            "type": "number"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "territory": {
+                  "type": "string"
+                },
+                "class": {
+                  "type": "string",
+                  "enum": [
+                    "orientation",
+                    "reference",
+                    "enforcement",
+                    "scars",
+                    "contracts",
+                    "exemplars"
+                  ]
+                },
+                "owner": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "open",
+                    "closed",
+                    "gap"
+                  ]
+                },
+                "fact_count": {
+                  "type": "number"
+                },
+                "reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "territory",
+                "class",
+                "owner",
+                "status",
+                "fact_count",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "gaps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "territory": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "directiveId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "territory",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "merges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kept": {
+                  "type": "string"
+                },
+                "absorbed": {
+                  "type": "string"
+                },
+                "class": {
+                  "type": "string",
+                  "enum": [
+                    "orientation",
+                    "reference",
+                    "enforcement",
+                    "scars",
+                    "contracts",
+                    "exemplars"
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kept",
+                "absorbed",
+                "class",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "spentUsd": {
+            "type": "number"
+          },
+          "circuitBroken": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "run_id",
+          "tech",
+          "source_mode",
+          "decoder_ring_hash",
+          "waves",
+          "censused",
+          "closed",
+          "rows",
+          "gaps"
+        ],
+        "additionalProperties": false
+      },
+      "reports": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "directiveId": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "closed",
+                "partial",
+                "failed"
+              ]
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "facts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "section": {
+                    "type": "string",
+                    "enum": [
+                      "v",
+                      "w",
+                      "r",
+                      "a",
+                      "x",
+                      "t"
+                    ]
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "value": {},
+                  "source": {
+                    "type": "string"
+                  },
+                  "confidence": {
+                    "type": "string",
+                    "enum": [
+                      "HIGH",
+                      "MEDIUM",
+                      "LOW"
+                    ]
+                  }
+                },
+                "required": [
+                  "section",
+                  "key",
+                  "value",
+                  "source",
+                  "confidence"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "surprises": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "claim": {
+                    "type": "string"
+                  },
+                  "contradicts": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "claim",
+                  "contradicts",
+                  "source"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "pointers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "territory": {
+                    "type": "string"
+                  },
+                  "why": {
+                    "type": "string"
+                  },
+                  "suggestedClass": {
+                    "type": "string",
+                    "enum": [
+                      "orientation",
+                      "reference",
+                      "enforcement",
+                      "scars",
+                      "contracts",
+                      "exemplars"
+                    ]
+                  }
+                },
+                "required": [
+                  "territory",
+                  "why",
+                  "suggestedClass"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "unitsRead": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "directiveId",
+            "status",
+            "reason",
+            "facts",
+            "surprises",
+            "pointers",
+            "unitsRead"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "blockReason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "runId",
+      "status",
+      "nrra",
+      "ledger",
+      "reports"
+    ],
+    "additionalProperties": false
+  }
+}

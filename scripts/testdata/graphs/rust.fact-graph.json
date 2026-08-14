@@ -1,0 +1,179 @@
+{
+  "v": {
+    "lang": "rust",
+    "edition": "2024",
+    "toolchain": "stable",
+    "pinned": "2026-06-01"
+  },
+  "w": {
+    "Result": {
+      "t": "sl",
+      "i": "std::result::Result",
+      "note": "replaces try-catch; is an enum, not a class",
+      "src": "brain/docs/rust/error-handling.md"
+    },
+    "Option": {
+      "t": "sl",
+      "i": "std::option::Option",
+      "note": "replaces null/undefined; pattern match, never unwrap",
+      "src": "brain/docs/rust/ownership-borrowing.md"
+    },
+    "Vec": {
+      "t": "sf",
+      "i": "std::vec::Vec",
+      "note": "replaces Array; indexed via .get() not [n]",
+      "src": "brain/docs/rust/ownership-borrowing.md"
+    },
+    "HashMap": {
+      "t": "sf",
+      "i": "std::collections::HashMap",
+      "note": "replaces Map/Record; .get() returns Option<&V>",
+      "src": "brain/docs/rust/ownership-borrowing.md"
+    },
+    "String": {
+      "t": "sf",
+      "i": "std::string::String",
+      "note": "owned string; &str is the borrow (like `string` vs `string &` reference)",
+      "src": "brain/docs/rust/ownership-borrowing.md"
+    },
+    "Box": {
+      "t": "sl",
+      "i": "std::boxed::Box",
+      "note": "heap allocation; replaces new/pointer indirection",
+      "src": "brain/docs/rust/ownership-borrowing.md"
+    },
+    "Arc": {
+      "t": "sl",
+      "i": "std::sync::Arc",
+      "note": "shared ownership (thread-safe); replaces shared references in JS",
+      "src": "brain/docs/rust/concurrency.md"
+    },
+    "Mutex": {
+      "t": "sf",
+      "i": "std::sync::Mutex",
+      "note": "interior mutability (thread-safe); .lock() returns Result<MutexGuard>",
+      "src": "brain/docs/rust/concurrency.md"
+    },
+    "RwLock": {
+      "t": "sf",
+      "i": "std::sync::RwLock",
+      "note": "read-heavy concurrency; .read()/.write() return LockResult<Guard>",
+      "src": "brain/docs/rust/concurrency.md"
+    },
+    "Channel": {
+      "t": "sl",
+      "i": "std::sync::mpsc::channel",
+      "note": "Sender/Receiver; replaces EventEmitter for one-shot/stream",
+      "src": "brain/docs/rust/concurrency.md"
+    }
+  },
+  "r": {
+    "unwrap_in_library_code": "REJECT",
+    "expect_in_library_code": "REJECT",
+    "raw_string_errors": "REJECT",
+    "indexing_slices_arrays": "REJECT",
+    "unsafe_without_approval": "REJECT",
+    "panic_in_library_code": "REJECT",
+    "clone_everywhere_to_fix_borrowck": "REJECT",
+    "use_Result_for_fallible": "r",
+    "use_thiserror_for_library_errors": "r",
+    "use_newtypes_for_domain": "r",
+    "pattern_match_over_indexing": "r",
+    "exhaustive_match_no_wildcards": "r",
+    "doc_comments_on_public_items": "r",
+    "derive_common_traits": "r",
+    "cargo_fmt_before_commit": "r",
+    "cargo_clippy_zero_warnings": "r",
+    "cargo_test_passes": "r",
+    "cargo_doc_builds": "r"
+  },
+  "a": {
+    "new_vec_push": "let mut v = Vec::new(); v.push(item);",
+    "map_over_vec": "items.iter().map(|x| transform(x)).collect::<Vec<_>>()",
+    "filter_vec": "items.into_iter().filter(|x| pred(x)).collect::<Vec<_>>()",
+    "unwrap_or_else": "opt.unwrap_or_else(|| default)",
+    "result_map_err": "result.map_err(|e| MyError::from(e))?",
+    "ok_or": "opt.ok_or(MyError::NotFound)?",
+    "closure_borrow": "items.iter().find(|&&x| x == target)",
+    "collect_result": "iter.collect::<Result<Vec<_>, _>>()",
+    "match_option": "match opt { Some(v) => v, None => return Err(...) }",
+    "match_result": "match res { Ok(v) => v, Err(e) => return Err(e.into()) }",
+    "arc_clone": "let shared = Arc::clone(&arc_ref);",
+    "mutex_lock": "let guard = mutex.lock().unwrap();",
+    "spawn_thread": "std::thread::spawn(move || { ... })",
+    "channel_send": "tx.send(value).map_err(|_| MyError::ChannelClosed)?;",
+    "channel_recv": "match rx.recv() { Ok(v) => v, Err(_) => return Err(...) }",
+    "spawn_async": "tokio::spawn(async move { ... })",
+    "await_async": "let result = async_fn().await?;",
+    "cfg_test": "#[cfg(test)] mod tests { use super::*; }",
+    "test_fn": "#[test] fn test_name() { ... }",
+    "thiserror_derive": "#[derive(Debug, thiserror::Error)] pub enum MyError { #[error(\"...\")] Variant }",
+    "serde_derive": "#[derive(Debug, Clone, Serialize, Deserialize)] pub struct MyStruct { ... }",
+    "builder_pattern": "pub struct Builder { field: Option<Type> } impl Builder { pub fn field(mut self, v: Type) -> Self { self.field = Some(v); self } pub fn build(self) -> Result<T> { ... } }",
+    "newtype_tuple": "pub struct UserId(pub uuid::Uuid);",
+    "impl_display": "impl std::fmt::Display for MyType { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, \"...\") } }",
+    "try_fold": "iter.try_fold(init, |acc, x| acc.and_then(|a| f(a, x)))",
+    "tui_harness_new": "TuiTestHarness::new(80, 24)?",
+    "tui_harness_builder": "TuiTestHarness::builder().with_size(80,24).with_timeout(Duration::from_secs(10)).build()?",
+    "tui_spawn": "harness.spawn(CommandBuilder::new(\"./my-app\"))?",
+    "tui_send_key": "harness.send_key(KeyCode::Enter)?",
+    "tui_send_modified": "harness.send_key_with_modifiers(KeyCode::Char('c'), Modifiers::CTRL)?",
+    "tui_send_text": "harness.send_text(\"hello\")?",
+    "tui_wait_for": "harness.wait_for(|state| state.contains(\"Ready\"))?",
+    "tui_wait_text": "harness.wait_for_text(\"Ready\")?",
+    "tui_wait_cursor": "harness.wait_for_cursor((row, col))?",
+    "tui_screen": "harness.screen_contents()  // returns String",
+    "tui_cursor_pos": "harness.cursor_position()  // returns (row, col)",
+    "tui_resize": "harness.resize(120, 40)?",
+    "tui_state": "harness.state()  // returns &ScreenState",
+    "tui_is_running": "harness.is_running()  // returns bool",
+    "tui_wait_exit": "harness.wait_exit()?  // returns ExitStatus"
+  },
+  "x": {
+    "unwrap() / expect() in library code": "ok_or()? / match with explicit error handling",
+    "String as error type": "#[derive(Debug, thiserror::Error)] enum MyError { ... }",
+    "vec[index] // panics on OOB": "vec.get(index).ok_or(MyError::NotFound)?",
+    "clone() to fix borrow checker": "restructure ownership: use references, take by value, or Arc",
+    "panic!() for flow control": "return Err(MyError::Invariant(...))",
+    "Box<dyn Error> everywhere": "concrete error types with thiserror, only type-erase at boundaries",
+    ".to_string() for error messages": "Display impl on typed errors",
+    "unsafe { ... } for performance": "benchmark first; safe Rust is often fast enough",
+    "Arc<Mutex<T>> for everything shared": "consider channels, actor pattern, or restructuring ownership",
+    "write!() without handling errors": "write!() returns Result; propagate with ?",
+    "PartialEq only in tests": "derive PartialEq, Eq, Hash on domain types",
+    "return &String from functions": "return &str (borrow); let caller allocate if needed",
+    "sleep() in TUI E2E tests instead of wait_for": "harness.wait_for_text() / harness.wait_for() — auto-wait, no flaky timing",
+    "assert immediately after send_key in TUI test": "harness.wait_for() after every state-changing input; escape sequences have latency",
+    "hardcoded terminal size only": "harness.resize() to test layout reflow at multiple dimensions",
+    "manual string comparison for screen contents": "insta::assert_snapshot!(harness.screen_contents()) for golden-file testing",
+    "tmux + sleep for Rust TUI tests": "ratatui-testlib (PTY in-process, auto-wait, Rust-native assertions)"
+  },
+  "t": {
+    "Clone": "fn clone(&self) -> Self",
+    "Copy": "marker trait; types must be bitwise-copyable (integers, small types no heap)",
+    "Debug": "fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result",
+    "Display": "fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result — user-facing, no Debug wrapper",
+    "PartialEq": "fn eq(&self, other: &Self) -> bool",
+    "Eq": "marker trait; total equality (no NaN-like partiality)",
+    "PartialOrd": "fn partial_cmp(&self, other: &Self) -> Option<Ordering>",
+    "Ord": "fn cmp(&self, other: &Self) -> Ordering",
+    "Hash": "fn hash<H: Hasher>(&self, state: &mut H)",
+    "Default": "fn default() -> Self",
+    "From": "fn from(value: T) -> Self — infallible conversion; impl both From<T> for U and Into<U> for T (blanket)",
+    "TryFrom": "fn try_from(value: T) -> Result<Self, Self::Error> — fallible conversion",
+    "IntoIterator": "fn into_iter(self) -> Self::IntoIter — for for x in value {}",
+    "Iterator": "fn next(&mut self) -> Option<Self::Item>",
+    "Deref": "fn deref(&self) -> &Self::Target — smart pointer; NEVER for inheritance simulation",
+    "Drop": "fn drop(&mut self) — destructor; deterministic, no GC",
+    "Send": "auto trait; type can be transferred across thread boundaries",
+    "Sync": "auto trait; &T can be accessed from multiple threads",
+    "Error": "fn source(&self) -> Option<&(dyn Error + 'static)>",
+    "Serialize": "serialize into serde format",
+    "Deserialize": "deserialize from serde format",
+    "TuiTestHarness": "PTY-based test harness — new(width, height) → spawn(cmd) → wait_for / send_key / screen_contents",
+    "AsyncTuiTestHarness": "Tokio async variant of TuiTestHarness — same API with .await",
+    "ScreenState": "2D cell grid from vt100 parser — .contains(), .contents(), .size()",
+    "KeyCode": "enum: Char, Enter, Up, Down, Left, Right, Tab, Backspace, Delete, Esc, Home, End, PageUp, PageDown, F(1-12)",
+    "Modifiers": "bitflags: CTRL, ALT, SHIFT, META — combine with |"
+  }
+}

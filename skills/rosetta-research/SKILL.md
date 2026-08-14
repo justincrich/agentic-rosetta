@@ -1,302 +1,109 @@
 ---
 name: rosetta-research
-description: "Research an unknown technology for a Rosetta KB. 3-tier graceful degradation: delegate to /assimilate or /deep-research when present, else premium research MCPs (jina/exa) when provisioned, else built-in WebSearch/WebFetch/Read — always emits the same normalized research artifact. Trigger: /rosetta-research {tech} [{repo-url}]"
-allowed-tools: WebSearch, WebFetch, Read, Task, mcp__jina__search_web, mcp__jina__parallel_search_web, mcp__jina__read_url, mcp__jina__parallel_read_url, mcp__jina__expand_query, mcp__jina__extract_pdf, mcp__exa__web_search_exa, mcp__holocron__storeDocumentTool, mcp__holocron__hybridSearchTool
+description: "Research an unknown technology for a Rosetta KB via the plugin's Mastra fanout engine ([A0]–[A6]). One path: detect harness, pass model, shell out. Fail closed — never a serial crawl. Trigger: /rosetta-research {tech} [{repo-url|docs-url}]"
+allowed-tools: Bash, Skill, Read, WebSearch, WebFetch
 ---
 
 # Rosetta Research
 
-> **Purpose**: Acquire the facts a Rosetta knowledge base needs about an unknown technology — components, hard rules, API signatures, anti-patterns, traits, version pins, mental model — and return them in ONE normalized shape, regardless of what research tooling is available.
+> **Purpose**: Acquire the facts a Rosetta knowledge base needs and return them as one NRRA + a closed coverage ledger. Fanout is a Mastra program shipped in this plugin, not a harness `Task` hint.
 >
-> **Why a separate skill?** Research is *acquisition*; `rosetta-bootstrap` is *synthesis*. Keeping acquisition behind a stable output contract means bootstrap (and `rosetta-upgrade`'s gap-filling) never has to know whether facts came from `/assimilate`, jina/exa, or plain `WebFetch`.
-
-> **TOOL AVAILABILITY (read first).** Built-ins (`WebSearch`, `WebFetch`, `Read`) are required and assumed present. Everything else is OPTIONAL and degrades gracefully — if your harness has not provisioned jina/exa/holocron, or if invoking another skill (`/assimilate`, `/deep-research`) is unsupported, SKIP it and fall to the next tier. Never block on an optional capability.
-> **Cross-harness note:** non-Claude harnesses (Codex, OpenCode, pi) may expose MCP tools under different names. The `mcp__…` names below are the CANONICAL HINT for the intended capability; match by intent, and if no equivalent exists, use the built-in floor. Detection is **attempt-and-observe** (try the preferred call; on error, fall through) — never a hard precondition.
-
-> **NO-STUB INVARIANT (cardinal).** At no tier may this skill invent component names, version numbers, API signatures, or "TODO/placeholder" facts. Every entry in the artifact must trace to a REAL source (a delegated report, an MCP result, a fetched URL, or a read repo file). Unknowns are recorded in the artifact's `gaps[]` / `unknowns[]` — never faked. If even the built-in floor is impossible, emit a `status: BLOCKED` artifact and stop; do not fabricate.
+> **NO-STUB INVARIANT.** Every fact traces to a real source locator. Unknowns go in `gaps[]`. If the engine cannot run, STOP with a named reason and write nothing.
 
 ## Inputs
 
 ```
-INPUT: technology_name    (e.g., "GPUI", "Tauri v2", "SpacetimeDB")
-INPUT: repository_url      (optional — the repo to assimilate)
-INPUT: base_framework      (e.g., "React", "SwiftUI", "Rust" — what to map FROM)
-INPUT: topics              (optional — explicit thin-topic list for gap mode)
-INPUT: depth               (quick | normal | deep — default: normal)
-INPUT: focus               (optional — narrow the research, e.g. "state management")
+INPUT: technology_name     (e.g. "GPUI", "Next.js")  OR a bare URL
+INPUT: repository_url      (optional — local clone preferred via --repo-path)
+INPUT: docs_url            (optional)
+INPUT: base_framework      (what to map FROM)
+INPUT: topics              (optional — skip census; fan out exactly these)
+INPUT: depth               (quick | normal | deep — default normal)
+INPUT: model               (REQUIRED — the invoking session's model; never default)
 ```
 
-`depth` controls breadth/sources:
-- **quick** → axes 1 (architecture), 2 (state), 6 (anti-patterns) + repo README only, 1-2 sources each
-- **normal** (default) → all six axes, 2-3 sources each
-- **deep** → all six axes + per-axis follow-up on gaps, 4-6 sources each
+A bare `https://…` argument is classified: github/gitlab/bitbucket → repo, anything else → docs site. `/rosetta-research https://nextjs.org/docs` is a docs run, not a tech named "https://…".
 
----
+`--topics` maps to caller-supplied `directives[]` and skips census. A repo/docs target leaves `directives` unset so census generates them.
 
-## The 3-Tier Ladder
+## One path
 
-The skill runs strictly top-to-floor. **It never fails closed:** every tier that cannot run cascades to the next, and Tier 3 (built-ins) is always reachable.
+There is no 3-tier ladder. There is no "floor parallelism you MAY enable". The engine is the only path.
 
 ```
-rosetta-research(tech, repo_url?, base_framework?, topics?, depth, focus?)
+[0] LOCATE THE ENGINE
+    PLUGIN = directory that contains this SKILL.md, walking up until engine/src/research.ts exists
+             (skill dir → plugin root). Also accept $ROSETTA_PLUGIN.
+    ENGINE = "$PLUGIN/engine/src/research.ts"
+    IF the file is missing:
+        STOP. Print:
+          "engine absent. From the plugin checkout run: cd engine && bun install
+           This skill will not improvise a serial crawl."
+        Write nothing.
 
-TIER 1 — DELEGATE TO RESEARCH SKILLS (best fidelity, optional)
-  Detection = advertise-or-probe: if the orchestrator's available-skills/tools
-  roster includes the skill, prefer it; else attempt one invocation and, on
-  error/unsupported, treat as unavailable and fall through.
+[1] DETECT HARNESS + MODEL
+    Pass --harness {claude|codex|opencode|grok} if you know it; otherwise the engine
+    reads CLAUDECODE / CODEX_* / OPENCODE_* / GROK_* / CMUX_AGENT_LAUNCH_KIND.
+    Pass --model {the model THIS session is using}. Never omit it. Never invent one.
 
-  REPO ANALYSIS path (have repo_url):
-    IF `assimilate` available:
-      INVOKE /assimilate {repo_url} --skip-confirm [--depth {depth}] [--focus {focus}]
-      CONSUME its report (architecture, patterns, conventions, testing, deps, anti-patterns)
-      → map into NORMALIZED ARTIFACT (§ Output Contract)
-  TOPIC / GAP path (topics list, or no repo_url):
-    IF `deep-research-swarm` available AND depth in {normal, deep}:
-      INVOKE /deep-research-swarm "{tech} {topic}" --skip-confirm   (per topic cluster)
-    ELSE IF `deep-research` available:
-      INVOKE /deep-research "{tech} {topic}"
-    ELSE IF `dependency-research` available:
-      INVOKE dependency-research "{tech} {topic}"   (library-shaped, holocron-first)
-    ELSE IF `research` available:
-      INVOKE /research "{tech} {topic}" --new
-    → CONSUME report(s) → map into NORMALIZED ARTIFACT
-  IF any Tier-1 invocation ERRORS or is UNSUPPORTED → log, DROP the UNMET parts to Tier 2.
+[2] BUILD THE INVOCATION
+    bun run "$ENGINE" \
+      --tech "{technology_name}" \
+      --tech-slug "{kebab}" \
+      --model "{model}" \
+      [--harness {harness}] \
+      [--base-framework "{base}"] \
+      [--repo-path "{local clone}"] \
+      [--repo-url "{url}"] \
+      [--docs-url "{url}"] \
+      [--topics "{comma topics}"] \
+      [--depth {quick|normal|deep}] \
+      [--census-only] \
+      --out-dir "{resolved research dir}/{slug}-run"
 
-TIER 2 — SELF-CONTAINED LOOP ON PREMIUM MCPs (optional)
-  Detected by try-and-fallback on first call (never a precondition flag).
-  REPO ANALYSIS:
-    TRY mcp__exa__web_search_exa(
-          query="{tech} architecture state routing async testing", repo hint)
-    + mcp__jina__read_url on README / docs / key files discovered
-    FALLBACK to Tier-3 fetch if a call errors.
-  TOPIC RESEARCH:
-    TRY mcp__jina__expand_query(topic)            (on error: keep original query)
-    TRY mcp__jina__parallel_search_web(queries)   (on error: mcp__jina__search_web,
-                                                    then mcp__exa__web_search_exa)
-    TRY mcp__jina__parallel_read_url(urls)        (on error: mcp__jina__read_url; skip URL on timeout)
-    TRY mcp__jina__extract_pdf(url) for PDF docs  (FALLBACK Read / WebFetch)
-  → NORMALIZED ARTIFACT. Any unrecoverable per-call failure → that sub-task falls to Tier 3.
+    Storage destination is resolved by assets/rosetta_config.py (project / device / path).
+    Never hardcode ~/Projects/brain.
 
-TIER 3 — BUILT-IN FLOOR (always works) — see § Floor Loop
-  WebSearch + WebFetch + Read only. SAME query set, SAME artifact.
+[3] CONSUME STDOUT
+    The engine prints JSON: { runId, status, nrra, ledger, blockReason, directiveCount, perClass }.
+    status=BLOCKED → STOP. Surface blockReason. Write nothing else.
+    Otherwise write nrra.md + ledger.json (already in --out-dir) and return the NRRA to the caller.
 
-STORAGE (§ Storage): holocron if present, else the RESOLVED research path (rosetta_config.py —
-  project by default, configurable to device or any path). Never blocks.
-
-BLOCKER (only if Tier 3 itself impossible):
-  IF WebSearch AND WebFetch both unavailable AND repo_url unreadable:
-    EMIT artifact with status=BLOCKED, reason, and what's needed.
-    NEVER emit fabricated facts. Return to caller, which surfaces it to the user.
+[4] OPTIONAL GRAPH WRITE (only when the caller asked to persist a graph)
+    python3 "$PLUGIN/scripts/rosetta/write-graph.py" --create {slug} \
+      --nrra {out}/nrra.md --ledger {out}/ledger.json
+    The skill never writes fact-graph.json itself.
 ```
 
-### Cascade / error-handling table
+## Failure
 
-Modeled on `deep-research` and `research` graceful-degradation patterns.
+| Failure | Response |
+|---|---|
+| engine/ missing | STOP + install instructions. Never crawl. |
+| `--model` omitted / not on roster | engine exits non-zero naming MODEL_UNRESOLVED |
+| harness has no ACP entrypoint | engine preflight STOP (named). Nothing written. |
+| already inside a worker (`ROSETTA_WORKER=1`) | STOP (recursion) |
+| ledger open at emit | status=BLOCKED, no graph write |
 
-| Failure point | Detection | Response | Cascade |
-|---|---|---|---|
-| `/assimilate` unsupported/errors | invocation error or harness can't call skills | log "Tier-1 repo unavailable" | → Tier 2 repo crawl |
-| `/deep-research*` unsupported/errors | same | log "Tier-1 topic unavailable" | → Tier 2 topic loop |
-| jina/exa tool "not found" | MCP error on first call | log "premium MCP absent" | → Tier 3 for that sub-task |
-| `expand_query` fails | jina error | continue with original query | stay in tier |
-| `parallel_search_web` fails | batch error | reduce to sequential `search_web`, then exa | stay in tier |
-| URL read timeout (>30s) | read error | skip URL, continue | stay in tier |
-| PDF extract fails | extract_pdf error | fall back to WebFetch / Read | stay/drop |
-| Zero search results | empty across providers | broaden query / variations; if still empty mark topic LOW + record gap | note gap, continue |
-| holocron store fails | store error | save to the **resolved** research path (§ Storage) | non-blocking |
-| storage resolver absent | no `rosetta_config.py` on any lookup path | use `{PROJECT}/.rosetta/research/{tech}.md` and record `resolved_by: fallback:no-resolver` | non-blocking |
-| **Floor itself impossible** | WebSearch+WebFetch absent & no repo | **EMIT BLOCKER, do not stub** | return to caller |
+## Output contract
 
----
+Unchanged NRRA shape (mental model, v/w/r/a/x/t tables, seed JSON, gaps, sources) **plus** `run_id` and `decoder_ring_hash` in the frontmatter. Downstream delivery into agent bodies is a **generated render** (`scripts/kb-delivery/generate_excerpt.py` + `embed-graph.sh`), sized per-role at render time — research must not self-limit graph richness to fit a token budget.
 
-## Floor Loop (Tier 3 — the contract-defining path)
-
-Pure `WebSearch` + `WebFetch` + `Read`. Tiers 1 and 2 must produce the SAME artifact, just faster/richer.
-
-**Query set — the six axes bootstrap needs** (chosen to pre-answer what `rosetta-validate` later probes):
-
-1. **Architecture / mental model** — `"{tech} architecture overview"`, `"{tech} core concepts"`, `"{tech} vs {base_framework}"`
-2. **State management** — `"{tech} state management"`
-3. **Routing / navigation** — `"{tech} routing"` / `"{tech} navigation"`
-4. **Async / concurrency** — `"{tech} async"`, `"{tech} concurrency"`
-5. **Testing** — `"{tech} testing"`
-6. **Anti-patterns / pitfalls** — `"{tech} common mistakes"`, `"{tech} anti-patterns"`, `"{tech} gotchas"`
-
-**Loop:**
+## Storage resolution
 
 ```
-[T3.0] REPO READ (if repo_url):
-   - WebFetch repo_url → extract README, detect language/build tool, top-level dirs
-   - WebFetch the docs site / docs/ dir if discoverable
-   - If repo is cloned locally / a path is given → Read README, package manifest,
-     a few key source files
-   - Extract: paradigm, primary building blocks, naming conventions, version/commit
-
-[T3.1] FOR EACH axis in the query set (gated by depth):
-   a) WebSearch(query) → collect top 3-6 URLs (prefer official docs, repo, changelog)
-   b) WebFetch each top URL → extract: concepts, exact API snippets, code examples, version notes
-      ERROR: fetch fails/timeout → skip URL, continue (never block)
-   c) Note source credibility: official docs/repo = HIGH, maintainer blog = MED-HIGH,
-      third-party blog/SO = MEDIUM, forum = LOW
-
-[T3.2] SYNTHESIZE per axis:
-   - Confidence per finding: HIGH (3+ credible / official-confirmed),
-     MEDIUM (2 sources), LOW (single/weak)
-   - Cross-reference; record contradictions explicitly
-
-[T3.3] EXTRACT into the structures bootstrap [4]-[5] consume:
-   - MENTAL-MODEL REGISTERS: the 3-register (or N-register) equivalent
-   - HARD RULES: structural constraints ALWAYS true → fact-graph "r"
-   - COMPONENTS: building blocks + import path + what-it-replaces → fact-graph "w"
-   - API SIGNATURES: exact call expressions → fact-graph "a"
-   - ANTI-PATTERNS (false friends): wrong → right pairs → fact-graph "x"
-   - TRAITS/INTERFACES: type-level contracts → fact-graph "t"
-   - VERSION PINS: pkg, version, commit, date → fact-graph "v"
-   - FACT-GRAPH SEED: a draft of the 6-section JSON, populated where confidence ≥ MEDIUM
-   - GAPS / UNKNOWNS: axes with LOW or no coverage
-
-[T3.4] EMIT NORMALIZED ARTIFACT (below) + STORE (§ Storage)
+RESOLVER = first existing of "$ROSETTA_CONFIG",
+           "<this skill's dir>/assets/rosetta_config.py",
+           "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py"
+DEST = $(python3 "$RESOLVER" path --class research --slug {tech_slug} --ensure)
 ```
 
-> **Floor parallelism (default OFF).** The floor runs the manager-only loop (no `Task`), because subagent spawning is not uniformly available cross-harness and the floor must work everywhere. Tier 1 already gets parallelism for free when it delegates to `/assimilate` or `/deep-research-swarm`. On Claude Code specifically you MAY fan the six axes into 2-3 `Task` workers — but only if `Task` is available; otherwise run sequentially.
-
----
-
-## Output Contract — Normalized Rosetta Research Artifact (NRRA)
-
-ONE shape, identical whether produced by `/assimilate`, jina/exa, or `WebSearch`. Field names pre-map to the fact-graph's six sections so `rosetta-bootstrap` step [5] is near-mechanical.
-
-```markdown
----
-artifact: rosetta-research
-tech: "{tech}"
-tech_slug: "{kebab}"
-base_framework: "{base_framework}"
-repo_url: "{repo_url|null}"
-research_tier: "delegated:/assimilate | delegated:/deep-research-swarm | premium-mcp | builtin-floor"
-depth: "quick|normal|deep"
-status: "complete | partial | BLOCKED"
-overall_confidence: "HIGH|MEDIUM|LOW"
-date: "{ISO-8601}"
-storage: { holocron_id: "{id|null}", local_path: "{RESOLVED absolute path — see § Storage}",
-           resolved_by: "cli|project|device|builtin-default|project-fallback|fallback:no-resolver" }
----
-
-# Rosetta Research: {tech}
-
-## 1. Mental Model (registers)
-- Paradigm: {one paragraph}
-- Registers: {RegisterA} ↔ {RegisterB} ↔ {RegisterC}
-- "How to think" vs {base_framework}: {2-4 bullets}
-
-## 2. Version Pins        # → fact-graph "v"
-| field | value | confidence |
-| pkg | {name} | … |
-| version | {x.y.z} | … |
-| commit | {hash|null} | … |
-| pinned_date | {ISO} | … |
-
-## 3. Components / Widgets  # → fact-graph "w": {name:{t,i,note,src}}
-| name | type(sl/sf/…) | import | replaces ({base}) | source_url | confidence |
-
-## 4. Hard Rules           # → fact-graph "r" (r|nr|REJECT)
-| rule_id | verdict | rationale | source | confidence |
-
-## 5. API Signatures       # → fact-graph "a": {op: "exact code"}
-| operation | exact_expression | source | confidence |
-
-## 6. Anti-Patterns / False Friends   # → fact-graph "x": wrong → right
-| wrong | right | why_it's_a_silent_trap | source | confidence |
-
-## 7. Traits / Interfaces  # → fact-graph "t"
-| name | signature_or_contract | source | confidence |
-
-## 8. Per-Axis Findings (evidence for synthesis + concept docs)
-### Architecture / State / Routing / Async / Testing
-- {finding} (confidence, sources)
-
-## 9. Fact-Graph Seed (draft JSON, ≥ MEDIUM confidence only)
-```json
-{ "v": {}, "w": {}, "r": {}, "a": {}, "x": {}, "t": {} }
-```
-
-## 10. Gaps & Unknowns     # axes thin/uncovered — bootstrap notes, never fabricates
-- {axis}: {why thin} → suggested follow-up
-
-## 11. Sources
-[1] {title} — {url} (tier: official/blog/forum)
-```
-
-**Why this shape:** sections 2-7 are 1:1 with fact-graph `v/w/r/a/x/t`; section 1 feeds the README/ROSETTA mental model; sections 8/11 feed the 3-lens concept docs' PATTERNS + citations; section 10 keeps bootstrap honest about coverage and feeds `rosetta-upgrade` gap discovery. Confidence columns let bootstrap demote low-confidence facts to prose instead of asserting them in JSON.
-
----
-
-## Storage (optional, non-blocking)
-
-> **NEVER hardcode the path.** Where an artifact lands is a configured decision, resolved by CODE so
-> it happens the same way every run. Ask the resolver; write where it says.
-
-```
-[S1] RESOLVE THE DESTINATION (deterministic — always do this before writing)
-     RESOLVER=$(first existing of:
-        "$ROSETTA_CONFIG"                                  # explicit override
-        "<this skill's dir>/assets/rosetta_config.py"      # ships with the skill
-        "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py")
-     IF found:
-        DEST=$(python3 "$RESOLVER" path --class research --slug {tech_slug} --ensure)
-        META=$(python3 "$RESOLVER" show)        # for the storage: provenance below
-     ELSE (resolver absent — e.g. a partial install):
-        DEST="{PROJECT}/.rosetta/research/{tech_slug}.md"   # legacy behavior
-        RECORD storage.resolved_by = "fallback:no-resolver" and SAY SO in the report.
-
-[S2] TRY mcp__holocron__storeDocumentTool({
-       title: "Rosetta Research: {tech}",
-       content: {NRRA markdown},
-       metadata: { type:"research", method:"rosetta-research",
-                   tech:"{tech_slug}", tier:"{research_tier}",
-                   confidence:"{overall}", date:"{ISO}" }
-     })
-     → on success: set storage.holocron_id, DISPLAY id
-
-[S3] FALLBACK (holocron tool absent OR store errors):
-     SAVE NRRA to $DEST
-
-NEVER block the caller on storage outcome. The caller consumes the in-memory NRRA regardless.
-```
-
-**Where `$DEST` comes from** — precedence, highest first (see `CONFIG.md`):
-
-| # | Source | Key |
-|---|---|---|
-| 1 | CLI flag | `--research-root` / `--root` |
-| 2 | `<project>/.rosetta/config.json` | `roots.research`, then `roots.default` |
-| 3 | `${ROSETTA_HOME:-~/.rosetta}/config.json` | `roots.research`, then `roots.default` |
-| 4 | built-in default | `project` |
-
-A root value is `project` (the repo you are in — the default, and the historical behavior),
-`device` (`~/.rosetta` itself), or any path such as `~/Projects/brain`.
-
-**The artifact must not lie about where it went.** `storage.local_path` records the *resolved*
-absolute path and `storage.resolved_by` records which tier decided it. If the configured root was
-unwritable, the resolver falls back to the project and flags it — carry that flag through, do not
-silently present a fallback as the intended destination.
-
----
+Record the resolved absolute path. Do not lie about where the artifact landed.
 
 ## Usage
 
 ```
-# Repo path (bootstrap step [2])
-/rosetta-research "GPUI" --repo-url https://github.com/zed-industries/zed --base-framework React --depth normal
-
-# Topic / gap path (bootstrap step [3], or upgrade step [14])
-/rosetta-research "Tauri v2" --topics "state management, IPC security" --base-framework React
-
-# Standalone, no repo
-/rosetta-research "SpacetimeDB" --base-framework Rust --depth quick
+/rosetta-research "GPUI" --repo-url https://github.com/zed-industries/zed --base-framework React
+/rosetta-research https://nextjs.org/docs
+/rosetta-research "Tauri v2" --topics "state management, IPC security"
 ```
-
----
-
-*rosetta-research — Plugin skill for agentic-rosetta*
-*Strategy: delegate when you can, degrade when you must, never fake a fact.*

@@ -22,22 +22,31 @@ description: "Adversarially stress-test any Rosetta knowledge base. Challenge an
 INPUT: technology_slug (e.g., "swift", "kotlin", "gpui", "tauri")
 INPUT: challenge_id (optional — default: "universal-crud")
 
-[1] DISCOVER ROSETTA  (resolve — never assume a folder)
-    A KB may live in the project, on the device, or at a configured path. Ask the resolver,
-    which searches the configured root FIRST, then the project, then the device — so a KB
-    written before any config existed is still found:
-        RESOLVER = first existing of "$ROSETTA_CONFIG",
-                   "<this skill's dir>/assets/rosetta_config.py",
-                   "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py"
-        KB_DIR   = $(python3 "$RESOLVER" find --class docs --slug {tech})
-        IF exit != 0 → ERROR "No KB for {tech}. Looked in configured/project/device roots.
-                              Run /rosetta-bootstrap {tech} first."
-        (resolver absent → fall back to {PROJECT}/.rosetta/docs/{tech}/ and say so)
-    Read: $KB_DIR/README.md
-    Read: $KB_DIR/fact-graph.json
-    Read: $KB_DIR/ROSETTA.md
-    Read: all concept docs in $KB_DIR/*.md
+[1] DISCOVER ROSETTA (via the registry — never hardcode the path)
+    Resolve the KB location from the single index (Rosetta is the brain; agents/skills look it up,
+    they don't assume a folder):
+        python3 "$PLUGIN/scripts/rosetta/registry.py" --root "$PROJECT" graph-for {tech_or_agent}
+        python3 "$PLUGIN/scripts/rosetta/registry.py" --root "$PROJECT" validate
+    The registry reports the SLUG; it does not fix the filesystem root.
+    Where that dir physically lives is a CONFIGURED root, not an assumption —
+    resolve it (searches configured root, then project, then device, so a KB written
+    before any config existed is still found):
+        RESOLVER = first existing of
+          "$ROSETTA_CONFIG"                               # explicit override
+          "<this skill's dir>/assets/rosetta_config.py"    # ships with the skill
+          "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py"
+        KB_DIR = $(python3 "$RESOLVER" find --class docs --slug <slug>)
+        (resolver absent → fall back to ./.rosetta/docs/<slug>/ and say so)
+    Then read:
+        $KB_DIR/README.md
+        $KB_DIR/fact-graph.json
+        $KB_DIR/ROSETTA.md
+        all concept docs in $KB_DIR/*.md
     Count: rules, anti-patterns, widgets, traits
+    Also assert the agent bodies are in sync:
+        bash "$PLUGIN/scripts/kb-delivery/embed-graph.sh" --root "$PROJECT" --check --all
+    (or `/rosetta-sync --check`). If any consumer's block drifted from the graph,
+    the KB under test is not what agents actually received.
 
 [2] SELECT CHALLENGE
     Choose from UNIVERSAL CHALLENGE LIBRARY below
@@ -46,7 +55,7 @@ INPUT: challenge_id (optional — default: "universal-crud")
 
 [3] CHALLENGE PROMPT ( implementer mode )
     "You are an implementer agent. You have access ONLY to the
-     Rosetta KB at $KB_DIR (the resolved path). You may NOT use any
+     Rosetta KB at $KB_DIR (registry-reported slug, resolved root). You may NOT use any
      external knowledge, StackOverflow, or training priors.
 
      Implement this spec: {challenge_spec}
@@ -82,12 +91,10 @@ INPUT: challenge_id (optional — default: "universal-crud")
       - Suggest new doc section with example
     For each false positive:
       - Flag for removal or clarification
-    Output: structured report + proposed fact-graph diff
-
-[7] UPDATE KB (optional, human-gated)
-    On approval: append new rules to fact-graph.json
-    On approval: append new anti-patterns to fact-graph.json
-    On approval: update concept docs with examples
+    Output: structured report + proposed changeset (added/changed/deprecated).
+    Do NOT write fact-graph.json. Validation is an evaluation skill — it reads graphs, never writes.
+    Feed the proposed changeset to `/rosetta-upgrade --topics "{gap}"` so the write goes through
+    `write-graph.py --update`.
 ```
 
 ---

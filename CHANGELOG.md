@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.0] — 2026-08-13
+
+### Added
+- **Fanout engine** (`engine/`) — Mastra workflow, `@mastra/acp` workers inherit the
+  invoking harness + model. Stages `[A0]`–`[A6]`: preflight, orient, census, fanout
+  waves, ledger close, reconcile, emit NRRA. Fail closed; never a serial crawl.
+- **Census** — deterministic `git ls-files` / docs crawl, first-match class table,
+  `MAX_UNITS` 40 / 250 KB grouping, named singletons, logged overflow merges.
+- **`scripts/rosetta/write-graph.py`** — the only writer of `fact-graph.json`
+  (`--create` / `--update` / `--check`), ledger + `run_id` gate, stamp, legacy warn.
+- **Vendored KB-delivery** — `registry.py`, `embed-graph.sh`, `generate_excerpt.py`,
+  `assign.py` + tests, project-root aware (`--root` / `$ROSETTA_PROJECT`).
+- Skills: `rosetta-sync`, `rosetta-ab-test`, `rosetta-stress-test`.
+- `grok` harness in `install.sh`. Drift guard `scripts/assert-no-drift.sh`.
+- `sync.sh` — skillshare extras + install from this repo (the local distributor).
+
+### Changed
+- `rosetta-research` is a thin engine wrapper. Floor-parallelism clause deleted.
+- Bootstrap / upgrade graph writes go through `write-graph.py`. Validate / ab-test /
+  stress-test no longer write graphs.
+- Brain is a consumer; agentic-rosetta is the one true source.
+
 ## [0.3.0] — 2026-08-08
 
 ### Added
