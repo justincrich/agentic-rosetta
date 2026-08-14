@@ -463,7 +463,9 @@ def _conditional_get(url: str, etag: str | None, stored_hash: str | None) -> tup
             digest = hashlib.sha256(body).hexdigest()
             if stored_hash and digest == stored_hash:
                 return "current", ""
-            return "stale", f"docs {url} body changed"
+            if stored_hash:
+                return "stale", f"docs {url} body changed"
+            return "undeterminable", f"docs {url}: 200 but no stored body hash"
     except urllib.error.HTTPError as e:
         if e.code == 304:
             return "current", ""
@@ -472,18 +474,31 @@ def _conditional_get(url: str, etag: str | None, stored_hash: str | None) -> tup
         return "undeterminable", f"docs {url}: {e}"
 
 
-def _check_docs_pin(pin: dict[str, Any]) -> tuple[str, str]:
-    units = list(pin.get("unitPins") or [])
-    if pin.get("url") and (pin.get("etag") or pin.get("sha256")):
-        units = [{
-            "locator": pin.get("url"),
+def _docs_units(pin: dict[str, Any]) -> list[dict[str, Any]]:
+    """Engine pins put etag on the pin and the body hash on unitPins — never invent a hashless unit."""
+    units = [dict(u) for u in (pin.get("unitPins") or []) if isinstance(u, dict)]
+    seen = {str(u.get("locator") or u.get("url") or "") for u in units}
+    pin_url = pin.get("url")
+    pin_hash = pin.get("sha256")
+    if pin_url and pin_hash and pin_url not in seen:
+        units.append({
+            "locator": pin_url,
             "etag": pin.get("etag"),
-            "sha256": pin.get("sha256"),
-        }] + units
-    if not units and pin.get("url") and pin.get("corpus_sha256"):
-        units = [{"locator": pin["url"], "sha256": pin["corpus_sha256"]}]
+            "sha256": pin_hash,
+        })
+        seen.add(str(pin_url))
+    if pin_url and pin.get("etag"):
+        for u in units:
+            loc = u.get("locator") or u.get("url")
+            if loc == pin_url and not u.get("etag"):
+                u["etag"] = pin.get("etag")
+    return [u for u in units if u.get("locator") or u.get("url")]
+
+
+def _check_docs_pin(pin: dict[str, Any]) -> tuple[str, str]:
+    units = _docs_units(pin)
     if not units:
-        return "undeterminable", "docs pin has no units or etag"
+        return "undeterminable", "docs pin has no unitPins with a locator"
     worst = "current"
     notes: list[str] = []
     for u in units:

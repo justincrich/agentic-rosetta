@@ -49,12 +49,49 @@ class _EtagHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(self.body)
 
 
-def serve() -> tuple[http.server.HTTPServer, str]:
-    httpd = http.server.HTTPServer(("127.0.0.1", 0), _EtagHandler)
+class _Always200:
+    """Mutable always-200 server — never 304. Matches servers that ignore If-None-Match."""
+
+    body = b"engine-docs-v1"
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: object) -> None:  # noqa: ARG002
+            return
+
+        def do_GET(self) -> None:  # noqa: N802
+            payload = _Always200.body
+            self.send_response(200)
+            self.send_header("ETag", '"ignored"')
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+
+def serve(handler: type[http.server.BaseHTTPRequestHandler] = _EtagHandler) -> tuple[http.server.HTTPServer, str]:
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), handler)
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     host, port = httpd.server_address[:2]
     return httpd, f"http://{host}:{port}/"
+
+
+def _sha(data: bytes) -> str:
+    return __import__("hashlib").sha256(data).hexdigest()
+
+
+def engine_shaped_pin(url: str, body: bytes, etag: str | None = '"pin-etag"') -> dict:
+    """Shape pinDocs actually emits: etag on the pin, body hash only on unitPins. No pin.sha256."""
+    digest = _sha(body)
+    return {
+        "kind": "docs",
+        "url": url,
+        "etag": etag,
+        "fetched_at": "2026-08-14T00:00:00Z",
+        "units": 1,
+        "corpus_sha256": P.corpus_digest([{"locator": url, "sha256": digest}]),
+        "unitPins": [{"locator": url, "sha256": digest}],
+    }
 
 
 def main() -> int:
@@ -164,6 +201,40 @@ def main() -> int:
         check("cli-stale-2", cli4.returncode == 10)
     finally:
         httpd.shutdown()
+
+    # Engine-shaped pin vs always-200 (no 304): same body → 0; body change → 10.
+    _Always200.body = b"engine-docs-v1"
+    httpd2, url2 = serve(_Always200.Handler)
+    try:
+        eng = engine_shaped_pin(url2, _Always200.body)
+        check("engine-pin-no-sha256", "sha256" not in eng)
+        e1, er1 = P.check_stale({"sources": [eng]})
+        e2, er2 = P.check_stale({"sources": [eng]})
+        check("engine-200-current-1", e1 == 0, str(er1))
+        check("engine-200-current-2", e2 == 0 and er2 == er1, str(er2))
+
+        kb2 = tmp / "proj2" / ".rosetta" / "docs" / "eng"
+        kb2.mkdir(parents=True)
+        (kb2 / "provenance.json").write_text(json.dumps({"sources": [eng]}, indent=2))
+        c_a = run_probe("--root", str(tmp / "proj2"), "--check-stale", "eng")
+        c_b = run_probe("--root", str(tmp / "proj2"), "--check-stale", "eng")
+        check("engine-cli-current-1", c_a.returncode == 0, c_a.stdout + c_a.stderr)
+        check("engine-cli-current-2", c_b.returncode == 0 and c_a.stdout == c_b.stdout)
+
+        _Always200.body = b"engine-docs-CHANGED"
+        e3, er3 = P.check_stale({"sources": [eng]})
+        e4, er4 = P.check_stale({"sources": [eng]})
+        check("engine-200-stale-1", e3 == 10, str(er3))
+        check("engine-200-stale-2", e4 == 10, str(er4))
+        check("engine-200-stale-names", any(url2 in x for x in (er3.get("moved") or [])), str(er3))
+
+        (kb2 / "provenance.json").write_text(json.dumps({"sources": [eng]}, indent=2))
+        c_c = run_probe("--root", str(tmp / "proj2"), "--check-stale", "eng")
+        c_d = run_probe("--root", str(tmp / "proj2"), "--check-stale", "eng")
+        check("engine-cli-stale-1", c_c.returncode == 10, c_c.stdout)
+        check("engine-cli-stale-2", c_d.returncode == 10)
+    finally:
+        httpd2.shutdown()
 
     if failures:
         for f in failures:
