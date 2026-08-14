@@ -11,14 +11,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,23 @@ sys.path.insert(0, str(HERE))
 PROVENANCE_NAME = "provenance.json"
 FACT_SOURCES_NAME = "fact-sources.json"
 HISTORY_MANIFEST = Path(".history") / "manifest.json"
+SEEDS_NAME = "backfill-seeds.json"
+DOCS_MAX_UNITS = 40
+USER_AGENT = "rosetta-provenance/1.0"
+V_URL_KEYS = (
+    "repo", "repo_url", "docs_url", "authoritative_cli_contract",
+    "canonical_skill", "web_api_page",
+)
+META_URL_KEYS = ("repo", "docs", "docs_url", "source")
+_URL_RE = re.compile(r"https?://[^\s)\]>\"'`,]+")
+_HOST_RE = re.compile(
+    r"(?<![\w./@-])((?:[A-Za-z0-9-]+\.)+(?:com|org|net|io|dev|ai|app|so|cloud|rs|sh|to|co|gg|ms|tv|me|info|edu|gov)(?:/[^\s)\]>\"'`,]*)?)",
+    re.I,
+)
+_OK_TLDS = frozenset({
+    "com", "org", "net", "io", "dev", "ai", "app", "so", "cloud", "rs", "sh",
+    "to", "co", "gg", "ms", "tv", "me", "info", "edu", "gov",
+})
 
 _VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 
@@ -417,6 +436,455 @@ def upsert_readme_kb_line(kb_dir: Path, graph: dict[str, Any], provenance: dict[
         readme.write_text(new, encoding="utf-8")
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def sanitize_url(raw: str | None) -> str | None:
+    """Keep fetchable http(s)/file URLs. Drop localhost, templates, junk hosts."""
+    text = (raw or "").strip()
+    text = re.sub(r"\s+\(.*$", "", text)
+    text = text.rstrip(".,;:)\"'")
+    if not text:
+        return None
+    if any(ch in text for ch in "{}<> \t\n"):
+        return None
+    if text.startswith("file:"):
+        return text
+    if not re.match(r"^https?://", text, re.I):
+        if re.match(r"^(?:github|gitlab|bitbucket)\.com/", text, re.I):
+            text = "https://" + text
+        elif re.match(r"^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:[/?#]|$)", text):
+            text = "https://" + text
+        else:
+            return None
+    try:
+        parsed = urllib.parse.urlparse(text)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    if host in {"localhost", "::1"}:
+        return None
+    try:
+        ipaddress.ip_address(host)
+        return text
+    except ValueError:
+        pass
+    if "." not in host:
+        return None
+    if host.startswith("_") or host.endswith(".internal") or ".svc." in host:
+        return None
+    tld = host.rsplit(".", 1)[-1]
+    if tld not in _OK_TLDS:
+        return None
+    # Scheme-less promotions: reject CamelCase code tokens (Dispatchers.IO, Cargo.to)
+    # and toy two-letter hosts (e.me, t3.me). Explicit https:// keeps them if a TLD matches.
+    original = (raw or "").strip()
+    had_scheme = bool(re.match(r"^https?://", original, re.I))
+    if not had_scheme:
+        raw_host = original.split("/")[0].split(":")[0]
+        if any(c.isupper() for c in raw_host):
+            return None
+        labels = host.split(".")
+        if len(labels) < 2 or len(labels[0]) <= 2:
+            return None
+        if tld not in {"com", "org", "net", "io", "dev", "ai", "app", "cloud"}:
+            return None
+    return text
+
+
+def classify_locator(url: str) -> str:
+    """``repo`` for a git remote root; ``docs`` otherwise."""
+    if url.startswith("file:"):
+        return "repo"
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if host in {"github.com", "gitlab.com", "bitbucket.org"}:
+        parts = [p for p in parsed.path.split("/") if p]
+        if parts and parts[-1].endswith(".git"):
+            parts = parts[:-1] + [parts[-1][:-4]]
+        if len(parts) == 2:
+            return "repo"
+    return "docs"
+
+
+def resolve_local_path(src: str, root: Path | None, kb_dir: Path) -> Path | None:
+    text = (src or "").strip()
+    if not text or text.startswith(("http://", "https://", "file:")):
+        return None
+    text = re.sub(r":\d+$", "", text)
+    candidates: list[Path] = []
+    abs_p = Path(text)
+    if abs_p.is_file():
+        return abs_p.resolve()
+    if root:
+        candidates.append(root / text)
+        if text.startswith("brain/docs/"):
+            candidates.append(root / ".rosetta" / "docs" / text[len("brain/docs/"):])
+        if text.startswith("docs/"):
+            candidates.append(root / ".rosetta" / "docs" / text[len("docs/"):])
+    candidates.append(kb_dir / text)
+    candidates.append(kb_dir / Path(text).name)
+    if text.startswith("docs/"):
+        candidates.append(kb_dir / text[len("docs/"):])
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                return cand.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def _rel_locator(path: Path, root: Path | None, kb_dir: Path) -> str:
+    resolved = path.resolve()
+    if root:
+        try:
+            return resolved.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            pass
+    try:
+        return resolved.relative_to(kb_dir.resolve()).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def harvest_locators(kb_dir: Path, graph: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
+    """Collect locators from on-disk graph / README / history. No network."""
+    docs: list[str] = []
+    repos: list[str] = []
+    local: list[dict[str, str]] = []
+    fact_sources: dict[str, Any] = {}
+    seen_http: set[str] = set()
+    seen_local: set[str] = set()
+    priority_docs: list[str] = []
+    priority_repos: list[str] = []
+
+    def add_http(raw: Any, *, priority: bool = False) -> None:
+        url = sanitize_url(str(raw) if raw is not None else "")
+        if not url or url in seen_http:
+            return
+        seen_http.add(url)
+        kind = classify_locator(url)
+        if kind == "repo":
+            repos.append(url)
+            if priority:
+                priority_repos.append(url)
+        else:
+            docs.append(url)
+            if priority:
+                priority_docs.append(url)
+
+    def add_fact(key: str, src: str) -> None:
+        fact_sources[key] = src
+        resolved = resolve_local_path(src, root, kb_dir)
+        if not resolved:
+            return
+        loc = _rel_locator(resolved, root, kb_dir)
+        if loc in seen_local:
+            return
+        seen_local.add(loc)
+        local.append({"locator": loc, "path": str(resolved)})
+
+    v = graph.get("v") or {}
+    if isinstance(v, dict):
+        for key in V_URL_KEYS:
+            val = v.get(key)
+            if isinstance(val, str) and val.strip():
+                add_http(val, priority=True)
+
+    meta = graph.get("_meta") or {}
+    if isinstance(meta, dict):
+        for key in META_URL_KEYS:
+            val = meta.get(key)
+            if isinstance(val, str):
+                add_http(val)
+        for item in meta.get("sources") or []:
+            if isinstance(item, str):
+                add_http(item)
+            elif isinstance(item, dict):
+                for val in item.values():
+                    if isinstance(val, str):
+                        add_http(val)
+
+    hist = kb_dir / HISTORY_MANIFEST
+    if hist.is_file():
+        try:
+            data = json.loads(hist.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = None
+        urls: list[Any] = []
+        if isinstance(data, dict):
+            urls.extend(data.get("source_urls") or [])
+            for ref in (data.get("refreshes") or data.get("entries") or []):
+                if isinstance(ref, dict):
+                    urls.extend(ref.get("source_urls") or ref.get("sources") or [])
+        elif isinstance(data, list):
+            for ref in data:
+                if isinstance(ref, dict):
+                    urls.extend(ref.get("source_urls") or [])
+        for url in urls:
+            if isinstance(url, str):
+                add_http(url)
+
+    for name in ("README.md", "ROSETTA.md"):
+        path = kb_dir / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for url in _URL_RE.findall(text):
+            add_http(url)
+        for host in _HOST_RE.findall(text):
+            add_http(host)
+
+    for sec in ("v", "w", "r", "a", "x", "t"):
+        secv = graph.get(sec) or {}
+        if not isinstance(secv, dict):
+            continue
+        for key, val in secv.items():
+            if not isinstance(val, dict):
+                continue
+            src = val.get("src") if val.get("src") is not None else val.get("source")
+            if not isinstance(src, str) or not src.strip():
+                continue
+            fact_key = f"{sec}:{key}"
+            cleaned = sanitize_url(src)
+            if cleaned:
+                add_http(src)
+                fact_sources[fact_key] = cleaned
+            else:
+                add_fact(fact_key, src.strip())
+
+    if len(docs) > DOCS_MAX_UNITS:
+        kept: list[str] = []
+        seen: set[str] = set()
+        for url in priority_docs + docs:
+            if url in seen:
+                continue
+            seen.add(url)
+            kept.append(url)
+            if len(kept) >= DOCS_MAX_UNITS:
+                break
+        for url in priority_docs:
+            if url not in kept:
+                kept.append(url)
+        docs = kept
+
+    return {
+        "docs": docs,
+        "repos": repos,
+        "local": local,
+        "fact_sources": fact_sources,
+        "priority_docs": priority_docs,
+        "priority_repos": priority_repos,
+    }
+
+
+def load_seeds(path: Path | None = None) -> dict[str, list[str]]:
+    seed_path = path or (HERE / SEEDS_NAME)
+    if not seed_path.is_file():
+        return {}
+    try:
+        data = json.loads(seed_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for slug, urls in data.items():
+        if isinstance(urls, list):
+            out[str(slug)] = [str(u) for u in urls]
+        elif isinstance(urls, str):
+            out[str(slug)] = [urls]
+    return out
+
+
+def fetch_docs_unit(url: str) -> tuple[dict[str, Any] | None, str]:
+    req = urllib.request.Request(url, method="GET", headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read()
+            etag = resp.headers.get("ETag")
+            last_mod = resp.headers.get("Last-Modified")
+            unit: dict[str, Any] = {
+                "locator": url,
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "bytes": len(body),
+            }
+            if etag:
+                unit["etag"] = etag
+            if last_mod:
+                unit["lastModified"] = last_mod
+            return unit, ""
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code}"
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        return None, str(exc)
+
+
+def pin_docs_now(urls: list[str]) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+    units: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    primary = urls[0] if urls else None
+    primary_etag = None
+    primary_lm = None
+    for url in urls:
+        unit, err = fetch_docs_unit(url)
+        if unit:
+            units.append(unit)
+            if url == primary:
+                primary_etag = unit.get("etag")
+                primary_lm = unit.get("lastModified")
+        else:
+            failures.append({"url": url, "reason": err})
+    if not units:
+        return None, failures
+    pin: dict[str, Any] = {
+        "kind": "docs",
+        "url": primary,
+        "fetched_at": _now(),
+        "units": len(units),
+        "corpus_sha256": corpus_digest(units),
+        "unitPins": units,
+    }
+    if primary_etag:
+        pin["etag"] = primary_etag
+    if primary_lm:
+        pin["lastModified"] = primary_lm
+    return pin, failures
+
+
+def pin_repo_now(url: str) -> tuple[dict[str, Any] | None, str]:
+    commit, err = _ls_remote(url, "HEAD")
+    if not commit:
+        return None, err or "ls-remote failed"
+    digest = sha256_text(commit)
+    return {
+        "kind": "repo",
+        "url": url,
+        "ref": "HEAD",
+        "commit": commit,
+        "fetched_at": _now(),
+        "units": 0,
+        "corpus_sha256": digest,
+    }, ""
+
+
+def pin_local_now(items: list[dict[str, str]]) -> dict[str, Any] | None:
+    units: list[dict[str, Any]] = []
+    for item in items:
+        path = Path(item["path"])
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        units.append({
+            "locator": item["locator"],
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+        })
+    if not units:
+        return None
+    return {
+        "kind": "local",
+        "fetched_at": _now(),
+        "units": len(units),
+        "corpus_sha256": corpus_digest(units),
+        "unitPins": units,
+    }
+
+
+def _split_overlay_urls(entry: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Judged sources from a discovery overlay. Applied first, never invented here."""
+    docs: list[str] = []
+    repos: list[str] = []
+    seen: set[str] = set()
+
+    def take(raw: Any) -> None:
+        url = sanitize_url(str(raw) if raw is not None else "")
+        if not url or url in seen:
+            return
+        seen.add(url)
+        if classify_locator(url) == "repo":
+            repos.append(url)
+        else:
+            docs.append(url)
+
+    if not isinstance(entry, dict):
+        return docs, repos
+    take(entry.get("repo_url") or entry.get("repo"))
+    take(entry.get("docs_url") or entry.get("docs"))
+    for extra in entry.get("urls") or []:
+        take(extra)
+    return docs, repos
+
+
+def load_overlay(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def plan_backfill(
+    kb_dir: Path,
+    graph: dict[str, Any],
+    root: Path | None,
+    seeds: dict[str, list[str]] | None = None,
+    overlay: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    harvested = harvest_locators(kb_dir, graph, root)
+    docs = list(harvested["docs"])
+    repos = list(harvested["repos"])
+    local = list(harvested["local"])
+    over_docs, over_repos = _split_overlay_urls((overlay or {}).get(kb_dir.name) or {})
+    docs = over_docs + [u for u in docs if u not in over_docs]
+    repos = over_repos + [u for u in repos if u not in over_repos]
+    if not docs and not repos and not local:
+        for raw in (seeds or {}).get(kb_dir.name) or []:
+            url = sanitize_url(raw)
+            if not url:
+                continue
+            if classify_locator(url) == "repo":
+                repos.append(url)
+            else:
+                docs.append(url)
+    pins: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    for url in repos:
+        pin, err = pin_repo_now(url)
+        if pin:
+            pins.append(pin)
+        else:
+            failures.append({"url": url, "reason": err, "kind": "repo"})
+    if docs:
+        pin, fails = pin_docs_now(docs)
+        if pin:
+            pins.append(pin)
+        for fail in fails:
+            failures.append({"url": fail.get("url", ""), "reason": fail.get("reason", ""), "kind": "docs"})
+    if local:
+        pin = pin_local_now(local)
+        if pin:
+            pins.append(pin)
+    status = "backfill-now" if pins else "undeterminable"
+    return {
+        "pins": pins,
+        "fact_sources": harvested["fact_sources"],
+        "status": status,
+        "failures": failures,
+        "harvested": harvested,
+    }
+
+
 # --------------------------------------------------------------------------- stale probe
 
 def _ls_remote(url: str, ref: str) -> tuple[str | None, str]:
@@ -517,7 +985,38 @@ def _check_docs_pin(pin: dict[str, Any]) -> tuple[str, str]:
     return worst, "; ".join(notes)
 
 
-def check_stale(provenance: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def _check_local_pin(pin: dict[str, Any], root: Path | None) -> tuple[str, str]:
+    units = [u for u in (pin.get("unitPins") or []) if isinstance(u, dict)]
+    if not units:
+        return "undeterminable", "local pin has no unitPins"
+    worst = "current"
+    notes: list[str] = []
+    for unit in units:
+        loc = unit.get("locator") or unit.get("path")
+        stored = unit.get("sha256")
+        path: Path | None = None
+        if loc:
+            direct = Path(str(loc))
+            if direct.is_file():
+                path = direct
+            elif root is not None:
+                cand = Path(root) / str(loc)
+                if cand.is_file():
+                    path = cand
+        if path is None or not path.is_file():
+            worst = "undeterminable"
+            notes.append(f"local missing {loc}")
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if stored and digest != stored:
+            return "stale", f"local {loc} body changed"
+        if not stored:
+            worst = "undeterminable"
+            notes.append(f"local {loc}: no stored hash")
+    return worst, "; ".join(notes)
+
+
+def check_stale(provenance: dict[str, Any], root: Path | None = None) -> tuple[int, dict[str, Any]]:
     pins = provenance.get("sources") or provenance.get("pins") or []
     if not pins:
         return 1, {"status": "undeterminable", "reason": "no source pins", "moved": []}
@@ -532,6 +1031,8 @@ def check_stale(provenance: dict[str, Any]) -> tuple[int, dict[str, Any]]:
             state, note = _check_repo_pin(pin)
         elif kind == "docs":
             state, note = _check_docs_pin(pin)
+        elif kind == "local":
+            state, note = _check_local_pin(pin, root)
         else:
             state, note = "undeterminable", f"unknown pin kind {kind!r}"
         if state == "stale":
@@ -570,7 +1071,7 @@ def main(argv: list[str]) -> int:
         except json.JSONDecodeError as e:
             print(json.dumps({"status": "undeterminable", "reason": str(e)}))
             return 1
-        code, report = check_stale(prov)
+        code, report = check_stale(prov, root=root)
         print(json.dumps(report, indent=2, sort_keys=True))
         return code
     p.print_help()

@@ -236,11 +236,89 @@ def main() -> int:
     finally:
         httpd2.shutdown()
 
+    # --- harvest / sanitize (fixture files, no network) ---
+    if not hasattr(P, "sanitize_url") or not hasattr(P, "harvest_locators"):
+        failures.append("harvest-api missing sanitize_url/harvest_locators")
+    else:
+        check("san-drop-x", P.sanitize_url("https://x") is None)
+        check("san-drop-localhost", P.sanitize_url("http://localhost:4111/docs") is None)
+        check("san-keep-loopback-for-tests", P.sanitize_url("http://127.0.0.1:17320/foo") == "http://127.0.0.1:17320/foo")
+        check("san-drop-template", P.sanitize_url("https://r.example.com/styles/{style}/x.json") is None)
+        check("san-drop-truncated", P.sanitize_url("http://127.0.0.1:17320/<tag") is None)
+        check("san-drop-internal", P.sanitize_url("http://_api.internal:4280") is None)
+        check(
+            "san-scheme-less",
+            P.sanitize_url("developers.cloudflare.com/agents/llms-full.txt")
+            == "https://developers.cloudflare.com/agents/llms-full.txt",
+        )
+        check(
+            "san-keep-github",
+            P.sanitize_url("https://github.com/manaflow-ai/cmux")
+            == "https://github.com/manaflow-ai/cmux",
+        )
+        check("san-drop-filename-tld", P.sanitize_url("https://fact-graph.json") is None)
+        check("san-drop-md-host", P.sanitize_url("principles.md") is None)
+        check("san-drop-camel-host", P.sanitize_url("Dispatchers.IO") is None)
+        check(
+            "san-strip-paren-tail",
+            P.sanitize_url("https://cmux.com/docs/api (a CURATED SUBSET)")
+            == "https://cmux.com/docs/api",
+        )
+        check(
+            "classify-repo",
+            P.classify_locator("https://github.com/manaflow-ai/cmux") == "repo",
+        )
+        check(
+            "classify-raw-docs",
+            P.classify_locator(
+                "https://raw.githubusercontent.com/manaflow-ai/cmux/main/docs/cli-contract.md"
+            ) == "docs",
+        )
+
+        hdir = tmp / "harvest-kb"
+        hdir.mkdir()
+        graph = {
+            "v": {
+                "repo": "github.com/acme/toy",
+                "authoritative_cli_contract": "https://example.com/contract.md",
+                "kb_version": "1.0.0",
+            },
+            "_meta": {"sources": ["https://example.com/docs/", "http://localhost:9/skip"]},
+            "w": {
+                "Widget": {
+                    "t": "sl", "i": "toy",
+                    "src": "brain/docs/toy/widget.md",
+                }
+            },
+        }
+        (hdir / "README.md").write_text(
+            "See developers.cloudflare.com/agents/llms-full.txt and https://x\n"
+        )
+        (hdir / ".history").mkdir()
+        (hdir / ".history" / "manifest.json").write_text(json.dumps({
+            "refreshes": [{"source_urls": ["https://example.com/history-src.md"]}],
+        }))
+        (hdir / "widget.md").write_text("# widget\n")
+        harvested = P.harvest_locators(hdir, graph, root=tmp)
+        docs = set(harvested.get("docs") or [])
+        repos = set(harvested.get("repos") or [])
+        local = harvested.get("local") or []
+        check("harvest-scheme-less-cf", "https://developers.cloudflare.com/agents/llms-full.txt" in docs)
+        check("harvest-meta-docs", "https://example.com/docs/" in docs or "https://example.com/docs" in docs)
+        check("harvest-history", "https://example.com/history-src.md" in docs)
+        check("harvest-contract", "https://example.com/contract.md" in docs)
+        check("harvest-repo", any("github.com/acme/toy" in r for r in repos))
+        check("harvest-no-localhost", not any("localhost" in d for d in docs))
+        check("harvest-no-https-x", "https://x" not in docs)
+        check("harvest-local-exists", len(local) >= 1, str(local))
+        fs = harvested.get("fact_sources") or {}
+        check("harvest-fact-src", "w:Widget" in fs, str(fs))
+
     if failures:
         for f in failures:
             print("FAIL:", f, file=sys.stderr)
         return 1
-    print("ok — provenance digest + stale probe (docs ETag + git ls-remote)")
+    print("ok — provenance digest + stale probe (docs ETag + git ls-remote) + harvest")
     return 0
 
 

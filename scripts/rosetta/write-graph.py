@@ -5,6 +5,7 @@
   write-graph.py --update <tech> --changeset <f> --ledger <f> [--nrra <f>] [--root DIR]
   write-graph.py --check  <tech> [--root DIR]
   write-graph.py --adopt  <tech> [--root DIR]
+  write-graph.py --backfill [TECH] [--all] [--root DIR] [--sources FILE]
 
 Gate (before create/update acts):
   1. ledger closed — closed + named-gap rows == censused
@@ -13,6 +14,9 @@ Gate (before create/update acts):
 Any failure: exit non-zero, write nothing, name the failed check.
 
 --adopt stamps recoverable fields on a legacy graph; no ledger required.
+--backfill harvests on-disk locators, merges an optional judged --sources overlay,
+and writes now-pins (status=backfill-now). The overlay is agent-produced (search +
+judgment); this writer never invents URLs.
 --check on an unstamped (legacy) graph warns, does not fail.
 """
 from __future__ import annotations
@@ -26,6 +30,7 @@ import shutil
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -384,6 +389,94 @@ def _readme_kb(kb_dir: Path) -> str | None:
     return m.group(1) if m else None
 
 
+def list_docs_techs(root: Path) -> list[str]:
+    docs = root / ".rosetta" / "docs"
+    if not docs.is_dir():
+        return []
+    techs: list[str] = []
+    for path in sorted(docs.iterdir()):
+        if path.is_dir() and (path / "fact-graph.json").is_file():
+            techs.append(path.name)
+    return techs
+
+
+def ensure_adopt_fields(graph: dict, kb_dir: Path) -> bool:
+    """Stamp recoverable v fields without writing a legacy pin. Does not bump kb_version."""
+    v = graph.setdefault("v", {})
+    if not isinstance(v, dict):
+        _die("backfill", "v is not an object")
+    changed = False
+    if not v.get("kb_version"):
+        v["kb_version"] = _readme_kb(kb_dir) or "1.0.0"
+        changed = True
+    if not v.get("pinned_date"):
+        v["pinned_date"] = str(v.get("pinned") or date.today().isoformat())
+        changed = True
+    ver = v.get("version")
+    if ver in ("", "0.0.0"):
+        v["version"] = None
+        v["version_source"] = "legacy-unknown"
+        changed = True
+    elif ver is not None and "version_source" not in v:
+        v["version_source"] = "legacy-unknown"
+        changed = True
+    if "t" not in graph or graph.get("t") is None:
+        graph["t"] = {}
+        changed = True
+    return changed
+
+
+def apply_overlay_version(graph: dict, entry: dict[str, Any] | None) -> bool:
+    """Use a judged live version only when the graph has none. Never overwrite a real pin."""
+    if not isinstance(entry, dict):
+        return False
+    judged = entry.get("version")
+    if not isinstance(judged, str) or not judged.strip() or judged.strip() == "0.0.0":
+        return False
+    v = graph.setdefault("v", {})
+    src = entry.get("version_source") or entry.get("docs_url") or entry.get("repo_url") or "overlay"
+    if v.get("version") in (None, "", "0.0.0"):
+        v["version"] = judged.strip()
+        v["version_source"] = str(src)
+        return True
+    if v.get("version_source") in (None, "", "legacy-unknown"):
+        v["version_source"] = str(src)
+        return True
+    return False
+
+
+def cmd_backfill(tech: str, root: Path, overlay: dict | None = None) -> int:
+    dest = graph_path(root, tech)
+    if not dest.is_file():
+        _die("backfill", f"no graph at {dest}")
+    graph = load_json(dest)
+    entry = (overlay or {}).get(tech) if overlay else None
+    changed = ensure_adopt_fields(graph, dest.parent)
+    if apply_overlay_version(graph, entry if isinstance(entry, dict) else None):
+        changed = True
+    if changed:
+        try:
+            validate_graph(graph)
+        except GateError as exc:
+            print(f"write-graph: WARN backfill schema ({tech}): {exc}", file=sys.stderr)
+        atomic_write(dest, graph)
+    planned = P.plan_backfill(
+        dest.parent, graph, root, seeds=P.load_seeds(), overlay=overlay,
+    )
+    persist_siblings(
+        dest, graph, planned["pins"], planned["fact_sources"], status=planned["status"],
+    )
+    n_fail = len(planned.get("failures") or [])
+    print(
+        f"[backfill] {tech} status={planned['status']} "
+        f"pins={len(planned['pins'])} failures={n_fail}"
+    )
+    if planned.get("failures"):
+        for fail in planned["failures"]:
+            print(f"  fail {fail.get('kind')} {fail.get('url')}: {fail.get('reason')}")
+    return 0
+
+
 def cmd_adopt(tech: str, root: Path) -> int:
     dest = graph_path(root, tech)
     if not dest.is_file():
@@ -448,6 +541,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--update", metavar="TECH")
     p.add_argument("--check", metavar="TECH")
     p.add_argument("--adopt", metavar="TECH")
+    p.add_argument("--backfill", metavar="TECH", nargs="?", const="*")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--sources", type=Path, help="judged overlay JSON {slug: {docs_url, repo_url, version?}}")
     p.add_argument("--nrra", type=Path)
     p.add_argument("--ledger", type=Path)
     p.add_argument("--changeset", type=Path)
@@ -472,6 +568,28 @@ def main(argv: list[str]) -> int:
             return cmd_update(args.update, args.changeset, args.ledger, args.nrra, root, args.source_repo)
         if args.adopt:
             return cmd_adopt(args.adopt, root)
+        if args.backfill is not None:
+            techs = (
+                list_docs_techs(root)
+                if (args.all or args.backfill == "*")
+                else [args.backfill]
+            )
+            if not techs:
+                _die("backfill", f"no fact-graph.json under {root / '.rosetta' / 'docs'}")
+            overlay = P.load_overlay(args.sources) if args.sources else None
+            rc = 0
+            for tech in techs:
+                try:
+                    got = cmd_backfill(tech, root, overlay=overlay)
+                except GateError as exc:
+                    print(str(exc), file=sys.stderr)
+                    got = 2
+                except Exception as exc:  # noqa: BLE001 — one KB must not abort --all
+                    print(f"write-graph: FAIL backfill {tech}: {exc}", file=sys.stderr)
+                    got = 2
+                if got != 0:
+                    rc = got
+            return rc
         if args.check:
             return cmd_check(args.check, root)
     except GateError as e:

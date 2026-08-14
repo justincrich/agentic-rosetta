@@ -1,0 +1,5 @@
+{
+  "hetzner-cloud": ["https://github.com/hetznercloud/hcloud-rust"],
+  "spacetime-db": ["https://spacetimedb.com/docs"],
+  "electron": ["https://www.electronjs.org/docs/latest"]
+}

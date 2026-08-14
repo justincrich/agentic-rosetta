@@ -242,6 +242,199 @@ def main() -> int:
     check("legacy-warn-exit0", lg.returncode == 0, lg.stderr)
     check("legacy-warn-text", "legacy" in (lg.stdout + lg.stderr).lower())
 
+    # --- --backfill: real HTTP + real ls-remote + real local file ---
+    import http.server
+    import threading
+
+    class _BackfillHandler(http.server.BaseHTTPRequestHandler):
+        body = b"backfill-docs-v1"
+        etag = '"bf-v1"'
+
+        def log_message(self, fmt: str, *args: object) -> None:  # noqa: ARG002
+            return
+
+        def do_GET(self) -> None:  # noqa: N802
+            inm = self.headers.get("If-None-Match")
+            if inm == self.etag:
+                self.send_response(304)
+                self.send_header("ETag", self.etag)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("ETag", self.etag)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(self.body)))
+            self.end_headers()
+            self.wfile.write(self.body)
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _BackfillHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    host, port = httpd.server_address[:2]
+    docs_url = f"http://{host}:{port}/guide"
+    try:
+        bf_root = tmp / "bf-proj"
+        # docs graph
+        docs_kb = bf_root / ".rosetta" / "docs" / "docsish"
+        docs_kb.mkdir(parents=True)
+        (docs_kb / "fact-graph.json").write_text(json.dumps({
+            "v": {"pkg": "docsish", "version": "3.2.1", "kb_version": "1.0.0", "pinned": "2026-06"},
+            "_meta": {"sources": [docs_url]},
+            "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+        }))
+        (docs_kb / "README.md").write_text("# Docsish\n\n- **KB version**: 1.0.0 · **corpus**: 4f53cda1\n")
+        bf = run("--root", str(bf_root), "--backfill", "docsish")
+        check("backfill-docs-cli", bf.returncode == 0, bf.stdout + bf.stderr)
+        if not (docs_kb / "provenance.json").is_file():
+            check("backfill-docs-wrote", False, bf.stdout + bf.stderr)
+            httpd.shutdown()
+            if failures:
+                for f in failures:
+                    print("FAIL:", f, file=sys.stderr)
+                return 1
+            return 1
+        prov = json.loads((docs_kb / "provenance.json").read_text())
+        check("backfill-status", prov.get("status") == "backfill-now", str(prov.get("status")))
+        check("backfill-kb-untouched", json.loads((docs_kb / "fact-graph.json").read_text())["v"]["kb_version"] == "1.0.0")
+        check("backfill-version-kept", json.loads((docs_kb / "fact-graph.json").read_text())["v"]["version"] == "3.2.1")
+        check("backfill-not-legacy", not any(
+            (p.get("kind") == "legacy") or (p.get("status") == "legacy-unknown")
+            for p in (prov.get("sources") or [])
+        ), str(prov.get("sources")))
+        units = []
+        for p in prov.get("sources") or []:
+            units.extend(p.get("unitPins") or [])
+        check("backfill-etag", any(u.get("etag") == _BackfillHandler.etag or p.get("etag") == _BackfillHandler.etag
+                                   for p in (prov.get("sources") or []) for u in ([p] + (p.get("unitPins") or []))),
+              str(prov.get("sources")))
+        check("backfill-unit-hash", any(u.get("sha256") for u in units), str(units))
+        check("backfill-corpus-not-empty", (prov.get("corpus_sha256") or "")[:8] != "4f53cda1",
+              str(prov.get("corpus_sha256")))
+        readme = (docs_kb / "README.md").read_text()
+        check("backfill-readme-corpus", "4f53cda1" not in readme or "corpus**: 4f53cda1" not in readme)
+
+        import provenance as _P  # noqa: E402
+        probe = HERE / "provenance.py"
+        def run_probe(*a: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run([sys.executable, str(probe), *a], capture_output=True, text=True)
+        p1 = run_probe("--root", str(bf_root), "--check-stale", "docsish")
+        p2 = run_probe("--root", str(bf_root), "--check-stale", "docsish")
+        check("backfill-stale-0a", p1.returncode == 0, p1.stdout + p1.stderr)
+        check("backfill-stale-0b", p2.returncode == 0 and p1.stdout == p2.stdout, p2.stdout)
+
+        _BackfillHandler.body = b"backfill-docs-CHANGED"
+        _BackfillHandler.etag = '"bf-v2"'
+        p3 = run_probe("--root", str(bf_root), "--check-stale", "docsish")
+        p4 = run_probe("--root", str(bf_root), "--check-stale", "docsish")
+        check("backfill-stale-10a", p3.returncode == 10, p3.stdout)
+        check("backfill-stale-10b", p4.returncode == 10)
+        check("backfill-stale-names", docs_url in p3.stdout, p3.stdout)
+
+        # repo graph via file:// bare remote
+        work = tmp / "repo-work"
+        work.mkdir()
+        (work / "README.md").write_text("repo\n")
+        subprocess.run(["git", "init"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i"],
+            cwd=work, check=True, capture_output=True,
+        )
+        remote = tmp / "repo-remote.git"
+        subprocess.run(["git", "clone", "--bare", str(work), str(remote)], check=True, capture_output=True)
+        head = subprocess.check_output(["git", "-C", str(work), "rev-parse", "HEAD"], text=True).strip()
+        remote_url = remote.resolve().as_uri()
+        repo_kb = bf_root / ".rosetta" / "docs" / "repoish"
+        repo_kb.mkdir(parents=True)
+        (repo_kb / "fact-graph.json").write_text(json.dumps({
+            "v": {"pkg": "repoish", "version": "9.0.0", "kb_version": "1.0.0", "repo": remote_url},
+            "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+        }))
+        br = run("--root", str(bf_root), "--backfill", "repoish")
+        check("backfill-repo-cli", br.returncode == 0, br.stdout + br.stderr)
+        rprov = json.loads((repo_kb / "provenance.json").read_text())
+        repo_pins = [p for p in (rprov.get("sources") or []) if p.get("kind") == "repo"]
+        check("backfill-repo-commit", any(p.get("commit") == head for p in repo_pins), str(repo_pins))
+
+        # local-only graph
+        local_kb = bf_root / ".rosetta" / "docs" / "localish"
+        local_kb.mkdir(parents=True)
+        local_doc = local_kb / "concept.md"
+        local_doc.write_text("local concept v1\n")
+        (local_kb / "fact-graph.json").write_text(json.dumps({
+            "v": {"pkg": "localish", "kb_version": "1.0.0"},
+            "w": {"Thing": {"t": "sl", "i": "x", "src": "brain/docs/localish/concept.md"}},
+            "r": {}, "a": {}, "x": {}, "t": {},
+        }))
+        bl = run("--root", str(bf_root), "--backfill", "localish")
+        check("backfill-local-cli", bl.returncode == 0, bl.stdout + bl.stderr)
+        lprov = json.loads((local_kb / "provenance.json").read_text())
+        check("backfill-local-kind", any(p.get("kind") == "local" for p in (lprov.get("sources") or [])),
+              str(lprov.get("sources")))
+        lfs = json.loads((local_kb / "fact-sources.json").read_text())
+        check("backfill-local-fact-src", "w:Thing" in lfs, str(lfs))
+        lp1 = run_probe("--root", str(bf_root), "--check-stale", "localish")
+        lp2 = run_probe("--root", str(bf_root), "--check-stale", "localish")
+        check("backfill-local-current-1", lp1.returncode == 0, lp1.stdout + lp1.stderr)
+        check("backfill-local-current-2", lp2.returncode == 0)
+        local_doc.write_text("local concept CHANGED\n")
+        lp3 = run_probe("--root", str(bf_root), "--check-stale", "localish")
+        check("backfill-local-stale", lp3.returncode == 10, lp3.stdout)
+
+        # prose-only: fact-sources entry, no invented http, undeterminable or recorded reason
+        prose_kb = bf_root / ".rosetta" / "docs" / "proseish"
+        prose_kb.mkdir(parents=True)
+        (prose_kb / "fact-graph.json").write_text(json.dumps({
+            "v": {"pkg": "proseish", "kb_version": "1.0.0"},
+            "w": {"Zed": {"t": "sl", "i": "z", "src": "see the holocron note on widgets"}},
+            "r": {}, "a": {}, "x": {}, "t": {},
+        }))
+        (prose_kb / "README.md").write_text("Sources: holocron id xyz, no url here.\n")
+        bp = run("--root", str(bf_root), "--backfill", "proseish")
+        check("backfill-prose-cli", bp.returncode == 0, bp.stdout + bp.stderr)
+        pfs = json.loads((prose_kb / "fact-sources.json").read_text())
+        check("backfill-prose-fact-src", len(pfs) >= 1, str(pfs))
+        pprov = json.loads((prose_kb / "provenance.json").read_text())
+        http_pins = [
+            p for p in (pprov.get("sources") or [])
+            if str(p.get("url") or "").startswith("http")
+        ]
+        check("backfill-prose-no-invented-http", http_pins == [], str(http_pins))
+
+        # judged overlay supplies the official source when the graph has none
+        ov_kb = bf_root / ".rosetta" / "docs" / "overlayish"
+        ov_kb.mkdir(parents=True)
+        (ov_kb / "fact-graph.json").write_text(json.dumps({
+            "v": {"pkg": "overlayish", "kb_version": "1.0.0"},
+            "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+        }))
+        ov_path = tmp / "sources.json"
+        ov_path.write_text(json.dumps({
+            "overlayish": {"docs_url": docs_url, "version": "8.1.0", "version_source": docs_url},
+        }))
+        bo = run("--root", str(bf_root), "--backfill", "overlayish", "--sources", str(ov_path))
+        check("backfill-overlay-cli", bo.returncode == 0, bo.stdout + bo.stderr)
+        oprov = json.loads((ov_kb / "provenance.json").read_text())
+        check("backfill-overlay-status", oprov.get("status") == "backfill-now", str(oprov))
+        check("backfill-overlay-docs", any(
+            docs_url in str(p.get("url") or "") or any(docs_url in str(u.get("locator") or "") for u in (p.get("unitPins") or []))
+            for p in (oprov.get("sources") or [])
+        ), str(oprov.get("sources")))
+        og = json.loads((ov_kb / "fact-graph.json").read_text())
+        check("backfill-overlay-version", og["v"].get("version") == "8.1.0", str(og.get("v")))
+
+        # --all walks .rosetta/docs/*/fact-graph.json
+        extra = bf_root / ".rosetta" / "docs" / "allish"
+        extra.mkdir(parents=True)
+        (extra / "fact-graph.json").write_text(json.dumps({
+            "v": {"pkg": "allish", "kb_version": "1.0.0", "docs_url": docs_url},
+            "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+        }))
+        ba = run("--root", str(bf_root), "--backfill", "--all")
+        check("backfill-all-cli", ba.returncode == 0, ba.stdout + ba.stderr)
+        check("backfill-all-wrote", (extra / "provenance.json").is_file())
+    finally:
+        httpd.shutdown()
+
     if failures:
         for f in failures:
             print("FAIL:", f, file=sys.stderr)
