@@ -85,22 +85,23 @@ The script drops `skills/<name>/SKILL.md` into the harness's skills directory. I
 
 ```
 rosetta-bootstrap          rosetta-validate          rosetta-upgrade
-(create KB from scratch)   (stress-test existing)    (before/after agent test)
+(create KB from scratch)   (stress-test existing)    (before/after or --url refresh)
         │                          │                          │
         ▼                          ▼                          ▼
-  research the tech ───┐     Pick challenge              Backup agent
-  (rosetta-research)   │     Implement spec              Run tests WITHOUT KB
-  synthesize patterns  │     Adversarial review          Apply Rosetta bootstrap
-  extract fact graph   │     Grade fact graph            Run tests WITH KB
-  create 3-lens docs   │     Emit refactors              Compute improvement delta
-  scaffold agents      │            │                          │
-        │              │            └──────────────┬───────────┘
-        │   degrade gracefully:                    │
-        │   /assimilate /deep-research →           ▼
-        │   jina/exa MCP → WebSearch       Expand fact graph with
-        │   (never required)               discovered gaps
-        └──────────────────────────────►  (accept / improve / roll back)
+  /rosetta-research          Pick challenge              Backup agent
+  (engine [A0]–[A6] only)    Implement spec              Run tests WITHOUT KB
+        │                    Adversarial review          Apply via /rosetta-sync
+  write-graph.py --create    Grade fact graph            Run tests WITH KB
+  3-lens docs + triad        (does not write a graph)    Compute improvement delta
+  /rosetta-sync                     │                          │
+        │                           └──────────────┬───────────┘
+        │                                          ▼
+        │                                  write-graph.py --update
+        │                                  (gaps / version refresh)
+        └────────────────────────────────► accept / improve / roll back
 ```
+
+Research has **one path**: the engine. If `engine/` or an ACP entrypoint is missing, the skill STOPs. It does not fall back to `/assimilate`, a serial crawl, or “floor parallelism.”
 
 ### Keeping a KB current — `rosetta-upgrade --url` (Refresh mode)
 
@@ -155,11 +156,32 @@ python3 ~/.rosetta/bin/rosetta_config.py doctor                # anything strand
 ./uninstall.sh claude    # or a specific one
 ```
 
-Removes only the four Rosetta skills. Your generated `.rosetta/` knowledge bases are left untouched. (If you installed the native plugin: `/plugin uninstall agentic-rosetta`.)
+Removes only the seven Rosetta skills. Your generated `.rosetta/` knowledge bases are left untouched. (If you installed the native plugin: `/plugin uninstall agentic-rosetta`.)
+
 
 ## Theory
 
 See [WHY.md](./WHY.md) for the theory of operation: two-layer knowledge injection, the three-register mental model, and the JSON-vs-prose decision rule.
+
+## Working on this repo
+
+This checkout is **machinery**. Run bootstrap / sync / upgrade from the **consumer**
+project that owns `agents/` — not from here. Brain (when present) is a consumer,
+not a hardcoded path.
+
+| File | When to open it |
+|---|---|
+| [AGENTS.md](AGENTS.md) | Contributor contract — invariants, env, verification gate |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | End-to-end pipeline (research → graph → embed) |
+| [CONFIG.md](CONFIG.md) | Storage roots, `~/.rosetta`, `doctor` |
+| [WHY.md](WHY.md) | Why two layers and three registers |
+| [CHANGELOG.md](CHANGELOG.md) | What shipped. Installer `plugin.json` versions currently lag — bump them in the same commit (see AGENTS.md). |
+| [engine/README.md](engine/README.md) | How to run and test the fanout engine |
+| [scripts/README.md](scripts/README.md) | Inventory of writers + their tests |
+| [skills/README.md](skills/README.md) | Skill map and Claude vs Grok slash names |
+
+Nested `AGENTS.md` files add rules for `engine/`, `scripts/`, `skills/`, and
+`grok-skills/` (generated — do not edit).
 
 ---
 

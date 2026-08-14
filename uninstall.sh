@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # agentic-rosetta uninstall.sh
-# Removes ONLY the 4 Rosetta skills from the given harness skill directories.
+# Removes ONLY the 7 Rosetta skills from the given harness skill directories.
 # Never deletes a whole skills dir; never touches user KBs or .rosetta/.
 set -euo pipefail
 

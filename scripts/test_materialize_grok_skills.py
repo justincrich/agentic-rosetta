@@ -91,6 +91,9 @@ def test_materialize_temp_tree() -> None:
         copied = dest / "research" / "assets" / "rosetta_config.py"
         if not copied.is_file() or copied.read_text() != "print('ok')\n":
             fail("assets/ not copied")
+        agents = dest / "AGENTS.md"
+        if not agents.is_file() or "Do not edit these files" not in agents.read_text():
+            fail("generated AGENTS.md missing or missing do-not-edit rule")
         # --check on this tree
         import contextlib, io
         quiet = io.StringIO()
