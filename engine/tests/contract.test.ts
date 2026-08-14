@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DecoderRing, ResearchDirective, WorkerReport } from "../src/contract.ts";
+import { DecoderRing, ResearchDirective, ResearchRequest, WorkerReport } from "../src/contract.ts";
 import { withRingHash } from "../src/hash.ts";
 import { renderDirective } from "../src/prompts.ts";
 import { validateReport } from "../src/worker.ts";
@@ -129,5 +129,25 @@ describe("directive → prompt → WorkerReport", () => {
 
   test("DecoderRing schema requires hash", () => {
     expect(() => DecoderRing.parse({ purpose: "p", nouns: [], traps: [] })).toThrow();
+  });
+});
+
+describe("ResearchRequest defaults", () => {
+  const caller = {
+    harness: "grok" as const,
+    model: "grok-4.6",
+    acp: { command: "/bin/true", args: [] as string[], env: {} as Record<string, string> },
+  };
+
+  test("docsMaxUnits defaults to 10; maxUnits stays 40", () => {
+    const req = ResearchRequest.parse({
+      tech: "Next.js",
+      techSlug: "nextjs",
+      sourceMode: "docs",
+      sources: { docsUrl: "https://nextjs.org/docs" },
+      caller,
+    });
+    expect(req.maxUnits).toBe(40);
+    expect(req.docsMaxUnits).toBe(10);
   });
 });

@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.2] — 2026-08-14
+
+### Fixed
+- **Docs census URL cleanup.** Next.js-style `llms.txt` lines (`[Title](url): prose`)
+  no longer produce a dead `url):` twin next to the real URL. Markdown links win;
+  bare URLs strip trailing `):,:.]`.
+- **Docs leaf size.** URL territories default to `docsMaxUnits=10` (repo
+  `maxUnits` stays 40). `--max-units` still overrides both. Pointer follow-up
+  waves use the same split.
+- **Worker timeout.** Default is 10 minutes (`DEFAULT_WORKER_TIMEOUT_MS=600000`).
+  `ROSETTA_WORKER_TIMEOUT_MS` still overrides. 180s was killing every Next.js
+  reference leaf.
+
 ## [0.4.1] — 2026-08-13
 
 ### Changed

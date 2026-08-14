@@ -130,6 +130,8 @@ export function extractJson(text: string): unknown {
   return JSON.parse(body.slice(start, end + 1));
 }
 
+export const DEFAULT_WORKER_TIMEOUT_MS = 600_000;
+
 export async function runWorker(
   directive: ResearchDirective,
   ring: DecoderRing,
@@ -137,7 +139,7 @@ export async function runWorker(
 ): Promise<WorkerAccept | WorkerReject> {
   const prompt = renderDirective(directive, ring);
   const worker = makeWorker(directive, ring, caller);
-  const timeoutMs = Number(process.env.ROSETTA_WORKER_TIMEOUT_MS ?? 180_000);
+  const timeoutMs = Number(process.env.ROSETTA_WORKER_TIMEOUT_MS ?? DEFAULT_WORKER_TIMEOUT_MS);
   const withTimeout = <T>(p: Promise<T>): Promise<T> =>
     Promise.race([
       p,

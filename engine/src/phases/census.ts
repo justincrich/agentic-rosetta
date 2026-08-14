@@ -117,6 +117,46 @@ export function listRepoFiles(repoPath: string): { rel: string; bytes: number }[
   return out.sort((a, b) => a.rel.localeCompare(b.rel));
 }
 
+/** Trailing markdown / list punctuation — not query/hash contents. */
+const TRAILING_DOCS_PUNCT = /[)\]>,.:]+$/;
+
+export function cleanDocsUrl(raw: string, baseHref: string): string | null {
+  const trimmed = raw.trim().replace(TRAILING_DOCS_PUNCT, "");
+  if (!trimmed) return null;
+  try {
+    const href = new URL(trimmed, baseHref).href;
+    return href.replace(TRAILING_DOCS_PUNCT, "") || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Pure llms.txt / markdown extractor. Prefer `[text](url)`, then bare URLs; dedupe. */
+export function extractDocsUrls(text: string, baseHref: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (raw: string): void => {
+    const href = cleanDocsUrl(raw, baseHref);
+    if (!href || seen.has(href)) return;
+    seen.add(href);
+    out.push(href);
+  };
+  for (const md of text.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+    add(md[1]);
+  }
+  for (const m of text.matchAll(/https?:\/\/[^\s<>"']+/g)) {
+    add(m[0]);
+  }
+  return out;
+}
+
+export function unitsForTerritory(
+  kind: "paths" | "urls",
+  req: { maxUnits: number; docsMaxUnits: number },
+): number {
+  return kind === "urls" ? req.docsMaxUnits : req.maxUnits;
+}
+
 export async function listDocsUrls(docsUrl: string): Promise<{ rel: string; bytes: number }[]> {
   const origin = new URL(docsUrl);
   const base = docsUrl.replace(/\/?$/, "/");
@@ -135,22 +175,13 @@ export async function listDocsUrls(docsUrl: string): Promise<{ rel: string; byte
       if (!res.ok) continue;
       const text = await res.text();
       if (u.endsWith("llms.txt")) {
-        for (const line of text.split("\n")) {
-          const m = line.match(/https?:\/\/\S+/);
-          if (m) urls.push(m[0].replace(/[)>,.]+$/, ""));
-          for (const md of line.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
-            try {
-              urls.push(new URL(md[1], u).href);
-            } catch {
-              /* skip */
-            }
-          }
-        }
+        urls.push(...extractDocsUrls(text, u));
         if (urls.length) break;
       }
       if (u.endsWith("sitemap.xml")) {
         for (const m of text.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/gi)) {
-          urls.push(m[1].trim());
+          const href = cleanDocsUrl(m[1], u);
+          if (href) urls.push(href);
         }
         if (urls.length) break;
       }
@@ -165,12 +196,8 @@ export async function listDocsUrls(docsUrl: string): Promise<{ rel: string; byte
       if (res.ok) {
         const html = await res.text();
         for (const m of html.matchAll(/href=["']([^"']+)["']/gi)) {
-          try {
-            const abs = new URL(m[1], docsUrl).href;
-            if (new URL(abs).origin === origin.origin) urls.push(abs);
-          } catch {
-            /* skip */
-          }
+          const abs = cleanDocsUrl(m[1], docsUrl);
+          if (abs && new URL(abs).origin === origin.origin) urls.push(abs);
         }
       }
     } catch {
@@ -429,7 +456,6 @@ export async function runCensus(
 ): Promise<CensusResult> {
   const depth = bindDepth(req);
   const files: ClassifiedFile[] = [];
-  let kind: "paths" | "urls" = "paths";
 
   if (req.sourceMode === "repo" || req.sourceMode === "both") {
     const repo = req.sources.repoPath;
@@ -441,7 +467,6 @@ export async function runCensus(
   if (req.sourceMode === "docs" || req.sourceMode === "both") {
     const url = req.sources.docsUrl;
     if (!url) throw new Error("census: sourceMode includes docs but sources.docsUrl is missing");
-    kind = req.sourceMode === "docs" ? "urls" : kind;
     for (const f of await listDocsUrls(url)) {
       files.push({
         rel: f.rel,
@@ -449,17 +474,64 @@ export async function runCensus(
         class: f.rel.startsWith("http") ? classifyUrl(f.rel) : classifyPath(f.rel),
       });
     }
-    if (req.sourceMode === "docs") kind = "urls";
   }
 
-  return groupIntoDirectives(files, {
-    kind: req.sourceMode === "docs" ? "urls" : "paths",
+  const groupOpts = {
     ringHash: ring.hash,
-    maxUnits: depth.maxUnits,
     maxBytes: req.maxBytes,
     maxDirectives: req.budget.maxDirectives,
     allowed: depth.classes,
+  };
+
+  if (req.sourceMode === "docs") {
+    return groupIntoDirectives(files, {
+      ...groupOpts,
+      kind: "urls",
+      maxUnits: unitsForTerritory("urls", req),
+    });
+  }
+
+  if (req.sourceMode === "both") {
+    const urlFiles = files.filter((f) => f.rel.startsWith("http"));
+    const pathFiles = files.filter((f) => !f.rel.startsWith("http"));
+    const pathResult = groupIntoDirectives(pathFiles, {
+      ...groupOpts,
+      kind: "paths",
+      maxUnits: unitsForTerritory("paths", { maxUnits: depth.maxUnits, docsMaxUnits: req.docsMaxUnits }),
+    });
+    const urlResult = groupIntoDirectives(urlFiles, {
+      ...groupOpts,
+      kind: "urls",
+      maxUnits: unitsForTerritory("urls", req),
+    });
+    return mergeCensusResults(pathResult, urlResult);
+  }
+
+  return groupIntoDirectives(files, {
+    ...groupOpts,
+    kind: "paths",
+    maxUnits: unitsForTerritory("paths", { maxUnits: depth.maxUnits, docsMaxUnits: req.docsMaxUnits }),
   });
+}
+
+function mergeCensusResults(a: CensusResult, b: CensusResult): CensusResult {
+  const directives = [...a.directives, ...b.directives].map((d, i) => ({
+    ...d,
+    id: `t${String(i + 1).padStart(2, "0")}`,
+  }));
+  const perClass: Record<string, number> = {};
+  for (const d of directives) {
+    perClass[d.class] = (perClass[d.class] ?? 0) + 1;
+  }
+  const gaps = [...a.gaps, ...b.gaps];
+  perClass.unclassified = gaps.filter((g) => g.reason === "unclassified").length;
+  return {
+    directives,
+    gaps,
+    merges: [...a.merges, ...b.merges],
+    warnings: [...a.warnings, ...b.warnings],
+    perClass,
+  };
 }
 
 export function directivesFromTopics(

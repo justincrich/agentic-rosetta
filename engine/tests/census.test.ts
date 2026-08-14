@@ -3,7 +3,14 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { classifyPath, groupIntoDirectives, listRepoFiles, isNamedSingleton } from "../src/phases/census.ts";
+import {
+  classifyPath,
+  extractDocsUrls,
+  groupIntoDirectives,
+  isNamedSingleton,
+  listRepoFiles,
+  unitsForTerritory,
+} from "../src/phases/census.ts";
 import { ResearchDirective } from "../src/contract.ts";
 import { withRingHash } from "../src/hash.ts";
 
@@ -126,5 +133,87 @@ describe("census on a real temp git repo", () => {
       expect(m.reason).toContain("maxDirectives");
       expect(m.class).toBe("reference");
     }
+  });
+});
+
+describe("extractDocsUrls (Next.js llms.txt punctuation)", () => {
+  const base = "https://nextjs.org/docs/llms.txt";
+
+  test("markdown link plus bare url): tail dedupes to one clean URL", () => {
+    const text = [
+      "- [Installation](https://nextjs.org/docs/app/getting-started/installation): Learn how to create a new Next.js application.",
+      "https://nextjs.org/docs/app/getting-started/installation):",
+    ].join("\n");
+    const urls = extractDocsUrls(text, base);
+    expect(urls).toEqual(["https://nextjs.org/docs/app/getting-started/installation"]);
+    expect(urls.some((u) => u.endsWith("):"))).toBe(false);
+  });
+
+  test("heading markdown link extracts once", () => {
+    const text = "## [Getting Started](https://nextjs.org/docs/app/getting-started)\n";
+    expect(extractDocsUrls(text, base)).toEqual([
+      "https://nextjs.org/docs/app/getting-started",
+    ]);
+  });
+
+  test("keeps query strings and hashes; only strips trailing markdown punctuation", () => {
+    const text = [
+      "[q](https://nextjs.org/docs/app?foo=1#bar)",
+      "https://nextjs.org/docs/app?foo=1#bar).",
+    ].join("\n");
+    expect(extractDocsUrls(text, base)).toEqual([
+      "https://nextjs.org/docs/app?foo=1#bar",
+    ]);
+  });
+});
+
+describe("docs vs repo unit caps", () => {
+  test("URL territories use docsMaxUnits; path territories use maxUnits", () => {
+    expect(unitsForTerritory("urls", { maxUnits: 40, docsMaxUnits: 10 })).toBe(10);
+    expect(unitsForTerritory("paths", { maxUnits: 40, docsMaxUnits: 10 })).toBe(40);
+  });
+
+  test("25 docs URLs at docsMaxUnits=10 yield leaves of size <= 10", () => {
+    const files = Array.from({ length: 25 }, (_, i) => ({
+      rel: `https://nextjs.org/docs/page-${i}`,
+      bytes: 0,
+      class: "reference" as const,
+    }));
+    const ring = withRingHash({ purpose: "t", nouns: [], traps: [] });
+    const maxUnits = unitsForTerritory("urls", { maxUnits: 40, docsMaxUnits: 10 });
+    const result = groupIntoDirectives(files, {
+      kind: "urls",
+      ringHash: ring.hash,
+      maxUnits,
+      maxBytes: 250_000,
+      maxDirectives: 60,
+      allowed: new Set(["reference", "unclassified"]),
+    });
+    expect(maxUnits).toBe(10);
+    expect(result.directives.length).toBeGreaterThan(1);
+    for (const d of result.directives) {
+      expect(d.territory.include.length).toBeLessThanOrEqual(10);
+    }
+  });
+
+  test("same 25 paths at repo maxUnits=40 stay in one leaf", () => {
+    const files = Array.from({ length: 25 }, (_, i) => ({
+      rel: `docs/page-${i}.md`,
+      bytes: 0,
+      class: "reference" as const,
+    }));
+    const ring = withRingHash({ purpose: "t", nouns: [], traps: [] });
+    const maxUnits = unitsForTerritory("paths", { maxUnits: 40, docsMaxUnits: 10 });
+    const result = groupIntoDirectives(files, {
+      kind: "paths",
+      ringHash: ring.hash,
+      maxUnits,
+      maxBytes: 250_000,
+      maxDirectives: 60,
+      allowed: new Set(["reference", "unclassified"]),
+    });
+    expect(maxUnits).toBe(40);
+    expect(result.directives).toHaveLength(1);
+    expect(result.directives[0].territory.include).toHaveLength(25);
   });
 });

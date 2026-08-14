@@ -45,6 +45,7 @@ async function main(): Promise<number> {
   --concurrency N
   --max-waves N
   --max-units N
+  --docs-max-units N    docs/URL leaf size (default 10; --max-units overrides both)
   --max-directives N
   --max-usd N            circuit-breaker; omit = uncapped
   --census-only          A0–A2 only, spawn nothing
@@ -100,6 +101,9 @@ async function main(): Promise<number> {
     concurrency: arg("--concurrency") ? Number(arg("--concurrency")) : 8,
     maxWaves: arg("--max-waves") ? Number(arg("--max-waves")) : 4,
     maxUnits: arg("--max-units") ? Number(arg("--max-units")) : 40,
+    docsMaxUnits: arg("--docs-max-units")
+      ? Number(arg("--docs-max-units"))
+      : (arg("--max-units") ? Number(arg("--max-units")) : 10),
     censusOnly: flag("--census-only"),
     depth: (arg("--depth") as "quick" | "normal" | "deep") ?? "normal",
     budget: {

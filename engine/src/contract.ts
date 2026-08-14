@@ -159,6 +159,7 @@ export const ResearchRequest = z.object({
   concurrency: z.number().int().min(1).max(16).default(8),
   maxWaves: z.number().int().min(1).max(4).default(4),
   maxUnits: z.number().int().default(40),
+  docsMaxUnits: z.number().int().default(10),
   maxBytes: z.number().int().default(250_000),
   censusOnly: z.boolean().default(false),
   depth: z.enum(["quick", "normal", "deep"]).default("normal"),

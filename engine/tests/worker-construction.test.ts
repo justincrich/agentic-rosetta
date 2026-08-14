@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { acpOptionsFromCaller, makeWorker } from "../src/worker.ts";
+import { acpOptionsFromCaller, DEFAULT_WORKER_TIMEOUT_MS, makeWorker } from "../src/worker.ts";
 import { ResearchDirective } from "../src/contract.ts";
 import { withRingHash } from "../src/hash.ts";
 import { CallerIdentity } from "../src/contract.ts";
@@ -38,7 +38,15 @@ describe("makeWorker is constructed only from caller.acp", () => {
     expect(opts.args).toEqual(["--flag", "x"]);
     expect(opts.model).toBe("sentinel-model");
     expect(opts.env).toEqual({ A: "1" });
-    // constructing AcpAgent would spawn; we only assert the options object.
+  });
+
+  test("default worker timeout is 10 minutes (docs leaves cannot finish in 180s)", () => {
+    expect(DEFAULT_WORKER_TIMEOUT_MS).toBe(600_000);
+    expect(src).toContain("DEFAULT_WORKER_TIMEOUT_MS");
+    expect(src).not.toMatch(/ROSETTA_WORKER_TIMEOUT_MS \?\? 180_000/);
+  });
+
+  test("makeWorker is a function (do not spawn AcpAgent in this file)", () => {
     expect(typeof makeWorker).toBe("function");
   });
 });

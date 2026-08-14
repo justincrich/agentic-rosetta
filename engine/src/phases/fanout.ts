@@ -6,7 +6,7 @@ import type {
   ResearchRequest,
   WorkerReport,
 } from "../contract.ts";
-import { classifyPath, classifyUrl, groupIntoDirectives } from "./census.ts";
+import { classifyPath, classifyUrl, groupIntoDirectives, unitsForTerritory } from "./census.ts";
 import { runWorker } from "../worker.ts";
 
 export type FanoutResult = {
@@ -89,10 +89,11 @@ export async function fanoutWave(
       bytes: 0,
       class: p.territory.startsWith("http") ? classifyUrl(p.territory) : classifyPath(p.territory),
     }));
+    const kind = files[0]?.rel.startsWith("http") ? "urls" : "paths";
     const grouped = groupIntoDirectives(files, {
-      kind: files[0]?.rel.startsWith("http") ? "urls" : "paths",
+      kind,
       ringHash: ring.hash,
-      maxUnits: req.maxUnits,
+      maxUnits: unitsForTerritory(kind, req),
       maxBytes: req.maxBytes,
       maxDirectives: req.budget.maxDirectives,
       allowed: new Set(["orientation", "enforcement", "scars", "contracts", "exemplars", "reference", "unclassified"]),
