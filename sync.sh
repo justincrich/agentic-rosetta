@@ -26,4 +26,17 @@ else
   "$ROOT/install.sh"
 fi
 
+python3 "$ROOT/scripts/materialize-grok-skills.py" --root "$ROOT"
+
+# Grok slash is /rosetta:research from the plugin. Drop-ins in
+# ~/.grok/skills/rosetta-* show up as /user:rosetta-research and collide.
+if [ -d "$HOME/.grok/skills" ]; then
+  for name in rosetta-bootstrap rosetta-research rosetta-validate rosetta-upgrade rosetta-sync rosetta-ab-test rosetta-stress-test; do
+    if [ -d "$HOME/.grok/skills/$name" ]; then
+      rm -rf "$HOME/.grok/skills/$name"
+      echo "removed ~/.grok/skills/$name (Grok uses the plugin namespace)"
+    fi
+  done
+fi
+
 "$ROOT/scripts/assert-no-drift.sh" || true

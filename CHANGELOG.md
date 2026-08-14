@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.1] — 2026-08-13
+
+### Changed
+- **Grok slash names are short.** Plugin name stays `rosetta`; skill ids in the
+  Grok pack are `research`, `bootstrap`, `upgrade`, `validate`, `sync`,
+  `ab-test`, `stress-test`. Slash: `/rosetta:research`, not
+  `/rosetta:rosetta-research`. Canonical `skills/rosetta-*` (Claude / Codex /
+  OpenCode / skillshare) is unchanged. Generated tree: `grok-skills/`.
+
 ## [0.4.0] — 2026-08-13
 
 ### Added

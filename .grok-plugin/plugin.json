@@ -1,7 +1,8 @@
 {
   "name": "rosetta",
   "description": "Rosetta KB machinery: research, bootstrap, validate, upgrade, sync. Ships the machinery, not the knowledge.",
-  "version": "0.4.0",
+  "version": "0.4.1",
+  "skills": "./grok-skills",
   "author": {
     "name": "Justin Rich",
     "email": "justin@formulist.ai"

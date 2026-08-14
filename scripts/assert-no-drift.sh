@@ -5,7 +5,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKILLS="rosetta-bootstrap rosetta-research rosetta-validate rosetta-upgrade rosetta-sync rosetta-ab-test rosetta-stress-test"
-HARNESSES="claude:$HOME/.claude/skills codex:$HOME/.codex/skills opencode:$HOME/.config/opencode/skills grok:$HOME/.grok/skills"
+# Grok slash is the plugin namespace (/rosetta:research). Do not require
+# ~/.grok/skills/rosetta-* drop-ins — those become /user:rosetta-research.
+HARNESSES="claude:$HOME/.claude/skills codex:$HOME/.codex/skills opencode:$HOME/.config/opencode/skills"
 SCRIPTS_ONLY=0
 [ "${1:-}" = "--scripts-only" ] && SCRIPTS_ONLY=1
 
@@ -40,8 +42,13 @@ for name in $SKILLS; do
   done
 done
 
+# Grok short-name pack must match a fresh generate from skills/rosetta-*
+if ! python3 "$ROOT/scripts/materialize-grok-skills.py" --check; then
+  fail "grok-skills/ drifted from skills/rosetta-*"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "assert-no-drift: $fail failure(s)" >&2
   exit 1
 fi
-echo "assert-no-drift: all harness copies match plugin; named scripts exist"
+echo "assert-no-drift: all harness copies match plugin; named scripts exist; grok-skills current"

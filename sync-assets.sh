@@ -34,6 +34,11 @@ drift=0
 copied=0
 checked=0
 
+# After skill assets, keep the Grok short-name pack in lockstep.
+if [ "$MODE" != "--check" ]; then
+  python3 "$SCRIPT_DIR/scripts/materialize-grok-skills.py" --root "$SCRIPT_DIR" >/dev/null
+fi
+
 for skill_dir in "$SCRIPT_DIR"/skills/*/; do
   [ -d "$skill_dir" ] || continue
   skill="$(basename "$skill_dir")"

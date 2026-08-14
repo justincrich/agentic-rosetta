@@ -39,19 +39,30 @@ This repo is the **one true source**. Brain is a consumer of the graphs, not of 
 
 Skills appear namespaced: `/agentic-rosetta:rosetta-bootstrap`, etc.
 
+### Grok Build (native plugin)
+
+```
+grok plugin install /path/to/agentic-rosetta --trust
+```
+
+Skills appear as `/rosetta:research`, `/rosetta:bootstrap`, `/rosetta:upgrade`,
+`/rosetta:validate`, `/rosetta:sync`, `/rosetta:ab-test`, `/rosetta:stress-test`.
+(The plugin is named `rosetta`; the Grok pack uses short skill ids so the
+namespace is not doubled. Other harnesses keep `/rosetta-research`.)
+
 ### This machine (skillshare — the local path)
 
 ```bash
-./sync.sh               # extras + skillshare install + hash-identical copies on claude/codex/opencode/grok
+./sync.sh               # extras + skillshare install + hash-identical copies on claude/codex/opencode
 ```
 
-`install.sh` is for **external** checkouts that are not skillshare-managed. It now includes `grok`, refuses to clobber a newer target unless `--force`, and runs `bun install` in `engine/`.
+`install.sh` is for **external** checkouts that are not skillshare-managed. It refuses to clobber a newer target unless `--force`, and runs `bun install` in `engine/`. Grok is not a drop-in target — use `grok plugin install` above.
 
 ### Any harness (script)
 
 ```bash
-./install.sh            # install into every detected harness
-./install.sh grok       # claude | codex | opencode | grok | pi | droid
+./install.sh            # install into every detected harness (except Grok drop-ins)
+./install.sh claude     # claude | codex | opencode | pi | droid
 ```
 
 The script drops `skills/<name>/SKILL.md` into the harness's skills directory. It installs **machinery only** — no language knowledge bases, no edits to your project.

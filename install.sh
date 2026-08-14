@@ -139,7 +139,22 @@ JSON
   echo
 fi
 
+if [ -x "$SCRIPT_DIR/scripts/materialize-grok-skills.py" ] || [ -f "$SCRIPT_DIR/scripts/materialize-grok-skills.py" ]; then
+  echo "--- grok-skills: short names for /rosetta:research ---"
+  python3 "$SCRIPT_DIR/scripts/materialize-grok-skills.py" --root "$SCRIPT_DIR"
+  echo
+fi
+
 for h in $TARGETS; do
+  if [ "$h" = "grok" ]; then
+    echo "--- grok ---"
+    echo "  Grok uses the plugin, not ~/.grok/skills/rosetta-*."
+    echo "  Install: grok plugin install \"$SCRIPT_DIR\" --trust"
+    echo "  Slash:   /rosetta:research /rosetta:bootstrap /rosetta:upgrade"
+    echo "           /rosetta:validate /rosetta:sync /rosetta:ab-test /rosetta:stress-test"
+    echo
+    continue
+  fi
   DEST="$(skills_dir_for "$h")"
   echo "--- $h -> $DEST ---"
   mkdir -p "$DEST"

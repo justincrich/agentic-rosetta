@@ -82,6 +82,9 @@ for h in $TARGETS; do
   if [ "$h" = "claude" ]; then
     echo "  NOTE: if you installed via /plugin, also run: /plugin uninstall agentic-rosetta"
   fi
+  if [ "$h" = "grok" ]; then
+    echo "  NOTE: Grok slash is the plugin. Also run: grok plugin uninstall rosetta"
+  fi
   echo
 done
 
