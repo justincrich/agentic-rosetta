@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -434,6 +435,67 @@ def main() -> int:
         check("backfill-all-wrote", (extra / "provenance.json").is_file())
     finally:
         httpd.shutdown()
+
+    # ── storage root comes from config, not from cwd ──────────────────────────────────────────
+    # REGRESSION: with no --root the writer used Path.cwd(), so the KB landed in whatever repo
+    # the session happened to be standing in and NO config setting could move it.
+    cfg_home = tmp / "cfg-home"
+    (cfg_home / "bin").mkdir(parents=True)
+    central = tmp / "central-kb"
+    central.mkdir()
+    elsewhere = tmp / "elsewhere"
+    (elsewhere / ".git").mkdir(parents=True)
+
+    def run_in(cwd: Path, env_extra: dict, *args: str) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env.pop("ROSETTA_PROJECT", None)
+        env.pop("ROSETTA_CONFIG", None)
+        env.update({k: str(v) for k, v in env_extra.items()})
+        return subprocess.run([sys.executable, str(WG), *args],
+                              capture_output=True, text=True, cwd=str(cwd), env=env)
+
+    (cfg_home / "config.json").write_text(json.dumps(
+        {"version": 1, "roots": {"default": "project", "docs": str(central)}}))
+
+    r = run_in(elsewhere, {"ROSETTA_HOME": cfg_home},
+               "--create", "cfgtoy", "--nrra", str(nrra), "--ledger", str(ledger))
+    check("cfg-create-ok", r.returncode == 0, r.stdout + r.stderr)
+    check("cfg-goes-to-configured-root",
+          (central / ".rosetta" / "docs" / "cfgtoy" / "fact-graph.json").is_file(),
+          r.stdout + r.stderr)
+    check("cfg-does-not-touch-cwd",
+          not (elsewhere / ".rosetta").exists(),
+          str(list(elsewhere.rglob("*"))))
+
+    # roots.docs = "device": the configured root IS the .rosetta dir — no nested .rosetta.
+    (cfg_home / "config.json").write_text(json.dumps(
+        {"version": 1, "roots": {"default": "project", "docs": "device"}}))
+    r = run_in(elsewhere, {"ROSETTA_HOME": cfg_home},
+               "--create", "devtoy", "--nrra", str(nrra), "--ledger", str(ledger))
+    check("cfg-device-ok", r.returncode == 0, r.stdout + r.stderr)
+    check("cfg-device-layout", (cfg_home / "docs" / "devtoy" / "fact-graph.json").is_file(),
+          r.stdout + r.stderr)
+
+    # An explicit --root is an instruction and must still beat the config.
+    pinned = tmp / "pinned"
+    pinned.mkdir()
+    r = run_in(elsewhere, {"ROSETTA_HOME": cfg_home},
+               "--root", str(pinned), "--create", "pintoy",
+               "--nrra", str(nrra), "--ledger", str(ledger))
+    check("cfg-root-flag-wins",
+          (pinned / ".rosetta" / "docs" / "pintoy" / "fact-graph.json").is_file(),
+          r.stdout + r.stderr)
+    check("cfg-root-flag-skips-config",
+          not (cfg_home / "docs" / "pintoy").exists(), r.stdout + r.stderr)
+
+    # $ROSETTA_PROJECT is also an explicit pin and beats the config.
+    envproj = tmp / "envproj"
+    envproj.mkdir()
+    r = run_in(elsewhere, {"ROSETTA_HOME": cfg_home, "ROSETTA_PROJECT": envproj},
+               "--create", "envtoy", "--nrra", str(nrra), "--ledger", str(ledger))
+    check("cfg-env-project-wins",
+          (envproj / ".rosetta" / "docs" / "envtoy" / "fact-graph.json").is_file(),
+          r.stdout + r.stderr)
 
     if failures:
         for f in failures:

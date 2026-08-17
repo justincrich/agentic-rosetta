@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 import {
   ResearchRequest,
   ResearchResult,
@@ -9,7 +10,7 @@ import {
 } from "./contract.ts";
 import { preflight } from "./phases/preflight.ts";
 import { orient } from "./phases/orient.ts";
-import { runCensus } from "./phases/census.ts";
+import { runCensus, resolveRepoTree } from "./phases/census.ts";
 import { fanoutWave } from "./phases/fanout.ts";
 import { assertClosed, buildLedger, LedgerOpenError } from "./phases/ledger.ts";
 import { emitNrra } from "./phases/emit.ts";
@@ -36,36 +37,68 @@ export function rollupProvenance(pins: SourcePin[]): ProvenanceManifest {
 }
 export { preflight } from "./phases/preflight.ts";
 
+function blockedResult(
+  runId: string,
+  req: ResearchRequest,
+  code: string,
+  reason: string,
+): ResearchResult {
+  const empty = {
+    run_id: runId,
+    tech: req.tech,
+    source_mode: req.sourceMode,
+    decoder_ring_hash: "",
+    waves: 0,
+    censused: 0,
+    closed: 0,
+    rows: [],
+    gaps: [{ territory: "*", reason }],
+    merges: [],
+    warnings: [],
+    circuitBroken: false,
+  };
+  return ResearchResult.parse({
+    runId,
+    status: "BLOCKED",
+    nrra: `---\nartifact: rosetta-research\nstatus: BLOCKED\nrun_id: "${runId}"\nreason: "${reason}"\n---\n\n# BLOCKED\n\n${reason}\n`,
+    ledger: empty,
+    reports: [],
+    blockReason: `${code}: ${reason}`,
+  });
+}
+
 export async function runResearch(input: unknown): Promise<ResearchResult> {
   const req = ResearchRequest.parse(input);
   const runId = randomUUID();
 
   const pf = preflight(req);
-  if (!pf.ok) {
-    const empty = {
-      run_id: runId,
-      tech: req.tech,
-      source_mode: req.sourceMode,
-      decoder_ring_hash: "",
-      waves: 0,
-      censused: 0,
-      closed: 0,
-      rows: [],
-      gaps: [{ territory: "*", reason: pf.reason }],
-      merges: [],
-      warnings: [],
-      circuitBroken: false,
-    };
-    return ResearchResult.parse({
-      runId,
-      status: "BLOCKED",
-      nrra: `---\nartifact: rosetta-research\nstatus: BLOCKED\nrun_id: "${runId}"\nreason: "${pf.reason}"\n---\n\n# BLOCKED\n\n${pf.reason}\n`,
-      ledger: empty,
-      reports: [],
-      blockReason: `${pf.code}: ${pf.reason}`,
-    });
+  if (!pf.ok) return blockedResult(runId, req, pf.code, pf.reason);
+
+  // Materialize the repo ONCE, here, before orient. orient needs a real local tree to point an
+  // orientation directive at; census used to do the clone later, so a --repo-url-only run reached
+  // orient with nothing local and died on an unhandled schema error. One clone now serves both,
+  // and a clone failure BLOCKS with a named reason instead of throwing.
+  let workReq: ResearchRequest = req;
+  let clonedPath: string | undefined;
+  if ((req.sourceMode === "repo" || req.sourceMode === "both") && !req.sources.repoPath) {
+    try {
+      const tree = resolveRepoTree(req.sources);
+      if (tree.cloned) clonedPath = tree.path;
+      workReq = { ...req, sources: { ...req.sources, repoPath: tree.path } };
+    } catch (err) {
+      return blockedResult(runId, req, "SOURCE_UNAVAILABLE", (err as Error).message);
+    }
   }
 
+  try {
+    return await runResearchCore(workReq, runId);
+  } finally {
+    // Only ever removes a tree THIS run created under tmpdir; a caller's --repo-path is untouched.
+    if (clonedPath) rmSync(clonedPath, { recursive: true, force: true });
+  }
+}
+
+async function runResearchCore(req: ResearchRequest, runId: string): Promise<ResearchResult> {
   const ring = await orient(req);
   const depth = bindDepth(req);
 

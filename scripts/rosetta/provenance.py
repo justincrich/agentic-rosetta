@@ -27,6 +27,13 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+
+def _roots():
+    """Lazy so importing provenance never depends on roots.py being importable."""
+    import roots
+    return roots
+
+
 PROVENANCE_NAME = "provenance.json"
 FACT_SOURCES_NAME = "fact-sources.json"
 HISTORY_MANIFEST = Path(".history") / "manifest.json"
@@ -1046,8 +1053,8 @@ def check_stale(provenance: dict[str, Any], root: Path | None = None) -> tuple[i
     return 0, {"status": "current", "moved": []}
 
 
-def load_provenance(root: Path, tech: str) -> dict[str, Any]:
-    path = root / ".rosetta" / "docs" / tech / PROVENANCE_NAME
+def load_provenance(root: Path, tech: str, docs_override: Path | None = None) -> dict[str, Any]:
+    path = _roots().docs_dir(root, docs_override) / tech / PROVENANCE_NAME
     if not path.is_file():
         raise FileNotFoundError(str(path))
     return json.loads(path.read_text(encoding="utf-8"))
@@ -1059,12 +1066,12 @@ def main(argv: list[str]) -> int:
     p.add_argument("--root", default=None)
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
-    root = Path(args.root).expanduser().resolve() if args.root else Path(
-        os.environ.get("ROSETTA_PROJECT") or Path.cwd()
-    ).resolve()
+    # Must agree with write-graph.py, or the staleness probe reads a different KB than the one
+    # the upgrade skill is about to update.
+    root, docs_override = _roots().choose(args.root)
     if args.check_stale:
         try:
-            prov = load_provenance(root, args.check_stale)
+            prov = load_provenance(root, args.check_stale, docs_override)
         except FileNotFoundError as e:
             print(json.dumps({"status": "undeterminable", "reason": f"missing {e}"}))
             return 1

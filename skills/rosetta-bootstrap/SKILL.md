@@ -25,7 +25,11 @@ PLUGIN / PROJECT / RESOLVER — same resolution as rosetta-research (never hardc
 
 [2] GRAPH  (the only write of fact-graph.json)
     python3 "$PLUGIN/scripts/rosetta/write-graph.py" --create {tech_slug} \
-      --nrra {out}/nrra.md --ledger {out}/ledger.json --root "$PROJECT"
+      --nrra {out}/nrra.md --ledger {out}/ledger.json
+    NO --root. The writer resolves the docs class through rosetta_config.py, so the graph lands
+    in the SAME directory as $KB_DIR from [0]. Pinning --root "$PROJECT" here split the KB in
+    two whenever roots.docs was not "project": graph in the project, concept docs in the
+    configured root. If you must pin it, pass --root and accept that it overrides the config.
     IF a graph already exists → STOP (create refuses). Use /rosetta-upgrade.
     Do NOT write fact-graph.json by hand. Do NOT paste JSON into agent.md.
 

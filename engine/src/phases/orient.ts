@@ -33,16 +33,21 @@ export async function orient(req: ResearchRequest): Promise<DecoderRing> {
   if (req.censusOnly) return cheapLocalRing(req);
   // Cheap deterministic seed so census can hash-bind even if the orient worker fails.
   const seed = cheapLocalRing(req);
+  const include = [
+    ...(req.sources.repoPath ? ["README.md", "README", "docs/index.md"] : []),
+    ...(req.sources.docsUrl ? [req.sources.docsUrl] : []),
+  ].filter(Boolean);
+  // No local tree and no docs URL => nothing to point an orientation worker AT. The directive
+  // schema requires include.min(1), so building one here threw an unhandled ZodError and killed
+  // the run. Degrade to the seed ring — the same thing a failed orient worker already does.
+  if (!include.length) return seed;
   const directive = ResearchDirective.parse({
     id: "orient",
     wave: 0,
     territory: {
       kind: req.sources.docsUrl ? "urls" : "paths",
       label: "orientation",
-      include: [
-        ...(req.sources.repoPath ? ["README.md", "README", "docs/index.md"] : []),
-        ...(req.sources.docsUrl ? [req.sources.docsUrl] : []),
-      ].filter(Boolean),
+      include,
       exclude: [],
       unitCount: 1,
     },

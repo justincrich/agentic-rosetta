@@ -32,14 +32,23 @@ There is no 3-tier ladder. There is no "floor parallelism you MAY enable". The e
 
 ```
 [0] LOCATE THE ENGINE
-    PLUGIN = directory that contains this SKILL.md, walking up until engine/src/research.ts exists
-             (skill dir → plugin root). Also accept $ROSETTA_PLUGIN.
-    ENGINE = "$PLUGIN/engine/src/research.ts"
-    IF the file is missing:
+    RESOLVER = first existing of "$ROSETTA_CONFIG",
+               "<this skill's dir>/assets/rosetta_config.py",
+               "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py"
+    PLUGIN   = $(python3 "$RESOLVER" plugin)
+               # $ROSETTA_PLUGIN → $ROSETTA_HOME/plugin-root (recorded by install.sh)
+               # → walking up from the resolver. Each candidate must really contain the engine.
+    ENGINE   = "$PLUGIN/engine/src/research.ts"
+    IF that command exits non-zero, or the file is missing:
         STOP. Print:
-          "engine absent. From the plugin checkout run: cd engine && bun install
-           This skill will not improvise a serial crawl."
+          "engine absent. From the plugin checkout run: ./install.sh  (records the plugin root)
+           then: cd engine && bun install
+           This skill will not improvise a serial crawl, and will not go hunting the filesystem
+           for the engine."
         Write nothing.
+
+    An INSTALLED skill is only SKILL.md + assets/ — walking up from it never reaches engine/.
+    The recorded plugin root is the supported way to find it; a `find` across the disk is not.
 
 [1] DETECT HARNESS + MODEL
     Pass --harness {claude|codex|opencode|grok} if you know it; otherwise the engine
@@ -77,13 +86,15 @@ There is no 3-tier ladder. There is no "floor parallelism you MAY enable". The e
     python3 "$PLUGIN/scripts/rosetta/write-graph.py" --create {slug} \
       --nrra {out}/nrra.md --ledger {out}/ledger.json
     The skill never writes fact-graph.json itself.
+    Do NOT pass --root. With no --root the writer asks rosetta_config.py for the docs class, so
+    the KB lands where the config says. Passing --root pins it to that repo and overrides config.
 ```
 
 ## Failure
 
 | Failure | Response |
 |---|---|
-| engine/ missing | STOP + install instructions. Never crawl. |
+| engine/ missing, or `rosetta_config.py plugin` fails | STOP + install instructions. Never crawl, never `find` for it. |
 | `--model` omitted / not on roster | engine exits non-zero naming MODEL_UNRESOLVED |
 | harness has no ACP entrypoint | engine preflight STOP (named). Nothing written. |
 | already inside a worker (`ROSETTA_WORKER=1`) | STOP (recursion) |

@@ -82,6 +82,27 @@ key beats `default`.
 3. **`~/.rosetta/config.json`** — `roots.<class>`, then `roots.default`
 4. **Built-in** — `project`
 
+## Who obeys this config
+
+Every path decision goes through `rosetta_config.py`. The scripts that write and read the
+knowledge base reach it via `scripts/rosetta/roots.py`:
+
+| Tool | Root it uses |
+|---|---|
+| the skills (`research`, `docs`, `probes` paths) | resolver, always |
+| `write-graph.py` (the only writer of `fact-graph.json`) | `--root` → `$ROSETTA_PROJECT` → **resolver** → cwd |
+| `provenance.py --check-stale` | same order, so it probes the graph `write-graph.py` will update |
+| `registry.py`, `embed-graph.sh` | the **project** — they scan the repo that owns `agents/`, by design |
+
+`--root` and `$ROSETTA_PROJECT` are explicit instructions and beat the config; without them the
+destination is the configured one, never "whatever directory the shell is standing in."
+
+> Before this, `write-graph.py` and `provenance.py` defaulted straight to `Path.cwd()` and never
+> read the config at all. Running a skill from an unrelated repo wrote the KB into that repo,
+> silently, exit 0 — and editing this config could not move it. `rosetta-bootstrap` was worse: it
+> resolved `KB_DIR` through the resolver but passed `--root "$PROJECT"` to the writer, so with any
+> non-`project` docs root the graph and its concept docs landed in two different repos.
+
 ## Reading is not the same as writing
 
 Writes go to the resolved root. **Reads search three places** — configured root, then project, then
@@ -108,7 +129,14 @@ fact-graphs by **walking the repo that owns `agents/`**. A knowledge base writte
 is invisible to it — the agents silently never receive the graph.
 
 Keep `docs` at `"project"` and run `/rosetta-bootstrap` from the repo that holds your agents.
-`rosetta_config.py doctor` warns when the resolved docs root has no sibling `agents/` directory.
+`rosetta_config.py doctor` warns when the resolved docs root has no sibling `agents/` directory,
+and `write-graph.py` now repeats that warning at write time rather than letting you discover it
+when an agent turns up without its graph.
+
+Note `"project"` means *the repo you are standing in*, not any particular repo. Running a skill
+from an unrelated checkout with `docs: "project"` puts the KB in that checkout — correctly, per
+this config, and still uselessly far from your agents. That is a reason to run bootstrap from the
+right repo, not a bug.
 
 ## Commands
 
@@ -122,6 +150,8 @@ python3 $R path --class docs --slug ai-sdk --file fact-graph.json
 python3 $R root --class probes --ensure               # class directory, created if missing
 python3 $R find --class docs --slug ai-sdk            # read side: first existing copy
 python3 $R init                                       # create ~/.rosetta (idempotent)
+python3 $R plugin                                     # the checkout that owns engine/ + scripts/
+python3 $R plugin --why                               # ...and which tier resolved it
 python3 $R doctor                                     # list stray artifacts (dry run)
 python3 $R doctor --apply --exclude ~/Projects/some-repo
 python3 $R --selftest                                 # real-filesystem tests
@@ -158,6 +188,24 @@ Three copies, kept byte-identical by `./sync-assets.sh` (`--check` fails on drif
 
 Skills look for it in that order: `$ROSETTA_CONFIG` → their own `assets/` → `~/.rosetta/bin/` →
 fall back to project-local paths.
+
+`install.sh` syncs these copies even when it skips a hand-edited `SKILL.md`, so an installed
+resolver can never quietly fall behind the canonical one.
+
+## Where the *engine* lives
+
+An installed skill is only `SKILL.md` + `assets/`. It carries no `engine/`, so walking up from an
+installed skill never finds `engine/src/research.ts` — `/rosetta-research` must STOP rather than
+go hunting the filesystem for it. `install.sh` therefore records the checkout:
+
+```
+~/.rosetta/plugin-root      # e.g. /Users/me/Projects/agentic-rosetta
+```
+
+`python3 $R plugin` resolves it: `$ROSETTA_PLUGIN` → that pointer → walking up from the resolver
+itself (true for the in-checkout copy). A candidate only counts if it really contains the engine,
+so a stale pointer is rejected rather than returned. No candidate → exit 1, and the skill stops
+with install instructions.
 
 ## Uninstalling
 

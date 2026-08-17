@@ -118,10 +118,10 @@ Measurement stays in Phases 1–5. Mutation is a follow-on research + write-grap
      Collect the NRRA + ledger. Build a changeset (added/changed/deprecated) from
      ≥ MEDIUM facts. needs_review[] is never auto-applied.
 
-[15] WRITE only through the gate:
+[15] WRITE only through the gate (no --root — the writer resolves the docs class through
+     rosetta_config.py, so it updates the SAME graph $KB_DIR points at):
         python3 "$PLUGIN/scripts/rosetta/write-graph.py" --update {tech_slug} \
-          --changeset {changeset.json} --ledger {ledger.json} --nrra {nrra.md} \
-          --root "$PROJECT"
+          --changeset {changeset.json} --ledger {ledger.json} --nrra {nrra.md}
      Do NOT edit fact-graph.json by hand. The script snapshots to .history/ first,
      applies ≥ MEDIUM entries, ages deprecations into MIGRATION.md, bumps kb_version.
 
@@ -311,8 +311,10 @@ INPUT: --force           (optional; run the refresh even when the staleness prob
 ═══════════════ R5 — APPLY TO KB (update the knowledge graph; lean-current) ═══════════════   [deterministic writes]
 [9]  Build the changeset from the NRRA (added/changed/deprecated, ≥ MEDIUM only).
 [10] python3 "$PLUGIN/scripts/rosetta/write-graph.py" --update {tech} \
-        --changeset {changeset.json} --ledger {out}/ledger.json --nrra {out}/nrra.md \
-        --root "$PROJECT"
+        --changeset {changeset.json} --ledger {out}/ledger.json --nrra {out}/nrra.md
+     No --root: the docs class is resolved from config, matching $KB_DIR. Pinning it to
+     "$PROJECT" updated a different graph than the one the skill read whenever roots.docs
+     was not "project".
      The script snapshots to .history/, applies the changeset, ages deprecations into
      MIGRATION.md, bumps kb_version. Do not mutate fact-graph.json in the skill.
 [11] For each deprecation (and each changed API) → add a VERSION-TAGGED x entry:

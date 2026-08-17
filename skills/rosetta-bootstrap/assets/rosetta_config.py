@@ -71,6 +71,56 @@ def rosetta_home() -> Path:
     return (Path.home() / ".rosetta").resolve()
 
 
+ENGINE_REL = Path("engine") / "src" / "research.ts"
+
+
+def _is_plugin_root(p: Path) -> bool:
+    return (p / ENGINE_REL).is_file()
+
+
+def plugin_root() -> tuple[Path | None, str]:
+    """Locate the agentic-rosetta plugin checkout (the tree that owns engine/ and scripts/).
+
+    Skills are INSTALLED as bare SKILL.md + assets/ under a harness skills dir, which does not
+    carry engine/. Walking up from an installed SKILL.md therefore never finds the engine, and a
+    skill that improvises a filesystem-wide search is exactly the failure this resolves.
+
+    Order (first hit wins), returning (path, how):
+      1. $ROSETTA_PLUGIN
+      2. $ROSETTA_HOME/plugin-root      (recorded by install.sh)
+      3. walking up from THIS file      (true when running the in-checkout copy)
+    A candidate only counts if it actually contains engine/src/research.ts.
+    """
+    env = os.environ.get("ROSETTA_PLUGIN")
+    if env:
+        p = Path(env).expanduser().resolve()
+        if _is_plugin_root(p):
+            return p, "env:ROSETTA_PLUGIN"
+        warn(f"$ROSETTA_PLUGIN={p} has no {ENGINE_REL} — ignoring")
+
+    pointer = rosetta_home() / "plugin-root"
+    if pointer.is_file():
+        try:
+            recorded = pointer.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            recorded = ""
+            warn(f"cannot read {pointer}: {exc}")
+        if recorded:
+            p = Path(recorded).expanduser().resolve()
+            if _is_plugin_root(p):
+                return p, f"pointer:{pointer}"
+            warn(f"{pointer} points at {p}, which has no {ENGINE_REL} — ignoring")
+
+    cur = Path(__file__).resolve().parent
+    while True:
+        if _is_plugin_root(cur):
+            return cur, "walk-up-from-resolver"
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return None, "not-found"
+
+
 def project_root(start: Path) -> Path:
     """Nearest ancestor with .git, else nearest with .rosetta, else `start` itself."""
     start = start.expanduser().resolve()
@@ -489,6 +539,58 @@ def selftest() -> int:
             capture_output=True, text=True, env=env)
         check("dir created", target.is_dir(), True)
 
+        print("── plugin root: pointer file, env override, and honest failure ──")
+        fake_plugin = tmp / "fake-plugin"
+        (fake_plugin / "engine" / "src").mkdir(parents=True)
+        (fake_plugin / "engine" / "src" / "research.ts").write_text("// engine\n")
+        bare_home = tmp / "bare-home"
+        (bare_home / "bin").mkdir(parents=True)
+
+        def plugin_run(extra_env: dict, cwd: Path | None = None):
+            e = dict(os.environ)
+            e.pop("ROSETTA_PLUGIN", None)
+            e.update({k: str(v) for k, v in extra_env.items()})
+            return subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "plugin"],
+                capture_output=True, text=True, env=e, cwd=str(cwd) if cwd else None)
+
+        # A copy that is NOT inside a plugin checkout, so walk-up cannot rescue it.
+        lone = bare_home / "bin" / "rosetta_config.py"
+        lone.write_bytes(Path(__file__).resolve().read_bytes())
+
+        def lone_run(extra_env: dict):
+            e = dict(os.environ)
+            e.pop("ROSETTA_PLUGIN", None)
+            e.update({k: str(v) for k, v in extra_env.items()})
+            return subprocess.run([sys.executable, str(lone), "plugin"],
+                                  capture_output=True, text=True, env=e)
+
+        out = lone_run({"ROSETTA_HOME": bare_home})
+        check("no pointer, no walk-up -> exit 1", out.returncode, 1)
+
+        (bare_home / "plugin-root").write_text(str(fake_plugin) + "\n")
+        out = lone_run({"ROSETTA_HOME": bare_home})
+        check("pointer file resolves", out.stdout.strip(), str(fake_plugin))
+
+        other = tmp / "other-plugin"
+        (other / "engine" / "src").mkdir(parents=True)
+        (other / "engine" / "src" / "research.ts").write_text("// engine\n")
+        out = lone_run({"ROSETTA_HOME": bare_home, "ROSETTA_PLUGIN": str(other)})
+        check("env beats pointer", out.stdout.strip(), str(other))
+
+        # A pointer at a tree with no engine must be REJECTED, not returned.
+        (bare_home / "plugin-root").write_text(str(tmp / "not-a-plugin") + "\n")
+        out = lone_run({"ROSETTA_HOME": bare_home})
+        check("stale pointer rejected", out.returncode, 1)
+
+        # The in-checkout copy finds its own plugin by walking up, with no pointer at all.
+        out = plugin_run({"ROSETTA_HOME": bare_home})
+        expected_walk = str(Path(__file__).resolve().parent.parent)
+        if (Path(expected_walk) / "engine" / "src" / "research.ts").is_file():
+            check("walk-up from in-checkout copy", out.stdout.strip(), expected_walk)
+        else:
+            print("  ok   (no engine in this checkout — walk-up case not applicable)")
+
         print("── asset copies are byte-identical (drift guard) ──")
         canonical = Path(__file__).resolve()
         repo = canonical.parent.parent
@@ -548,6 +650,9 @@ def main(argv: list[str]) -> int:
 
     sub.add_parser("init", help="create $ROSETTA_HOME with a default config (idempotent)")
 
+    p_plug = sub.add_parser("plugin", help="absolute path of the plugin checkout that owns engine/")
+    p_plug.add_argument("--why", action="store_true", help="also print which tier resolved it")
+
     p_doc = sub.add_parser("doctor", help="report stray artifacts; move them with --apply")
     p_doc.add_argument("--project", default=None)
     p_doc.add_argument("--scan-root", action="append", default=None,
@@ -566,6 +671,18 @@ def main(argv: list[str]) -> int:
 
     if args.verb == "init":
         return cmd_init(rosetta_home())
+
+    if args.verb == "plugin":
+        p, how = plugin_root()
+        if p is None:
+            print(
+                "plugin checkout not found. Set $ROSETTA_PLUGIN, or re-run install.sh from the\n"
+                f"checkout so it records {rosetta_home() / 'plugin-root'}.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"{p}\t[{how}]" if args.why else str(p))
+        return 0
 
     cli_roots = {"default": getattr(args, "root", None)}
     for c in CLASSES:

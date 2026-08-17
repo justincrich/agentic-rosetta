@@ -40,6 +40,7 @@ except ImportError:
     R = None  # type: ignore
 
 import provenance as P
+import roots as RT
 
 WRITER = "write-graph.py@1.1.0"
 R_VERDICTS = {"r", "nr", "REJECT"}
@@ -82,8 +83,18 @@ def parse_nrra_frontmatter(text: str) -> dict:
     return meta
 
 
+# Set by main() when the docs directory came from rosetta_config.py rather than from --root.
+# None => <root>/.rosetta/docs. An explicit --root leaves this None, so every caller that pins a
+# root keeps byte-identical behavior.
+_DOCS_DIR: Path | None = None
+
+
+def docs_dir(root: Path) -> Path:
+    return RT.docs_dir(root, _DOCS_DIR)
+
+
 def graph_dir(root: Path, tech: str) -> Path:
-    return root / ".rosetta" / "docs" / tech
+    return docs_dir(root) / tech
 
 
 def graph_path(root: Path, tech: str) -> Path:
@@ -390,7 +401,7 @@ def _readme_kb(kb_dir: Path) -> str | None:
 
 
 def list_docs_techs(root: Path) -> list[str]:
-    docs = root / ".rosetta" / "docs"
+    docs = docs_dir(root)
     if not docs.is_dir():
         return []
     techs: list[str] = []
@@ -551,11 +562,17 @@ def main(argv: list[str]) -> int:
     p.add_argument("--source-repo", type=Path, help="local tree used to derive v.version")
     args = p.parse_args(argv)
 
-    root = Path(args.root).expanduser().resolve() if args.root else Path(
-        os.environ.get("ROSETTA_PROJECT") or Path.cwd()
-    ).resolve()
+    # Where the KB goes is a CONFIGURED decision, not "wherever the shell happens to be
+    # standing". RT.choose lets --root/$ROSETTA_PROJECT win, else asks rosetta_config.py.
+    global _DOCS_DIR
+    root, _DOCS_DIR = RT.choose(args.root)
     if R is not None and args.root:
         R.set_repo_root(root)
+    if _DOCS_DIR is not None:
+        if _DOCS_DIR != root / ".rosetta" / "docs":
+            print(f"write-graph: docs root from config: {_DOCS_DIR} (cwd is {root})",
+                  file=sys.stderr)
+        RT.warn_if_orphaned(_DOCS_DIR)
 
     try:
         if args.create:
@@ -575,7 +592,7 @@ def main(argv: list[str]) -> int:
                 else [args.backfill]
             )
             if not techs:
-                _die("backfill", f"no fact-graph.json under {root / '.rosetta' / 'docs'}")
+                _die("backfill", f"no fact-graph.json under {docs_dir(root)}")
             overlay = P.load_overlay(args.sources) if args.sources else None
             rc = 0
             for tech in techs:

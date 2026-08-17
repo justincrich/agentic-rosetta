@@ -123,6 +123,17 @@ if [ -f "$SRC_ASSETS/rosetta_config.py" ]; then
   cp "$SRC_ASSETS/rosetta_config.py" "$ROSETTA_HOME_DIR/bin/rosetta_config.py"
   chmod +x "$ROSETTA_HOME_DIR/bin/rosetta_config.py"
   echo "  installed bin/rosetta_config.py"
+  # Record where the plugin (engine/ + scripts/) lives. Skills are installed as bare
+  # SKILL.md + assets/, so walking up from an installed skill NEVER finds engine/src/research.ts.
+  # Without this pointer /rosetta-research must hard-STOP; with it the skill resolves the engine
+  # deterministically instead of improvising a filesystem search.
+  if [ -f "$SCRIPT_DIR/engine/src/research.ts" ]; then
+    printf '%s\n' "$SCRIPT_DIR" > "$ROSETTA_HOME_DIR/plugin-root"
+    echo "  recorded plugin-root -> $SCRIPT_DIR"
+  else
+    echo "  WARN: no engine/src/research.ts under $SCRIPT_DIR; plugin-root not recorded"
+    echo "        /rosetta-research will STOP until the engine is present."
+  fi
   if [ -f "$ROSETTA_HOME_DIR/config.json" ]; then
     echo "  config.json already present — left untouched"
   else
@@ -161,17 +172,21 @@ for h in $TARGETS; do
   for name in $ROSETTA_SKILLS; do
     src="$SKILLS_SRC/$name/SKILL.md"
     dst="$DEST/$name/SKILL.md"
-    if [ -f "$dst" ] && newer_than "$dst" "$src" && [ "$FORCE" != "1" ]; then
-      echo "  SKIP $name (target newer than source; pass --force to clobber)"
-      continue
-    fi
     mkdir -p "$DEST/$name"
-    cp "$src" "$dst"
+    # Assets are MACHINERY (rosetta_config.py), kept byte-identical everywhere by
+    # sync-assets.sh. They are never hand-edited, so the "don't clobber a newer target" guard
+    # below must not cover them — skipping them left installed resolvers silently stale, which
+    # is exactly the drift the guard exists to prevent.
     if [ -d "$SKILLS_SRC/$name/assets" ]; then
       mkdir -p "$DEST/$name/assets"
       cp "$SKILLS_SRC/$name/assets/"* "$DEST/$name/assets/"
       chmod +x "$DEST/$name/assets/"*.py 2>/dev/null || true
     fi
+    if [ -f "$dst" ] && newer_than "$dst" "$src" && [ "$FORCE" != "1" ]; then
+      echo "  SKIP $name SKILL.md (target newer than source; pass --force to clobber) — assets synced"
+      continue
+    fi
+    cp "$src" "$dst"
     echo "  installed $name"
   done
   echo
