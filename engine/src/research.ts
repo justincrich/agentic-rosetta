@@ -5,6 +5,7 @@ import { runResearch } from "./index.ts";
 import { resolveCaller } from "./resolve-caller.ts";
 import { directivesFromTopics } from "./phases/census.ts";
 import { withRingHash } from "./hash.ts";
+import { resolveConcurrency } from "./device-limits.ts";
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -42,7 +43,7 @@ async function main(): Promise<number> {
   --source-mode repo|docs|both
   --topics "a, b"        skip census; fan out these directives
   --depth quick|normal|deep
-  --concurrency N
+  --concurrency N        live workers per wave (default: device limits.concurrency, else 8)
   --max-waves N
   --max-units N
   --docs-max-units N    docs/URL leaf size (default 10; --max-units overrides both)
@@ -99,7 +100,9 @@ async function main(): Promise<number> {
     caller,
     directives: topics.length ? directivesFromTopics(topics, seedRing) : undefined,
     decoderRing: topics.length ? seedRing : undefined,
-    concurrency: arg("--concurrency") ? Number(arg("--concurrency")) : 8,
+    concurrency: resolveConcurrency({
+      cli: arg("--concurrency") ? Number(arg("--concurrency")) : undefined,
+    }),
     maxWaves: arg("--max-waves") ? Number(arg("--max-waves")) : 4,
     maxUnits: arg("--max-units") ? Number(arg("--max-units")) : 40,
     docsMaxUnits: arg("--docs-max-units")

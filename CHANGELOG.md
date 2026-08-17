@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.4] — 2026-08-16
+
+### Added
+- **Device live-worker cap.** `limits.concurrency` in `~/.rosetta/config.json`
+  (or a project `.rosetta/config.json`) is the default `--concurrency` when the
+  flag is omitted. `$ROSETTA_CONCURRENCY` sits between the CLI flag and the
+  files. Built-in remains 8.
+
 ## [0.4.3] — 2026-08-14
 
 ### Added

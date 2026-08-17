@@ -60,11 +60,15 @@ There is no 3-tier ladder. There is no "floor parallelism you MAY enable". The e
       [--docs-url "{url}"] \
       [--topics "{comma topics}"] \
       [--depth {quick|normal|deep}] \
+      [--concurrency N] \
       [--census-only] \
       --out-dir "{resolved research dir}/{slug}-run"
 
     Storage destination is resolved by assets/rosetta_config.py (project / device / path).
     Never hardcode ~/Projects/brain.
+    Omit `--concurrency` unless the caller asked for a one-off override. The
+    engine reads `limits.concurrency` from project then device config
+    (`~/.rosetta/config.json`), then `$ROSETTA_CONCURRENCY`, then 8.
 
 [3] CONSUME STDOUT
     The engine prints JSON: { runId, status, nrra, ledger, blockReason, directiveCount, perClass }.

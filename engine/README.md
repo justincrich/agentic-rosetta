@@ -43,7 +43,7 @@ bun run src/research.ts --tech "GPUI" --model grok-4.6 \
 --source-mode repo|docs|both
 --topics "a, b"        skip census; fan out these directives
 --depth quick|normal|deep
---concurrency N
+--concurrency N        live workers per wave (default: device limits.concurrency, else 8)
 --max-waves N
 --max-units N
 --docs-max-units N     docs/URL leaf size (default 10; --max-units overrides both)

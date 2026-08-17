@@ -47,6 +47,23 @@ Per-project, same shape, overrides the device file:
 { "version": 1, "roots": { "research": "project" } }
 ```
 
+## Run limits
+
+The engine's live-worker cap is a device (or project) setting, not a skill hint.
+
+```jsonc
+// ~/.rosetta/config.json
+{
+  "version": 1,
+  "roots": { "default": "project" },
+  "limits": { "concurrency": 4 }
+}
+```
+
+`limits.concurrency` is the default for `/rosetta-research` when `--concurrency` is omitted. Integer, 1–16. Out-of-range values are skipped, not clamped.
+
+Precedence: `--concurrency` > `$ROSETTA_CONCURRENCY` > project `.rosetta/config.json` > device `~/.rosetta/config.json` > 8.
+
 ### Root values
 
 | Value | Means |
