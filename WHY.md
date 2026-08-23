@@ -94,17 +94,17 @@ The 100% structural prevention rate across both technologies confirms that the f
 
 The `rosetta-upgrade` skill implements a continuous improvement cycle:
 
-1. Run tests on an agent WITHOUT Rosetta → capture anti-patterns
+1. Run tests on an agent WITHOUT Rosetta → capture anti-patterns (Mode A)
 2. Apply Rosetta → run tests again → measure delta
-3. For each remaining gap → expand the fact graph with new rules
+3. For each remaining gap — or for a named specialty you already know is missing — expand at the **current pin** via `--topics` (Mode C)
 4. Re-validate with the expanded graph
 5. The expanded graph feeds back into future runs
 
-This means the Rosetta KB improves with every use. The fact graph grows organically from discovered gaps rather than being hand-crafted in advance.
+This means the Rosetta KB improves with every use. The fact graph grows organically from discovered gaps and named specialties rather than being hand-crafted in advance. Validate grades; it never writes. Mode C is the apply path.
 
 ## Keeping Knowledge Current: The Versioning Model
 
-The Dynamic Research Loop makes a KB *richer* at a fixed framework version. But frameworks move — and a KB pinned at bootstrap time silently rots. `rosetta-upgrade --url` (Refresh mode) moves the knowledge *forward in time*: research the current docs, diff against the KB, bump the fact graph, and re-inject into the agent triad.
+Mode C (`--topics`) makes a KB *richer* at a fixed framework version. Frameworks also move — and a KB pinned at bootstrap time silently rots. `rosetta-upgrade --url` (Refresh, Mode B) moves the knowledge *forward in time*: research the current docs, diff against the KB, bump the fact graph, and re-inject into the agent triad.
 
 The design constraint is that `fact-graph.json` is injected **verbatim into every agent's working memory**, so it must stay lean. It cannot carry per-fact history (`added_in` / `deprecated_in` / `source` on every entry) without blowing the ~800-token budget that makes always-on injection viable. So history lives in three sidecar artifacts, each with one job:
 

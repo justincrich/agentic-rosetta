@@ -24,11 +24,14 @@ description: "Validate any Rosetta knowledge base by challenging an agent to imp
 INPUT: technology_slug (e.g., "swift", "kotlin", "gpui", "tauri")
 INPUT: challenge_id (optional — default: "universal-crud")
 
-[1] DISCOVER ROSIETTA
-    Read: brain/docs/{tech}/README.md
-    Read: brain/docs/{tech}/fact-graph.json
-    Read: brain/docs/{tech}/ROSETTA.md
-    Read: all concept docs in brain/docs/{tech}/*.md
+[1] DISCOVER ROSETTA (via the registry — never hardcode the path)
+    python3 "$PLUGIN/scripts/rosetta/registry.py" --root "$PROJECT" graph-for {tech_or_agent}
+    RESOLVER = first existing of
+      "$ROSETTA_CONFIG"
+      "<this skill's dir>/assets/rosetta_config.py"
+      "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py"
+    KB_DIR = $(python3 "$RESOLVER" find --class docs --slug <slug>)
+    Then read $KB_DIR/README.md, fact-graph.json, ROSETTA.md, concept docs.
     Count: rules, anti-patterns, widgets, traits
 
 [2] SELECT CHALLENGE
@@ -38,7 +41,7 @@ INPUT: challenge_id (optional — default: "universal-crud")
 
 [3] CHALLENGE PROMPT ( implementer mode )
     "You are an implementer agent. You have access ONLY to the
-     Rosetta KB at brain/docs/{tech}/. You may NOT use any
+     Rosetta KB at $KB_DIR (registry-reported slug, resolved root). You may NOT use any
      external knowledge, StackOverflow, or training priors.
 
      Implement this spec: {challenge_spec}
@@ -77,7 +80,8 @@ INPUT: challenge_id (optional — default: "universal-crud")
     Output: structured report + proposed fact-graph diff
 
 [7] Do NOT write the KB from this skill. Emit the proposed changeset. Apply it via
-    `/rosetta:upgrade --topics "{gap}"` → `write-graph.py --update`. Evaluation reads graphs.
+    `/rosetta:upgrade --topics "{gap}"` (Mode C — expand at the current pin) →
+    `write-graph.py --update`. Evaluation reads graphs. Not the benchmark; not `--url` refresh.
 ```
 
 ---

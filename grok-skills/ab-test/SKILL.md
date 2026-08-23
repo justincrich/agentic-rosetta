@@ -19,8 +19,8 @@ description: "Measure real-world impact of Rosetta KB injection by running the s
 ## Algorithm
 
 ```
-INPUT: agent_path (e.g., brain/agents/kotlin-implementer/agent.md)
-INPUT: rosetta_kb (e.g., brain/.rosetta/docs/kotlin/)
+INPUT: agent_path (e.g., agents/kotlin-implementer/agent.md)
+INPUT: rosetta_kb (e.g., .rosetta/docs/kotlin/ — resolve via rosetta_config.py, never hardcode)
 INPUT: challenge_id (optional — default: "universal-crud")
 
 ═══════════════════════════════════════════════════════════
@@ -78,37 +78,15 @@ PHASE 2 — BASELINE (without Rosetta)
 ═══════════════════════════════════════════════════════════
 PHASE 3 — APPLY ROSETTA
 ═══════════════════════════════════════════════════════════
-[5] INJECT ROSETTA BOOTSTRAP into the agent
+[5] APPLY the KB via the only embed writer — do not paste JSON into agent.md:
+        /rosetta:sync {tech_slug}
+        # or: bash "$PLUGIN/scripts/kb-delivery/embed-graph.sh" --root "$PROJECT" --sync {tech_slug}
+    embed-graph.sh hard-overwrites the <!-- rosetta-kb --> region from fact-graph.json.
+    Hand-authored prose outside the sentinels is never touched.
 
-    Read the Rosetta KB:
-    - {rosetta_kb}/fact-graph.json
-    - {rosetta_kb}/README.md (hard rules, mental model, false friends)
-    - {rosetta_kb}/ROSETTA.md (Rosetta quick-card)
-
-    Construct the bootstrap section:
-    ```
-    ## Facts (JSON Fact Graph)
-    ```json
-    {compact fact graph — verbatim from fact-graph.json}
-    ```
-
-    ## Hard Rules
-    {extracted from README.md hard rules section}
-
-    ## Quick Reference
-    - Mental model: {from README.md}
-    - Doc map: {from README.md doc map}
-
-    ### ⚠️ False Friends
-    {from README.md false friends table}
-    ```
-
-[6] WRITE MODIFIED AGENT
-    Insert the bootstrap between the frontmatter (---) and the existing content.
-    The agent now has Rosetta facts injected at session start.
-
-    Verify: agent file has been modified
-    Verify: JSON fact graph in bootstrap matches canonical fact-graph.json
+[6] VERIFY
+        bash "$PLUGIN/scripts/kb-delivery/embed-graph.sh" --root "$PROJECT" --check {agent}
+    exits 0. The agent now has Rosetta facts injected at session start.
 
 ═══════════════════════════════════════════════════════════
 PHASE 4 — AFTER (with Rosetta)
@@ -164,7 +142,7 @@ PHASE 5 — COMPUTE DELTA
     ║  ROSETTA A/B UPGRADE REPORT                                  ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  Agent:     kotlin-implementer                               ║
-    ║  KB:        brain/.rosetta/docs/kotlin/                               ║
+    ║  KB:        .rosetta/docs/kotlin/                            ║
     ║  Challenge: universal-crud                                   ║
     ╠══════════════════════════════════════════════════════════════╣
     ║                                                              ║
@@ -205,7 +183,8 @@ PHASE 6 — USER DECISION
 
 [12] IMPROVE (Refine KB → Re-test)
      - User specifies which gaps to fix
-     - Feed them to `/rosetta:upgrade --topics "{gaps}"` so `write-graph.py --update` is the writer
+     - Feed them to `/rosetta:upgrade --topics "{gaps}"` (Mode C — expand at the current pin)
+       so `write-graph.py --update` is the writer. Not the benchmark; not `--url` refresh.
      - Do not edit fact-graph.json from this skill (evaluation family reads, never writes)
      - GOTO PHASE 4 after the upgrade run
      - Loop until user is satisfied
@@ -283,32 +262,10 @@ If the Python tooling isn't available, the A/B test can be run manually:
 
 1. **Backup**: `cp agent.md agent.md.pre-rosetta.bak`
 2. **Baseline**: Run the challenge without Rosetta, record metrics
-3. **Apply**: Manually insert the Rosetta bootstrap into agent.md (see templates below)
+3. **Apply**: `/rosetta:sync {tech}` (or `embed-graph.sh --sync`). Do not paste JSON into agent.md.
 4. **After**: Run the same challenge with Rosetta, record metrics
 5. **Delta**: Compare metrics
 6. **Decide**: Accept, Improve, or Roll Back
-
-### Bootstrap Injection Template
-
-The bootstrap section inserted between frontmatter and content:
-
-```markdown
-## Facts (JSON Fact Graph)
-```json
-{paste fact-graph.json verbatim}
-```
-
-## Hard Rules
-{paste hard rules from README.md}
-
-## Quick Reference
-- Mental model: {from README.md}
-- Doc map: {from README.md}
-
-### ⚠️ False Friends
-{paste false friends table from README.md}
-```
-```
 
 ---
 

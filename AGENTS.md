@@ -163,11 +163,11 @@ Grok + `--scripts-only`. Touched `assets/rosetta_config.py` → `./sync-assets.s
 `CHANGELOG.md` is the narrative of what shipped. Installer-facing versions
 currently **lag** and are not a single source of truth:
 
-| File | Version on disk (as of 0.4.3 narrative) |
+| File | Version on disk (as of 0.4.5 narrative) |
 |---|---|
-| `CHANGELOG.md` | `0.4.3` |
-| `.claude-plugin/plugin.json` | `0.4.1` |
-| `.grok-plugin/plugin.json` | `0.4.1` |
+| `CHANGELOG.md` | `0.4.5` |
+| `.claude-plugin/plugin.json` | `0.4.5` |
+| `.grok-plugin/plugin.json` | `0.4.5` |
 | `.claude-plugin/marketplace.json` | `0.3.0` |
 | `engine/package.json` | `0.4.0` |
 

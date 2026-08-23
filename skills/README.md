@@ -30,7 +30,7 @@ scripts/assert-no-drift.sh --scripts-only
 |---|---|---|
 | `rosetta-research` | Detect harness, pass model, shell out | `engine/src/research.ts`. Optional `write-graph.py --create` only if the caller asked to persist a graph |
 | `rosetta-bootstrap` | Resolve roots, scaffold triad + 3-lens docs | research → `write-graph.py --create` → `/rosetta-sync` |
-| `rosetta-upgrade` | Mode A benchmark / Mode B refresh, user gate | `provenance.py --check-stale`, research, `write-graph.py --update`, `embed-graph.sh` |
+| `rosetta-upgrade` | Mode C `--topics` expand / Mode B `--url` refresh / Mode A benchmark; user gate | `provenance.py --check-stale` (B only), research, `write-graph.py --update`, `embed-graph.sh` |
 | `rosetta-sync` | Rebuild index, overwrite sentinel blocks | `registry.py scan/validate`, `embed-graph.sh --sync` |
 | `rosetta-validate` | Challenge + 28 universal anti-patterns | reads graph/probes; `embed-graph.sh --check`; **no graph write** |
 | `rosetta-ab-test` | Before/after measurement | evaluation only |

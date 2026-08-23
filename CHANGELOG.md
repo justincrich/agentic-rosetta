@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.5] — 2026-08-21
+
+### Added
+- **`rosetta-upgrade` Mode C (`--topics`).** Expand an existing KB at the current
+  framework pin: research those specialties, merge via `write-graph.py --update`,
+  add or extend 3-lens concept docs, re-inject, gate on accept / improve / roll
+  back. Does not move `v.pkg` / `v.version` (that is Mode B). `--topics` + `--url`
+  is Mode C — extra URLs are research sources, not a pin bump. Empty `--topics`
+  stops; it does not fall through to the benchmark.
+- Mode A remaining-gap expansion now *invokes* Mode C instead of inlining a
+  second write path. Validate / ab-test / stress-test `--topics` pointers name
+  Mode C so they match dispatch.
+
+### Changed
+- Upgrade dispatch is `--topics` → C, else `--url` → B, else A. Installer
+  versions (`plugin.json`) bump to 0.4.5 with this skill.
+
 ## [0.4.4] — 2026-08-16
 
 ### Added

@@ -208,7 +208,7 @@ place to write a KB.
 |---|---|
 | `rosetta-research` | `engine/src/research.ts` |
 | `rosetta-bootstrap` | research → `write-graph.py --create` → docs + triad scaffold → `/rosetta-sync` |
-| `rosetta-upgrade` | Mode A: challenge delta then `--topics` + `write-graph.py --update`. Mode B: `provenance.py --check-stale` then research + `--update` + sync |
+| `rosetta-upgrade` | Mode C (`--topics`): research specialty at current pin + `--update`. Mode B (`--url`): `provenance.py --check-stale` then research + `--update` + sync. Mode A: challenge delta then Mode C |
 | `rosetta-sync` | `registry.py scan/validate` + `embed-graph.sh --sync` |
 | `rosetta-validate` | reads graph + probes; `embed-graph.sh --check`; **does not write graphs** |
 | `rosetta-ab-test` / `rosetta-stress-test` | evaluation; **do not write graphs** |

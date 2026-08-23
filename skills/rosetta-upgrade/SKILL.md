@@ -1,41 +1,49 @@
 ---
 name: rosetta-upgrade
-description: "Upgrade a Rosetta specialist agent — two modes. BENCHMARK (default): run a challenge without Rosetta, apply the KB, re-run, compute the delta, expand the fact graph with discovered gaps. REFRESH (--url): research a framework's CURRENT state from a URL, diff it against the existing KB, update the fact graph + docs to the latest version, and re-inject into the agent triad so it's aware of the new hotness. Both gate on Accept / Improve / Roll Back."
+description: "Upgrade a Rosetta KB. Three modes. EXPAND (--topics): research a specialty at the current framework pin and merge it into the graph. REFRESH (--url, no --topics): research the framework's current version, diff, bump, re-inject. BENCHMARK (default): challenge before/after, then expand remaining gaps via --topics. All graph writes go through write-graph.py --update. Gate on Accept / Improve / Roll Back."
 ---
 
 # Rosetta Upgrade
 
-> **Purpose**: Upgrade a specialist agent's Rosetta knowledge — either by **measuring** the impact of applying the KB and expanding it to close gaps (Mode A), or by **refreshing** the KB to the latest framework version from a URL and re-injecting it into the agent triad (Mode B). Both gate the change on user approval.
+> **Purpose**: Upgrade a specialist agent's Rosetta knowledge — **expand** coverage at the current framework pin (Mode C), **refresh** the pin when the framework moved (Mode B), or **measure** whether the KB helps and then expand remaining gaps (Mode A). Graph writes go through `write-graph.py --update`. Every mode gates on user approval.
 
 ## Mode Dispatch
 
-This skill has **two modes**, selected by whether `--url` is present:
+`--topics` is the expand switch. `--url` without `--topics` is the version-refresh switch. Neither is the benchmark.
 
 | Mode | Trigger | What it does |
 |---|---|---|
-| **A — Benchmark** | no `--url` (default) | Before/after challenge test → compute delta → expand fact graph with discovered gaps. *Knowledge stays at the same framework version; the graph gets richer.* |
-| **B — Refresh** | `--url <docs/release URL>` present | Research the framework's CURRENT state → diff vs the existing KB → bump the fact graph + docs to the latest version → re-inject into the agent triad. *Knowledge moves forward in time; the agent learns the new hotness and the now-deprecated old ways.* |
+| **C — Expand** | `--topics` present (even if `--url` is too) | Research those specialties at the **current** framework pin → diff → merge into the existing graph + 3-lens docs → re-inject. *Knowledge stays at the same version; the graph gets a named specialty.* Extra `--url` values are research sources, not a pin bump. |
+| **B — Refresh** | `--url` present, no `--topics` | Research the framework's CURRENT state → diff vs the existing KB → bump the fact graph + docs to the latest version → re-inject. *Knowledge moves forward in time.* Scope a refresh with `--focus`, not `--topics`. |
+| **A — Benchmark** | neither flag (default) | Before/after challenge test → compute delta → expand remaining gaps by invoking Mode C. *Same pin; graph gets richer from measured misses.* |
 
 ```
 INVOCATION DISPATCH
-  IF args contain --url  → run § Mode B — Refresh Algorithm (R0–R8)
-  ELSE                   → run § Mode A — Benchmark Algorithm (Phases 1–7)
+  IF --topics is present
+       AND its value is empty/whitespace → STOP (usage). Do not fall through to A or B.
+       ELSE → run § Mode C — Expand Algorithm (C0–C6)
+  ELIF args contain --url  → run § Mode B — Refresh Algorithm (R0–R8)
+  ELSE                     → run § Mode A — Benchmark Algorithm (Phases 1–7)
 ```
 
-Both modes share the same safety spine: **back up before mutating, show the change, gate on ACCEPT / IMPROVE / ROLL BACK.** Both honor the NO-STUB invariant inherited from `rosetta-research` — every applied fact traces to a real source; nothing is fabricated to look productive.
+All three share the same safety spine: **back up before mutating, show the change, gate on ACCEPT / IMPROVE / ROLL BACK.** All honor the NO-STUB invariant inherited from `rosetta-research` — every applied fact traces to a real source; nothing is fabricated to look productive. Do not hand-edit `fact-graph.json`.
 
 ## When to Use
 
-**Mode A — Benchmark:**
-- After creating a Rosetta KB for a technology (via `rosetta-bootstrap`)
-- Before declaring a specialist agent "Rosetta-ready"
-- When evaluating whether a Rosetta KB actually improves agent output
-- When you discover new anti-patterns and want to expand the fact graph
+**Mode C — Expand (`--topics`):**
+- The current KB is missing a specialty (SwiftData on a Swift KB, Durable Objects on Cloudflare Workers, evals on Mastra)
+- `/rosetta-validate` / ab-test / stress-test emitted gaps — this is the apply path those skills already name
+- You know the hole; you do not want a coding challenge or a version bump
 
-**Mode B — Refresh:**
+**Mode B — Refresh (`--url`, no `--topics`):**
 - A new framework version shipped and the KB's pinned version is now stale
 - You have a URL (release notes, breaking-changes page, migration guide, current docs) and want the KB + agents brought up to date
 - You want the agent to actively avoid APIs that were correct at bootstrap time but are now deprecated
+
+**Mode A — Benchmark (default):**
+- After creating a Rosetta KB (via `rosetta-bootstrap`)
+- Before declaring a specialist agent "Rosetta-ready"
+- When evaluating whether a Rosetta KB actually improves agent output
 
 ## Mode A — Benchmark Algorithm
 
@@ -110,45 +118,32 @@ cp {agent_path} {agent_path}.pre-rosetta.bak
      ║    2. Filtering in view body (KB rule exists but weak)       ║
      ╚══════════════════════════════════════════════════════════════╝
 
-═══════════════ PHASE 6 — EXPAND VIA THE GATE (no in-place graph mutation) ═══════════════
-Measurement stays in Phases 1–5. Mutation is a follow-on research + write-graph run:
+═══════════════ PHASE 6 — EXPAND VIA MODE C (no in-place graph mutation) ═══════════════
+Measurement stays in Phases 1–5. Mutation is Mode C — do not duplicate its write path here.
 
-[14] For EACH remaining gap, INVOKE
-        /rosetta-research "{technology}" --topics "{gap description}"
-     Collect the NRRA + ledger. Build a changeset (added/changed/deprecated) from
-     ≥ MEDIUM facts. needs_review[] is never auto-applied.
+[14] Join remaining gaps into a --topics list. INVOKE § Mode C — Expand Algorithm (C0–C6)
+        with tech={technology} and --topics "{gap1}, {gap2}, …"
+     Mode C researches, diffs, writes through write-graph.py --update, syncs, and
+     gates. needs_review[] is never auto-applied. Do NOT edit fact-graph.json by hand.
 
-[15] WRITE only through the gate (no --root — the writer resolves the docs class through
-     rosetta_config.py, so it updates the SAME graph $KB_DIR points at):
-        python3 "$PLUGIN/scripts/rosetta/write-graph.py" --update {tech_slug} \
-          --changeset {changeset.json} --ledger {ledger.json} --nrra {nrra.md}
-     Do NOT edit fact-graph.json by hand. The script snapshots to .history/ first,
-     applies ≥ MEDIUM entries, ages deprecations into MIGRATION.md, bumps kb_version.
+[15] OPTIONAL: re-run Phases 4–5. Remaining gaps → another Mode C --topics run, not a hand edit.
 
-[16] APPLY
-        /rosetta-sync {tech_slug}
-        bash "$PLUGIN/scripts/kb-delivery/embed-graph.sh" --root "$PROJECT" --check {agent}
+═══════════════ PHASE 7 — USER DECISION (benchmark embed) ═══════════════
+Mode C already gated any graph write. This gate is the agent embed + .pre-rosetta.bak.
 
-[17] OPTIONAL: re-run Phases 4–5. Remaining gaps → another --topics run, not a hand edit.
-
-═══════════════ PHASE 7 — USER DECISION ═══════════════
-
-[19] SHOW the user:
+[16] SHOW the user:
      - The improvement delta
-     - What gaps were found and expanded
-     - The modified files (fact-graph.json, agent.md, concept docs)
+     - What gaps were found and (if Phase 6 ran) expanded
+     - The modified files
 
-[20] USER CHOOSES:
+[17] USER CHOOSES:
 
      ACCEPT  → Keep Rosetta + expanded fact graph
                - Remove backup: rm {agent_path}.pre-rosetta.bak
                - Log: "Rosetta accepted on {date} with {score}% improvement"
                - Write {kb}/APPLIED.log
 
-     IMPROVE → Refine specific gaps, then re-run Phase 4-7
-               - User specifies which gaps to prioritize
-               - Fact graph may need additional expansion
-               - Loop until user is satisfied
+     IMPROVE → User names remaining gaps → Mode C --topics on those → re-run Phase 4–7
 
      ROLL BACK → Restore backup, remove Rosetta
                - cp {agent_path}.pre-rosetta.bak {agent_path}
@@ -171,23 +166,134 @@ Measurement stays in Phases 1–5. Mutation is a follow-on research + write-grap
 
 ## The Dynamic Research Loop
 
-This is what makes the plugin work for ANY technology:
-
 ```
 rosetta-bootstrap → rosetta-validate → rosetta-upgrade
-      ↑                                        │
-      │                                        ▼
-      │              ┌──────── expansion ──────┤
-      │              │                          │
-      │              ▼                          │
+      ↑                    │                    │
+      │                    │                    ├─ A measure, then C on remaining gaps
+      │                    │                    ├─ C --topics  (specialty at current pin)
+      │                    │                    └─ B --url     (framework moved)
+      │                    ▼
+      │         feed gaps as --topics ──► Mode C ──► write-graph.py --update
       └──── new rules, new anti-patterns, new docs
 ```
 
-Each `upgrade` run discovers gaps → expands the fact graph → the expanded graph feeds back into `validate` (which now catches those gaps) → and `bootstrap` uses the richer graph for new technologies.
+Validate / ab-test / stress-test **read** graphs. Mode C is the apply path they name. Each expand run feeds back into validate.
 
 ---
 
-## Mode B — Refresh (`--url`) Algorithm
+## Mode C — Expand (`--topics`) Algorithm
+
+> **Purpose**: Add a specialty (or close named gaps) to an **existing** KB without moving the framework pin. Point at topics, research those directives, merge facts into the same graph, add or extend 3-lens concept docs, re-inject.
+
+This mode does **not** run a coding challenge and does **not** run `provenance.py --check-stale`. Unchanged corpus is expected. Version-tagged deprecations and pin bumps belong in Mode B.
+
+### Algorithm
+
+```
+INPUT: tech              (e.g., "swift" — derives KB + triad paths)
+INPUT: --topics          (required: comma-separated specialties / gaps)
+INPUT: --url             (optional extra docs/repo sources — NOT a version bump)
+INPUT: --role            (planner | implementer | reviewer | all — default: all)
+INPUT: --base-framework  (optional; default: read from existing ROSETTA.md)
+INPUT: --depth           (quick | normal | deep — default: normal)
+INPUT: --model           (REQUIRED — this session's model; never omit, never invent)
+
+Empty / whitespace-only --topics → STOP. Print usage. Do not fall through to A or B.
+
+═══════════════ C0 — RESOLVE & GUARD ═══════════════   [deterministic]
+[0] RESOLVE + LOCATE THE KB (never hardcode the path)
+        RESOLVER = first existing of
+          "$ROSETTA_CONFIG"
+          "<this skill's dir>/assets/rosetta_config.py"
+          "${ROSETTA_HOME:-$HOME/.rosetta}/bin/rosetta_config.py"
+    KB_DIR    = $(python3 "$RESOLVER" find --class docs --slug {tech})
+    PROBES_MD = $(python3 "$RESOLVER" path --class probes --slug {tech})
+    Missing graph → ERROR "No KB for {tech}. Run /rosetta-bootstrap {tech} first." STOP.
+    Read fact-graph.json (capture v.pkg / v.version / v.kb_version), README, ROSETTA,
+    concept docs, provenance.json (if present).
+    Resolve the triad:
+    - agents/{tech}-{planner,implementer,reviewer}/agent.md
+    - .rosetta/sandbox/agents/{tech}-{role}/agent.md
+    --role narrows the set (default: all existing).
+
+═══════════════ C1 — RESEARCH THE SPECIALTY ═══════════════
+[1] Build research sources:
+       - repo/docs URLs from provenance.json source pins (reuse the existing KB's corpus)
+       - plus any extra --url values the caller passed (additional docs, not a pin bump)
+[2] INVOKE /rosetta-research "{tech}" --topics "{topics}"
+           [--repo-url / --docs-url from those sources]
+           --base-framework {base} --depth {depth} --model {session model}
+    Engine --topics skips census and fans those directives. Fail closed: no serial crawl.
+    status=BLOCKED or open ledger → STOP. Write nothing.
+
+═══════════════ C2 — DIFF (pin must not move) ═══════════════
+[3] Compare the NRRA's fact-graph seed against current fact-graph.json per section
+    (v/w/r/a/x/t). Emit a CHANGESET — canonical shape:
+    scripts/rosetta/test_write_graph.py (dict keyed by section, not a list).
+    Demote LOW / unsourced to needs_review[]. Never auto-apply needs_review[].
+    If the NRRA wants v.pkg or v.version changed → needs_review, do NOT put it in
+    added/changed. Print: "framework pin moves only under --url refresh (Mode B)."
+    If the CHANGESET's applied sections are empty → report "specialty already covered"
+    (or only needs_review remains). Skip C3 write. Still show the report at C6.
+    Do NOT invent facts to look productive.
+
+═══════════════ C3 — WRITE ═══════════════   [deterministic]
+[4] python3 "$PLUGIN/scripts/rosetta/write-graph.py" --update {tech} \
+        --changeset {changeset.json} --ledger {out}/ledger.json --nrra {out}/nrra.md
+    No --root: the writer resolves the docs class through rosetta_config.py, matching
+    $KB_DIR. The script snapshots to .history/, applies ≥ MEDIUM, bumps kb_version
+    from the section diff (add-only → minor). Do not mutate fact-graph.json in the skill.
+
+═══════════════ C4 — DOCS + PROBES ═══════════════
+[5] For each specialty in --topics:
+       IF README doc map already has a row → extend that 3-lens concept doc
+       ELSE write $KB_DIR/{specialty-slug}.md (3-lens: capability / patterns / gotchas)
+            and add a README doc-map row
+    Append specialty anti-patterns to $PROBES_MD so later /rosetta-validate can catch a miss.
+    Do not write a Mode B old→new MIGRATION table unless the NRRA actually deprecated
+    something (rare at a fixed pin). If it did, write-graph.py already aged it.
+
+═══════════════ C5 — RE-INJECT ═══════════════
+[6] FOR EACH role in scope: cp {agent_path} {agent_path}.pre-expand.bak
+[7] /rosetta-sync {tech}
+    (or: bash "$PLUGIN/scripts/kb-delivery/embed-graph.sh" --root "$PROJECT" --sync {tech})
+[8] VERIFY: embed-graph.sh --check <agent> exits 0 for each in-scope role.
+
+═══════════════ C6 — USER DECISION ═══════════════
+[9] SHOW: --topics list, changeset counts + highlights, needs_review[],
+    new/extended concept docs, snapshot path, pin unchanged (v.pkg / v.version).
+
+[10] USER CHOOSES:
+
+     ACCEPT   → Keep the expand.
+                - rm each {agent_path}.pre-expand.bak
+                - Append {kb}/APPLIED.log:
+                  "Expanded --topics {topics} on {date}: +{n} facts (pin {v.version} unchanged)"
+
+     IMPROVE  → User flags CHANGESET items or needs_review[] to research deeper.
+                - Loop C1–C6 on the flagged subset (--topics "{item}")
+                - Until the user is satisfied
+
+     ROLL BACK → Undo the expand, keep the research.
+                - Restore fact-graph.json from the .history/ snapshot write-graph took
+                - Restore each agent from {agent_path}.pre-expand.bak, then rm the .bak
+                - Revert touched docs (README / concept docs / probes) via git checkout
+                - KEEP the .history/ snapshot and the NRRA (valid research — may retry later)
+```
+
+### Decision guidance (Mode C)
+
+| Situation | Default action |
+|---|---|
+| Changeset is clean, sourced, pin unchanged | **Accept** |
+| High-value adds, but `needs_review[]` is non-empty | **Improve** — research the unconfirmed items |
+| Changeset empty (specialty already covered) | Report no-op; nothing to accept |
+| NRRA wants `v.version` / `v.pkg` changed | Leave in `needs_review[]`; tell the user to run Mode B `--url` |
+| Research `BLOCKED` | **Roll Back** — never apply unsourced facts |
+
+---
+
+## Mode B — Refresh (`--url`, no `--topics`) Algorithm
 
 > **Purpose**: Bring a KB — and the agents that embed it — up to the latest framework version. Point at a URL, research what's current, diff against the existing KB, update the fact graph + docs, and re-inject into the agent triad so the agents are aware of the new hotness (and the now-deprecated old ways).
 
@@ -221,6 +327,7 @@ INPUT: --url             (1+ URLs: release notes / breaking-changes / migration 
 INPUT: --role            (planner | implementer | reviewer | all — default: all)
 INPUT: --base-framework  (optional; default: read from existing ROSETTA.md)
 INPUT: --depth           (quick | normal | deep — default: normal; passed through to rosetta-research)
+INPUT: --model           (REQUIRED — this session's model; never omit, never invent)
 INPUT: --force           (optional; run the refresh even when the staleness probe reports *current*)
 
 ═══════════════ R0 — PREFLIGHT (skip fanout when the source has not moved) ═══════════════   [deterministic]
@@ -264,12 +371,16 @@ INPUT: --force           (optional; run the refresh even when the staleness prob
     (This snapshot is the rollback target and the auditable record of "what it used to be.")
 
 ═══════════════ R3 — RESEARCH CURRENT (download the info) ═══════════════
-[6] Invoke the research skill so acquisition degrades gracefully (brain skills → jina/exa → WebFetch):
+[6] Invoke the research skill (engine only — fail closed, no serial crawl):
        /rosetta-research "{tech}" --repo-url {primary --url}
            --base-framework {base}
            --focus "release notes, breaking changes, deprecations, migration since {current_version}"
-           --topics {any additional --url values or focus areas}
+           --topics {additional --url values or --focus areas}
            --depth {depth}
+           --model {session model}
+    The --topics here is an *engine* argument (skip census). Caller --topics on
+    /rosetta-upgrade already dispatched to Mode C; Mode B never sees it.
+    status=BLOCKED or open ledger → STOP. Write nothing.
     (If your harness cannot invoke skills, execute skills/rosetta-research/SKILL.md inline as a
      procedure — it is written as an algorithm, not an API.)
 [7] CONSUME the returned NRRA (Normalized Rosetta Research Artifact): version pins, w/r/a/x/t,
@@ -399,18 +510,24 @@ Unlike Mode A's delta-score grades, Mode B is gated on the **shape of the change
 ## Usage
 
 ```
-# Mode A — Benchmark (default): measure impact + expand the fact graph
-/rosetta-upgrade agents/kotlin-implementer/agent.md --kb .rosetta/docs/kotlin/ --challenge universal-crud
+# Mode C — Expand (--topics): specialty / gaps at the current pin
+/rosetta-upgrade swift --topics "SwiftData, CloudKit"
+/rosetta-upgrade cloudflare-workers --topics "Durable Objects" \
+    --url https://developers.cloudflare.com/durable-objects/
+/rosetta-upgrade mastra --topics "evals, processors"
 
-# Mode B — Refresh (--url): bring the KB + triad up to the latest framework version
+# Mode B — Refresh (--url, no --topics): bring the KB + triad up to the latest framework version
 /rosetta-upgrade electron --url https://www.electronjs.org/docs/latest/breaking-changes
 /rosetta-upgrade electron --url https://releases.electronjs.org/release --role implementer
 /rosetta-upgrade tauri --url https://v2.tauri.app/start/migrate/ --base-framework React --depth deep
+
+# Mode A — Benchmark (default): measure impact, then Mode C on remaining gaps
+/rosetta-upgrade agents/kotlin-implementer/agent.md --kb .rosetta/docs/kotlin/ --challenge universal-crud
 ```
 
-Or in the plugin context, the LLM discovers the agent path and KB path from the project structure. The presence of `--url` is what flips the skill from Benchmark (A) into Refresh (B).
+Run from the consumer project that owns `agents/`, or pass `--root` / `$ROSETTA_PROJECT`. The LLM discovers agent and KB paths from that project. `--topics` selects Expand; `--url` without `--topics` selects Refresh; neither selects Benchmark.
 
 ---
 
 *rosetta-upgrade — Plugin skill for agentic-rosetta*
-*Strategy: Benchmark (measure before/after, expand the fact graph) or Refresh (research the latest, diff, bump the graph, re-inject). Hold old info in `.history/` + `MIGRATION.md`; keep the always-on graph lean and current. Always gate on the user's decision; never fabricate a fact.*
+*Strategy: Expand (specialty at the current pin), Refresh (research the latest, bump the pin), or Benchmark (measure, then expand). Hold old info in `.history/` + `MIGRATION.md`. Always gate on the user's decision; never fabricate a fact.*

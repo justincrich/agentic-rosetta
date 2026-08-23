@@ -21,7 +21,7 @@ It ships **seven skills** and a **Mastra fanout engine** — and **zero pre-inst
 |---|---|
 | `rosetta-research` | **The only reader of the world.** Detects harness + model, shells out to `engine/` (`[A0]`–`[A6]`). Real ACP workers, closed ledger, NRRA. Fail closed — never a serial crawl. |
 | `rosetta-bootstrap` | Thin wrapper: research → `write-graph.py --create` → `rosetta-sync` |
-| `rosetta-upgrade` | Measure (benchmark) or refresh (`--url`). Graph writes go through `write-graph.py --update`. |
+| `rosetta-upgrade` | Expand a specialty (`--topics`), refresh the pin (`--url`), or measure (default). Graph writes go through `write-graph.py --update`. |
 | `rosetta-validate` | Stress-test a KB (reads graphs, never writes) |
 | `rosetta-sync` | Distribute graphs into agent bodies (`registry.py` + `embed-graph.sh`) |
 | `rosetta-ab-test` / `rosetta-stress-test` | Evaluation family |
@@ -73,7 +73,8 @@ The script drops `skills/<name>/SKILL.md` into the harness's skills directory. I
 # In your agent session — create a KB for your stack, then validate and upgrade:
 /rosetta-bootstrap "GPUI" --repo-url https://github.com/zed-industries/zed --base-framework React
 /rosetta-validate gpui
-/rosetta-upgrade agents/gpui-implementer/agent.md          # Mode A — benchmark + expand
+/rosetta-upgrade gpui --topics "windowing, ElementId"      # Mode C — specialty at the current pin
+/rosetta-upgrade agents/gpui-implementer/agent.md          # Mode A — benchmark, then Mode C on remaining gaps
 
 # Later, when the framework ships a new version, refresh the KB from a URL:
 /rosetta-upgrade gpui --url https://zed.dev/docs/gpui      # Mode B — research latest, diff, bump, re-inject
@@ -85,27 +86,38 @@ The script drops `skills/<name>/SKILL.md` into the harness's skills directory. I
 
 ```
 rosetta-bootstrap          rosetta-validate          rosetta-upgrade
-(create KB from scratch)   (stress-test existing)    (before/after or --url refresh)
+(create KB from scratch)   (stress-test existing)    (--topics expand | --url refresh | benchmark)
         │                          │                          │
         ▼                          ▼                          ▼
-  /rosetta-research          Pick challenge              Backup agent
-  (engine [A0]–[A6] only)    Implement spec              Run tests WITHOUT KB
-        │                    Adversarial review          Apply via /rosetta-sync
-  write-graph.py --create    Grade fact graph            Run tests WITH KB
-  3-lens docs + triad        (does not write a graph)    Compute improvement delta
+  /rosetta-research          Pick challenge              Mode C: research --topics
+  (engine [A0]–[A6] only)    Implement spec              Mode B: research latest docs
+        │                    Adversarial review          Mode A: measure, then Mode C
+  write-graph.py --create    Grade fact graph
+  3-lens docs + triad        (does not write a graph)
   /rosetta-sync                     │                          │
         │                           └──────────────┬───────────┘
         │                                          ▼
         │                                  write-graph.py --update
-        │                                  (gaps / version refresh)
+        │                                  (specialty / gaps / version refresh)
         └────────────────────────────────► accept / improve / roll back
 ```
 
 Research has **one path**: the engine. If `engine/` or an ACP entrypoint is missing, the skill STOPs. It does not fall back to `/assimilate`, a serial crawl, or “floor parallelism.”
 
-### Keeping a KB current — `rosetta-upgrade --url` (Refresh mode)
+### Expanding a KB at the current pin — `rosetta-upgrade --topics` (Mode C)
 
-Bootstrapping pins a KB to a framework version. When the framework moves, point the same skill at a URL to bring the KB **and** the agents that embed it up to date:
+After bootstrap, add a specialty without moving the framework pin:
+
+```
+/rosetta-upgrade swift --topics "SwiftData, CloudKit"
+/rosetta-upgrade mastra --topics "evals" --url https://mastra.ai/docs/evals
+```
+
+`--topics` + `--url` is still Mode C: extra URLs are research sources. The pin (`v.pkg` / `v.version`) does not move. Validate / ab-test / stress-test emit gaps into this same call.
+
+### Keeping a KB current — `rosetta-upgrade --url` (Refresh, Mode B)
+
+Bootstrapping pins a KB to a framework version. When the framework moves, point the same skill at a URL (no `--topics`) to bring the KB **and** the agents that embed it up to date:
 
 ```
 /rosetta-upgrade electron --url https://www.electronjs.org/docs/latest/breaking-changes

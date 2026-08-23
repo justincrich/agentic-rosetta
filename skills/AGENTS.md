@@ -18,7 +18,7 @@ in `engine/`, not in more skill prose.
 |---|---|
 | `rosetta-research` | `engine/src/research.ts` |
 | `rosetta-bootstrap` | research → `write-graph.py --create` → `/rosetta-sync` |
-| `rosetta-upgrade` | research / provenance → `write-graph.py --update` → embed |
+| `rosetta-upgrade` | Mode C `--topics` / Mode B `--url` / Mode A → `write-graph.py --update` → embed |
 | `rosetta-sync` | `registry.py` + `embed-graph.sh` |
 | `rosetta-validate` | reads + `embed-graph.sh --check` |
 | `rosetta-ab-test` | evaluation only |
