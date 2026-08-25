@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { WORKER_DEPTH_ENV, type ResearchRequest } from "../contract.ts";
-import { ResolveError, acpEntrypoint, detectHarness, validateModel } from "../resolve-caller.ts";
+import { ResolveError, acpEntrypoint, detectHarness } from "../resolve-caller.ts";
 
 export type PreflightOk = { ok: true };
 export type PreflightStop = { ok: false; code: string; reason: string };
@@ -18,7 +18,6 @@ export function preflight(req: ResearchRequest, env: NodeJS.ProcessEnv = process
     if (!harness) {
       return { ok: false, code: "HARNESS_UNRESOLVED", reason: "harness not in caller and not detectable from env" };
     }
-    validateModel(harness, req.caller.model);
     const acp = acpEntrypoint(harness, req.caller.model);
     if (!existsSync(acp.command) && acp.command !== "grok" && acp.command !== "opencode") {
       // which() already resolved to an absolute path; if the binary vanished, stop.

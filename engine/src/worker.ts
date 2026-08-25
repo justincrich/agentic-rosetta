@@ -11,6 +11,15 @@ export type WorkerReject = {
   ok: false;
   reason: string;
   report?: WorkerReport;
+  /** Classified provider-side failures (AUTH / MODEL / QUOTA). Undefined for validation rejects. */
+  kind?: WorkerErrorKind;
+};
+
+export type WorkerErrorKind = "AUTH" | "MODEL" | "QUOTA" | "GENERIC";
+
+export type ClassifiedWorkerError = {
+  kind: WorkerErrorKind;
+  message: string;
 };
 
 export type WorkerAccept = {
@@ -21,16 +30,32 @@ export type WorkerAccept = {
 export function acpOptionsFromCaller(
   directive: ResearchDirective,
   caller: CallerIdentity,
+  cwd?: string,
 ): ConstructorParameters<typeof AcpAgent>[0] {
-  return {
+  const env = { ...caller.acp.env };
+  const opts: ConstructorParameters<typeof AcpAgent>[0] = {
     id: directive.id,
     name: `rosetta-${directive.id}`,
     description: `Rosetta worker ${directive.id} (${directive.class})`,
     command: caller.acp.command,
     args: [...caller.acp.args],
-    env: { ...caller.acp.env },
-    model: caller.model,
+    env,
+    ...(cwd ? { cwd } : {}),
   };
+  if (caller.harness === "pi") {
+    // pi-acp 0.0.33 (ACP SDK 0.26) removed the `session/set_model` method the
+    // client sends when `model` is set — setting it hard-fails session init
+    // ("Method not found: session/set_model"). pi also scrubs inherited
+    // PI_MODEL/PI_PROVIDER and derives them from its own configured model.
+    // Hand the model over via env (handoff §6 fallback): pi uses its default
+    // model today, and honors these if a future pi reads them.
+    const slash = caller.model.indexOf("/");
+    env.PI_PROVIDER = slash >= 0 ? caller.model.slice(0, slash) : (caller.provider ?? "");
+    env.PI_MODEL = slash >= 0 ? caller.model.slice(slash + 1) : caller.model;
+  } else {
+    opts.model = caller.model;
+  }
+  return opts;
 }
 
 /** The only factory. Every worker is `new AcpAgent` from `caller.acp`. */
@@ -38,8 +63,68 @@ export function makeWorker(
   directive: ResearchDirective,
   _ring: DecoderRing,
   caller: CallerIdentity,
+  cwd?: string,
 ): AcpAgent {
-  return new AcpAgent(acpOptionsFromCaller(directive, caller));
+  return new AcpAgent(acpOptionsFromCaller(directive, caller, cwd));
+}
+
+const AUTH_PATTERNS = /api.?key|unauthorized|authentication|invalid.*key|401|403/;
+const MODEL_PATTERNS = /model.*not.?found|does.?not.?exist|is.?not.?available|unrecognized.*model|unknown.*model|no.*model.*matched/;
+const QUOTA_PATTERNS = /rate.?limit|quota|billing|insufficient|429|payment|credit/;
+
+/**
+ * Pure classifier for errors surfaced by the ACP worker. Gathers text from the
+ * thrown error's message / data.message / stderr (the ACP SDK's RequestError
+ * carries { http_status, data: { message, http_status } }) and classifies
+ * provider-side failures into AUTH / MODEL / QUOTA with an educational message
+ * naming the harness + model. Everything else is GENERIC with the historical
+ * `worker error: <msg>` shape (validation failures keep retrying).
+ */
+export function classifyWorkerError(err: unknown, caller: CallerIdentity): ClassifiedWorkerError {
+  const parts: string[] = [];
+  let httpStatus: number | undefined;
+  const record = (v: unknown) => {
+    if (typeof v === "string") parts.push(v);
+    else if (v && typeof v === "object") {
+      const d = v as Record<string, unknown>;
+      if (typeof d.message === "string") parts.push(d.message);
+      if (typeof d.error === "string") parts.push(d.error);
+      if (typeof d.stderr === "string") parts.push(d.stderr);
+      if (typeof d.http_status === "number" && httpStatus === undefined) httpStatus = d.http_status;
+    }
+  };
+  const e = err as { message?: unknown; data?: unknown; stderr?: unknown; http_status?: unknown };
+  record(e.message);
+  record(e.data);
+  record(e.stderr);
+  if (typeof e.http_status === "number" && httpStatus === undefined) httpStatus = e.http_status;
+
+  const joined = parts.join("\n");
+  const hay = joined.toLowerCase();
+  const firstLine = (joined.split("\n")[0] || "unknown error").slice(0, 240);
+  const auth = AUTH_PATTERNS.test(hay) || httpStatus === 401 || httpStatus === 403;
+  const quota = QUOTA_PATTERNS.test(hay) || httpStatus === 429 || httpStatus === 402;
+  const model = MODEL_PATTERNS.test(hay);
+
+  if (auth) {
+    return {
+      kind: "AUTH",
+      message: `${caller.harness} rejected the request as an auth failure (model ${caller.model}): ${firstLine}. Check the provider key for ${caller.harness} and re-run. [AUTH]`,
+    };
+  }
+  if (quota) {
+    return {
+      kind: "QUOTA",
+      message: `${caller.harness} hit a quota/payment limit (model ${caller.model}): ${firstLine}. Top up credits or wait for the rate limit to reset, then re-run. [QUOTA]`,
+    };
+  }
+  if (model) {
+    return {
+      kind: "MODEL",
+      message: `${caller.harness} does not recognize model ${caller.model}: ${firstLine}. Pass a model the provider actually serves, then re-run. [MODEL]`,
+    };
+  }
+  return { kind: "GENERIC", message: `worker error: ${firstLine}` };
 }
 
 function globToRegExp(glob: string): RegExp {
@@ -136,9 +221,10 @@ export async function runWorker(
   directive: ResearchDirective,
   ring: DecoderRing,
   caller: CallerIdentity,
+  cwd?: string,
 ): Promise<WorkerAccept | WorkerReject> {
   const prompt = renderDirective(directive, ring);
-  const worker = makeWorker(directive, ring, caller);
+  const worker = makeWorker(directive, ring, caller, cwd);
   const timeoutMs = Number(process.env.ROSETTA_WORKER_TIMEOUT_MS ?? DEFAULT_WORKER_TIMEOUT_MS);
   const withTimeout = <T>(p: Promise<T>): Promise<T> =>
     Promise.race([
@@ -156,10 +242,14 @@ export async function runWorker(
       const raw = extractJson(text);
       return validateReport(raw, directive, ring);
     } catch (err) {
-      return { ok: false, reason: `worker error: ${(err as Error).message}` };
+      const classified = classifyWorkerError(err, caller);
+      return { ok: false, reason: classified.message, kind: classified.kind };
     }
   };
   const first = await attempt(prompt);
   if (first.ok) return first;
+  // AUTH / MODEL / QUOTA are provider-side: a narrower prompt cannot fix them — fail fast.
+  // GENERIC / validation rejects still retry once with the narrowed prompt.
+  if (first.kind && first.kind !== "GENERIC") return first;
   return attempt(narrowedRetryPrompt(prompt, first.reason));
 }

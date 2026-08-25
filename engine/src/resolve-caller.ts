@@ -11,21 +11,6 @@ export class ResolveError extends Error {
   }
 }
 
-/** Empirically recorded rosters (T5 / R1). Live fetch is preferred when it works. */
-export const STATIC_ROSTERS: Record<Harness, string[]> = {
-  grok: ["grok-4.6", "grok-4.5", "grok-composer-2.5-fast"],
-  claude: [
-    "opus",
-    "sonnet",
-    "haiku",
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
-  ],
-  codex: ["gpt-5.4", "o3", "codex", "gpt-5"],
-  opencode: ["opencode", "claude-sonnet-4-6", "gpt-5.4", "grok-4.6"],
-};
-
 export function detectHarness(env: NodeJS.ProcessEnv = process.env): Harness | null {
   const kind = (env.CMUX_AGENT_LAUNCH_KIND ?? "").toLowerCase();
   if (kind === "grok" || kind === "claude" || kind === "codex" || kind === "opencode") {
@@ -37,6 +22,7 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): Harness | n
   if (env.CLAUDECODE === "1" || env.CLAUDE_CODE_EXECPATH) return "claude";
   if (env.CODEX_HOME || env.CODEX_THREAD_ID || env.CODEX_CI) return "codex";
   if (env.OPENCODE || env.OPENCODE_DIR || env.OPENCODE_CONFIG) return "opencode";
+  if (env.PI_CODING_AGENT || env.PI_SESSION_ID) return "pi";
   return null;
 }
 
@@ -54,6 +40,7 @@ export type AcpEntrypoint = { command: string; args: string[]; note: string };
  *   opencode → `opencode acp`
  *   claude   → `claude-code-acp` if on PATH (claude itself has no --acp; stream-json is not ACP)
  *   codex    → no ACP server on this machine; fail closed
+ *   pi       → `pi-acp` npm adapter (bridges ACP JSON-RPC over stdio to `pi --mode rpc`)
  */
 export function acpEntrypoint(harness: Harness, model: string): AcpEntrypoint {
   switch (harness) {
@@ -90,37 +77,47 @@ export function acpEntrypoint(harness: Harness, model: string): AcpEntrypoint {
         "codex has no ACP server (`codex exec` is not ACP). Fail closed — will not degrade to a serial crawl.",
       );
     }
+    case "pi": {
+      const adapter = which("pi-acp");
+      if (!adapter) {
+        throw new ResolveError(
+          "ACP_MISSING",
+          "pi has no ACP server installed — install the pi-acp adapter: `npm install -g pi-acp`",
+        );
+      }
+      return { command: adapter, args: [], note: "pi-acp adapter (spawns pi --mode rpc)" };
+    }
   }
 }
 
-export function fetchRoster(harness: Harness, live = false): string[] {
-  const staticList = STATIC_ROSTERS[harness];
-  if (!live || harness !== "grok") return staticList;
-  const r = spawnSync("grok", ["models"], { encoding: "utf8", timeout: 20_000 });
-  const text = `${r.stdout}\n${r.stderr}`;
-  const found = new Set<string>(staticList);
-  for (const m of text.matchAll(/\b(grok-[a-z0-9][a-z0-9.+\-]*)\b/gi)) {
-    found.add(m[1]);
-  }
-  return [...found];
-}
-
-export function validateModel(harness: Harness, model: string): void {
+export function validateModel(model: string): void {
   if (!model || !model.trim()) {
     throw new ResolveError("MODEL_MISSING", "--model is required; the engine never substitutes a default");
   }
-  const roster = fetchRoster(harness, false);
-  if (!roster.includes(model)) {
-    throw new ResolveError(
-      "MODEL_UNRESOLVED",
-      `model ${JSON.stringify(model)} is not on the ${harness} roster (${roster.join(", ")}). Refusing to substitute a default.`,
-    );
+  // Model strings pass through unvalidated — the ACP binary surfaces provider/key
+  // errors, which worker.ts classifies (AUTH / MODEL / QUOTA).
+}
+
+/**
+ * Compose `--provider` into the model string. Only open-source harnesses (pi)
+ * take a provider; model-provided harnesses (claude / codex / opencode / grok)
+ * ignore it. Never double-prefix a model that already carries "provider/id".
+ */
+export function composeProviderModel(
+  provider: string | undefined,
+  harness: Harness,
+  model: string,
+): string {
+  if (provider && harness === "pi" && !model.includes("/")) {
+    return `${provider}/${model}`;
   }
+  return model;
 }
 
 export function resolveCaller(opts: {
   model: string;
   harness?: string;
+  provider?: string;
   env?: NodeJS.ProcessEnv;
 }): CallerIdentity {
   const env = opts.env ?? process.env;
@@ -134,14 +131,16 @@ export function resolveCaller(opts: {
   if (!detected) {
     throw new ResolveError(
       "HARNESS_UNRESOLVED",
-      "could not detect harness from env (CLAUDECODE / CODEX_* / OPENCODE_* / GROK_* / CMUX_AGENT_LAUNCH_KIND)",
+      "could not detect harness from env (CLAUDECODE / CODEX_* / OPENCODE_* / GROK_* / PI_* / CMUX_AGENT_LAUNCH_KIND)",
     );
   }
-  validateModel(detected, opts.model);
-  const acp = acpEntrypoint(detected, opts.model);
+  validateModel(opts.model);
+  const model = composeProviderModel(opts.provider, detected, opts.model);
+  const acp = acpEntrypoint(detected, model);
   return CallerIdentity.parse({
     harness: detected,
-    model: opts.model,
+    model,
+    provider: opts.provider,
     acp: {
       command: acp.command,
       args: acp.args,

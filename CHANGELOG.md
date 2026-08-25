@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.6] — 2026-08-25
+
+### Changed
+- **Model pass-through.** The fanout engine no longer ships hardcoded per-harness
+  model rosters. Any model string passes through to the ACP binary; the binary or
+  provider surfaces unknown-model / key / quota errors, which the worker classifies
+  into `AUTH` / `MODEL` / `QUOTA` and reports as educational messages naming the
+  harness + model. `MODEL_UNRESOLVED` is gone; only an empty `--model` is rejected
+  (`MODEL_MISSING`, exit 2 — still never defaulted).
+- **`--provider` (optional, pi).** `research.ts` accepts `--provider NAME`; for
+  the `pi` harness it composes `provider/model`; model-provided harnesses
+  (claude / codex / opencode / grok) ignore it. Never defaulted.
+- **pi is the fifth harness.** Detected via `PI_CODING_AGENT` / `PI_SESSION_ID`;
+  its ACP server is the separate `pi-acp` npm adapter (spawns `pi --mode rpc`),
+  installed globally on the machine running the engine.
+
+### Fixed
+- Worker rejections no longer claim “after retry” when the failure was classified
+  as AUTH / MODEL / QUOTA (those skip the narrowed-prompt retry).
+
 ## [0.4.5] — 2026-08-21
 
 ### Added

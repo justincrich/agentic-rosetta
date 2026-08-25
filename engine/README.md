@@ -15,8 +15,8 @@ bun run typecheck
 ```
 
 Requires Bun (or Node) and an ACP entrypoint for the invoking harness
-(`claude-code-acp`, `opencode acp`, `grok agent stdio`, …). If those are
-missing, a run returns `status=BLOCKED` and writes nothing.
+(`claude-code-acp`, `opencode acp`, `grok agent stdio`, `pi-acp`, …). If those
+are missing, a run returns `status=BLOCKED` and writes nothing.
 
 ## Run
 
@@ -35,7 +35,8 @@ bun run src/research.ts --tech "GPUI" --model grok-4.6 \
 --tech NAME            required
 --tech-slug SLUG       default: kebab of --tech
 --model MODEL          required; never defaulted
---harness H            claude|codex|opencode|grok (default: detect from env)
+--provider NAME        pi only: compose as provider/model (ignored by model-provided harnesses)
+--harness H            claude|codex|opencode|grok|pi (default: detect from env)
 --base-framework NAME
 --repo-path DIR
 --repo-url URL
@@ -57,6 +58,14 @@ bun run src/research.ts --tech "GPUI" --model grok-4.6 \
 Stdout is JSON: `{ runId, status, nrra, ledger, blockReason, … }`.
 `status=BLOCKED` means stop — do not write a graph.
 
+> **pi note (verified 2026-08-25):** `--provider`/`--model` compose into a
+> `provider/model` string, but pi-acp v0.0.33 (ACP SDK 0.26) cannot forward it
+> to `pi --mode rpc` — its `session/set_model` handler is dead code, and pi
+> scrubs inherited `PI_MODEL`/`PI_PROVIDER`. The engine injects the model via
+> env (handoff §6 fallback) and omits it from the ACP client so sessions start;
+> pi therefore runs with its own configured default model until an upstream
+> pi-acp fix lands.
+
 ## Layout
 
 | Path | Role |
@@ -64,7 +73,7 @@ Stdout is JSON: `{ runId, status, nrra, ledger, blockReason, … }`.
 | `src/contract.ts` | Zod schemas (`ResearchRequest`, `ResearchResult`, `Ledger`, …) |
 | `src/research.ts` | CLI |
 | `src/index.ts` | `runResearch` |
-| `src/resolve-caller.ts` | Detect harness + resolve ACP + validate model |
+| `src/resolve-caller.ts` | Detect harness + resolve ACP + compose provider/model |
 | `src/worker.ts` | ACP worker construction |
 | `src/phases/preflight.ts` | `[A0]` |
 | `src/phases/orient.ts` | `[A1]` decoder ring |

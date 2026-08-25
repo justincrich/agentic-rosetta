@@ -51,15 +51,18 @@ There is no 3-tier ladder. There is no "floor parallelism you MAY enable". The e
     The recorded plugin root is the supported way to find it; a `find` across the disk is not.
 
 [1] DETECT HARNESS + MODEL
-    Pass --harness {claude|codex|opencode|grok} if you know it; otherwise the engine
-    reads CLAUDECODE / CODEX_* / OPENCODE_* / GROK_* / CMUX_AGENT_LAUNCH_KIND.
+    Pass --harness {claude|codex|opencode|grok|pi} if you know it; otherwise the engine
+    reads CLAUDECODE / CODEX_* / OPENCODE_* / GROK_* / PI_* / CMUX_AGENT_LAUNCH_KIND.
     Pass --model {the model THIS session is using}. Never omit it. Never invent one.
+    With --harness pi, optionally pass --provider {provider} — the engine composes
+    provider/model. Model-provided harnesses ignore --provider.
 
 [2] BUILD THE INVOCATION
     bun run "$ENGINE" \
       --tech "{technology_name}" \
       --tech-slug "{kebab}" \
       --model "{model}" \
+      [--provider "{provider}"] \
       [--harness {harness}] \
       [--base-framework "{base}"] \
       [--repo-path "{local clone}"] \
@@ -95,7 +98,8 @@ There is no 3-tier ladder. There is no "floor parallelism you MAY enable". The e
 | Failure | Response |
 |---|---|
 | engine/ missing, or `rosetta_config.py plugin` fails | STOP + install instructions. Never crawl, never `find` for it. |
-| `--model` omitted / not on roster | engine exits non-zero naming MODEL_UNRESOLVED |
+| `--model` omitted (empty) | engine exits 2 naming MODEL_MISSING (model is never defaulted) |
+| unknown model string | passes through to the ACP binary; provider errors surface as classified AUTH / MODEL / QUOTA messages |
 | harness has no ACP entrypoint | engine preflight STOP (named). Nothing written. |
 | already inside a worker (`ROSETTA_WORKER=1`) | STOP (recursion) |
 | ledger open at emit | status=BLOCKED, no graph write |

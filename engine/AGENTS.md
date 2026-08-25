@@ -19,13 +19,22 @@ Do **not** edit `skills/` or `grok-skills/` from here. Do **not** write
 ## Rules
 
 1. **Fail closed.** `preflight.ts` returns a named code
-   (`RECURSION`, `HARNESS_UNRESOLVED`, `MODEL_UNRESOLVED`, `ACP_MISSING`,
+   (`RECURSION`, `HARNESS_UNRESOLVED`, `MODEL_MISSING`, `ACP_MISSING`,
    `RUNTIME`). Do not add a “best effort” branch that crawls the web from this
    process.
 2. **No serial-crawl fallback.** If ACP cannot start, `status=BLOCKED`. The
    skill prints the reason and writes nothing.
 3. **Never default `--model`.** `research.ts` exits 2 if `--tech` or `--model`
-   is missing. `validateModel` must keep rejecting an empty or unknown model.
+   is missing. Model strings are pass-through: `validateModel` rejects only an
+   EMPTY model. Unknown model names reach the ACP binary, which surfaces
+   provider / key errors the worker classifies into `AUTH` / `MODEL` / `QUOTA`
+   (see `classifyWorkerError` in `src/worker.ts`).
+
+   `--provider` is optional and never defaulted. For open-source harnesses
+   (`pi`) it composes as `provider/model`; model-provided harnesses
+   (claude / codex / opencode / grok) ignore it. `pi` is the fifth harness —
+   its ACP server is the separate `pi-acp` npm adapter (spawns `pi --mode rpc`),
+   installed globally on the machine running the engine.
 4. **No recursive fanout.** `ROSETTA_WORKER=1` (`WORKER_DEPTH_ENV`) inside a
    worker. Preflight STOPs if it is set.
 5. **Census is deterministic.** `git ls-files` / docs crawl, first-match class

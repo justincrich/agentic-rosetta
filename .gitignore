@@ -9,3 +9,8 @@ __pycache__/
 
 # Scaffolded by the skills at runtime — never commit a generated KB into the plugin repo
 .rosetta/
+
+# harness-local state (goal/task tracking, agent configs)
+/.pi/
+/.claude/
+/engine/.pi/

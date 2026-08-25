@@ -6,13 +6,14 @@ import { withRingHash } from "../src/hash.ts";
 
 /**
  * Real spawn of the invoking harness's ACP entrypoint.
- * This is grok `agent stdio` on this machine. We only assert the process
- * starts and speaks enough ACP to fail-or-succeed without a mocked child.
+ * This is opencode `acp` on this machine, driving deepseek/deepseek-v4-flash.
+ * We only assert the process starts and speaks enough ACP to fail-or-succeed
+ * without a mocked child.
  */
 describe("real ACP worker spawn", () => {
-  test("makeWorker + generate against the live grok ACP entry (no mocked child)", async () => {
-    const caller = resolveCaller({ model: "grok-4.6", harness: "grok" });
-    expect(caller.acp.args).toContain("stdio");
+  test("makeWorker + generate against the live opencode ACP entry (no mocked child)", async () => {
+    const caller = resolveCaller({ model: "deepseek/deepseek-v4-flash", harness: "opencode" });
+    expect(caller.acp.args).toContain("acp");
     const ring = withRingHash({
       purpose: "Integration probe: return a tiny closed report about README.md.",
       nouns: [{ term: "README", means: "the orientation file" }],

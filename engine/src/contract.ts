@@ -16,12 +16,13 @@ export type TerritoryClass = z.infer<typeof TerritoryClass>;
 export const Confidence = z.enum(["HIGH", "MEDIUM", "LOW"]);
 export type Confidence = z.infer<typeof Confidence>;
 
-export const Harness = z.enum(["claude", "codex", "opencode", "grok"]);
+export const Harness = z.enum(["claude", "codex", "opencode", "grok", "pi"]);
 export type Harness = z.infer<typeof Harness>;
 
 export const CallerIdentity = z.object({
   harness: Harness,
   model: z.string().min(1),
+  provider: z.string().optional(),
   acp: z.object({
     command: z.string().min(1),
     args: z.array(z.string()),

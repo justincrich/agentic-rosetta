@@ -54,7 +54,7 @@ export async function fanoutWave(
   }
 
   const results = await mapPool(runnable, req.concurrency, async (d) => {
-    const result = await runWorker(d, ring, caller);
+    const result = await runWorker(d, ring, caller, req.sources.repoPath);
     return { d, result };
   });
 
@@ -73,7 +73,7 @@ export async function fanoutWave(
     if (!result.ok) {
       gaps.push({
         territory: d.territory.label,
-        reason: `worker rejected after retry: ${result.reason}`,
+        reason: `worker rejected: ${result.reason}`,
         directiveId: d.id,
       });
       continue;

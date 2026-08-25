@@ -40,6 +40,27 @@ describe("makeWorker is constructed only from caller.acp", () => {
     expect(opts.env).toEqual({ A: "1" });
   });
 
+  test("pi harness: model goes via PI_MODEL/PI_PROVIDER env, not the ACP client", () => {
+    const caller = CallerIdentity.parse({
+      harness: "pi",
+      model: "deepseek/deepseek-v4-flash",
+      acp: { command: "/sentinel/bin/pi-acp", args: [], env: {} },
+    });
+    const ring = withRingHash({ purpose: "p", nouns: [], traps: [] });
+    const d = ResearchDirective.parse({
+      id: "t100",
+      territory: { kind: "paths", label: "README.md", include: ["README.md"], unitCount: 1 },
+      class: "orientation",
+      yields: ["v"],
+      question: "q",
+      decoderRingHash: ring.hash,
+    });
+    const opts = acpOptionsFromCaller(d, caller);
+    expect(opts.model).toBeUndefined();
+    expect(opts.env?.PI_PROVIDER).toBe("deepseek");
+    expect(opts.env?.PI_MODEL).toBe("deepseek-v4-flash");
+  });
+
   test("default worker timeout is 10 minutes (docs leaves cannot finish in 180s)", () => {
     expect(DEFAULT_WORKER_TIMEOUT_MS).toBe(600_000);
     expect(src).toContain("DEFAULT_WORKER_TIMEOUT_MS");

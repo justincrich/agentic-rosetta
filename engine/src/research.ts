@@ -35,7 +35,8 @@ async function main(): Promise<number> {
   --tech NAME            required
   --tech-slug SLUG       default: kebab of --tech
   --model MODEL          required; never defaulted
-  --harness H            claude|codex|opencode|grok (default: detect from env)
+  --provider NAME        pi only: compose as provider/model (ignored by model-provided harnesses)
+  --harness H            claude|codex|opencode|grok|pi (default: detect from env)
   --base-framework NAME
   --repo-path DIR
   --repo-url URL
@@ -63,9 +64,11 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  const provider = arg("--provider");
+
   let caller;
   try {
-    caller = resolveCaller({ model, harness: arg("--harness") });
+    caller = resolveCaller({ model, harness: arg("--harness"), provider });
   } catch (err) {
     process.stderr.write(`ERROR: ${(err as Error).message}\n`);
     return 2;
