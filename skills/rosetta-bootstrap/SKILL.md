@@ -20,10 +20,11 @@ PLUGIN / PROJECT / RESOLVER — same resolution as rosetta-research (never hardc
     KB_DIR = $(python3 "$RESOLVER" path --class docs --slug {tech_slug} --ensure)
 
 [1] RESEARCH
-    INVOKE /rosetta-research "{tech}" with the same repo/docs/depth/model.
+    INVOKE /rosetta-research "{tech}" with the same repo/docs/depth/model AND --no-graph.
+    Nested research must not persist before bootstrap's own [2] GRAPH --create.
     CONSUME NRRA + ledger from the engine --out-dir.
 
-[2] GRAPH  (the only write of fact-graph.json)
+[2] GRAPH  (bootstrap's write of fact-graph.json via --create)
     python3 "$PLUGIN/scripts/rosetta/write-graph.py" --create {tech_slug} \
       --nrra {out}/nrra.md --ledger {out}/ledger.json
     NO --root. The writer resolves the docs class through rosetta_config.py, so the graph lands

@@ -225,6 +225,9 @@ Empty / whitespace-only --topics → STOP. Print usage. Do not fall through to A
 [2] INVOKE /rosetta:research "{tech}" --topics "{topics}"
            [--repo-url / --docs-url from those sources]
            --base-framework {base} --depth {depth} --model {session model}
+           --no-graph
+    Nested research must not mutate the graph before ACCEPT/IMPROVE/ROLL BACK;
+    upgrade still writes via --update after the changeset gate.
     Engine --topics skips census and fans those directives. Fail closed: no serial crawl.
     status=BLOCKED or open ledger → STOP. Write nothing.
 
@@ -380,6 +383,9 @@ INPUT: --force           (optional; run the refresh even when the staleness prob
            --topics {additional --url values or --focus areas}
            --depth {depth}
            --model {session model}
+           --no-graph
+    Nested research must not mutate the graph before ACCEPT/IMPROVE/ROLL BACK;
+    upgrade still writes via --update after the changeset gate.
     The --topics here is an *engine* argument (skip census). Caller --topics on
     /rosetta:upgrade already dispatched to Mode C; Mode B never sees it.
     status=BLOCKED or open ledger → STOP. Write nothing.
@@ -483,7 +489,8 @@ INPUT: --force           (optional; run the refresh even when the staleness prob
                 - Keep .history/ snapshot + MIGRATION.md
 
      IMPROVE  → User flags specific CHANGESET items or needs_review[] entries to research deeper.
-                - Loop R3–R7 on the flagged subset (e.g. /rosetta:research --topics "{item}")
+                - Loop R3–R7 on the flagged subset
+                  (e.g. /rosetta:research --topics "{item}" --no-graph)
                 - Until the user is satisfied
 
      ROLL BACK → Undo the refresh, keep the research.

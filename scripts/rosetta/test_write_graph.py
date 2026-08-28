@@ -436,6 +436,133 @@ def main() -> int:
     finally:
         httpd.shutdown()
 
+    # ── --apply-nrra: create-or-additive-merge from a successful research NRRA ───────────────
+    apply_root = tmp / "apply-proj"
+    (apply_root / ".git").mkdir(parents=True)
+    apply_dest = apply_root / ".rosetta" / "docs" / "applytoy" / "fact-graph.json"
+
+    ar = run("--root", str(apply_root), "--apply-nrra", "applytoy",
+             "--nrra", str(nrra), "--ledger", str(ledger))
+    check("apply-create-ok", ar.returncode == 0, ar.stdout + ar.stderr)
+    check("apply-create-wrote", apply_dest.is_file(), str(apply_dest))
+    if apply_dest.is_file():
+        ag = json.loads(apply_dest.read_text())
+        check("apply-create-kb", ag.get("v", {}).get("kb_version") == "1.0.0")
+        check("apply-create-stamp",
+              bool((ag.get("_meta") or {}).get("assimilation", {}).get("graph_sha256")))
+        check("apply-create-no-fake-version", ag.get("v", {}).get("version") != "0.0.0")
+        check("apply-create-provenance", (apply_dest.parent / "provenance.json").is_file())
+        check("apply-create-fact-sources", (apply_dest.parent / "fact-sources.json").is_file())
+        check("apply-create-history-manifest",
+              (apply_dest.parent / ".history" / "manifest.json").is_file())
+        check("apply-create-widget", "Widget" in (ag.get("w") or {}))
+
+    # Additive merge: new seed key lands; omitted existing key is kept (no deletes).
+    keep_key_graph = json.loads(apply_dest.read_text()) if apply_dest.is_file() else {}
+    keep_key_graph.setdefault("r", {})["keep-me"] = {"verdict": "r", "rule": "must survive partial seed"}
+    keep_key_graph.setdefault("a", {})["legacy"] = "legacyFn()"
+    if apply_dest.is_file():
+        apply_dest.write_text(json.dumps(keep_key_graph, indent=2) + "\n")
+    partial_nrra = tmp / "partial-nrra.md"
+    partial_nrra.write_text("""---
+artifact: rosetta-research
+tech: "Toy"
+tech_slug: "applytoy"
+status: "complete"
+run_id: "run-abc"
+decoder_ring_hash: "deadbeefcafebabe"
+---
+
+# Rosetta Research: Toy
+
+## 9. Fact-Graph Seed (draft JSON, ≥ MEDIUM confidence only)
+```json
+{
+  "v": {"pkg": "toy", "version": "1.2.3"},
+  "w": {"Widget": {"t": "sl", "i": "toy", "note": "a box"},
+        "Gadget": {"t": "sl", "i": "toy", "note": "new"}},
+  "r": {"no-stub": {"verdict": "REJECT", "rule": "no stubs"}},
+  "a": {"make": "makeWidget()"},
+  "x": {"use div": "use Widget"},
+  "t": {}
+}
+```
+""")
+    am = run("--root", str(apply_root), "--apply-nrra", "applytoy",
+             "--nrra", str(partial_nrra), "--ledger", str(ledger))
+    check("apply-merge-ok", am.returncode == 0, am.stdout + am.stderr)
+    if apply_dest.is_file():
+        mg = json.loads(apply_dest.read_text())
+        check("apply-merge-added", "Gadget" in (mg.get("w") or {}), str(mg.get("w")))
+        check("apply-merge-kept-r", "keep-me" in (mg.get("r") or {}), str(mg.get("r")))
+        check("apply-merge-kept-a", mg.get("a", {}).get("legacy") == "legacyFn()", str(mg.get("a")))
+        check("apply-merge-no-delete", "no-stub" in (mg.get("r") or {}))
+        check("apply-merge-snapshot",
+              any((apply_dest.parent / ".history").glob("*-v*.json")))
+
+    # Pin moves are reported, not written.
+    pin_before = json.loads(apply_dest.read_text())["v"] if apply_dest.is_file() else {}
+    pin_nrra = tmp / "pin-nrra.md"
+    pin_nrra.write_text("""---
+artifact: rosetta-research
+tech: "Toy"
+tech_slug: "applytoy"
+status: "complete"
+run_id: "run-abc"
+decoder_ring_hash: "deadbeefcafebabe"
+---
+
+# Rosetta Research: Toy
+
+## 9. Fact-Graph Seed (draft JSON, ≥ MEDIUM confidence only)
+```json
+{
+  "v": {"pkg": "toy-MOVED", "version": "9.9.9"},
+  "w": {"Widget": {"t": "sl", "i": "toy", "note": "a box"}},
+  "r": {"no-stub": {"verdict": "REJECT", "rule": "no stubs"}},
+  "a": {"make": "makeWidget()"},
+  "x": {},
+  "t": {}
+}
+```
+""")
+    ap = run("--root", str(apply_root), "--apply-nrra", "applytoy",
+             "--nrra", str(pin_nrra), "--ledger", str(ledger))
+    check("apply-pin-ok", ap.returncode == 0, ap.stdout + ap.stderr)
+    pin_out = (ap.stdout + ap.stderr).lower()
+    check("apply-pin-reports-version",
+          "version" in pin_out and ("9.9.9" in (ap.stdout + ap.stderr) or "pin" in pin_out),
+          ap.stdout + ap.stderr)
+    check("apply-pin-reports-pkg",
+          "pkg" in pin_out and ("toy-moved" in pin_out or "moved" in pin_out or "pin" in pin_out),
+          ap.stdout + ap.stderr)
+    if apply_dest.is_file():
+        pin_after = json.loads(apply_dest.read_text())["v"]
+        check("apply-pin-version-unchanged",
+              pin_after.get("version") == pin_before.get("version"),
+              f"{pin_before.get('version')} → {pin_after.get('version')}")
+        check("apply-pin-pkg-unchanged",
+              pin_after.get("pkg") == pin_before.get("pkg"),
+              f"{pin_before.get('pkg')} → {pin_after.get('pkg')}")
+
+    # Open ledger / run_id mismatch → no write
+    apply_open_dest = apply_root / ".rosetta" / "docs" / "open-apply" / "fact-graph.json"
+    ao = run("--root", str(apply_root), "--apply-nrra", "open-apply",
+             "--nrra", str(nrra), "--ledger", str(open_p))
+    check("apply-open-rejected", ao.returncode != 0, ao.stderr)
+    check("apply-open-names-check", "ledger-closed" in ao.stderr, ao.stderr)
+    check("apply-open-wrote-nothing", not apply_open_dest.exists())
+
+    apply_mis_dest = apply_root / ".rosetta" / "docs" / "mis-apply" / "fact-graph.json"
+    before_mis = apply_dest.read_text() if apply_dest.is_file() else None
+    ams = run("--root", str(apply_root), "--apply-nrra", "mis-apply",
+              "--nrra", str(bad_nrra), "--ledger", str(ledger))
+    check("apply-mismatch-rejected", ams.returncode != 0, ams.stderr)
+    check("apply-mismatch-names-check", "run_id" in ams.stderr, ams.stderr)
+    check("apply-mismatch-wrote-nothing", not apply_mis_dest.exists())
+    if before_mis is not None:
+        check("apply-mismatch-existing-untouched", apply_dest.read_text() == before_mis)
+
     # ── storage root comes from config, not from cwd ──────────────────────────────────────────
     # REGRESSION: with no --root the writer used Path.cwd(), so the KB landed in whatever repo
     # the session happened to be standing in and NO config setting could move it.
@@ -501,7 +628,7 @@ def main() -> int:
         for f in failures:
             print("FAIL:", f, file=sys.stderr)
         return 1
-    print("ok — write-graph.py create/update/check + open/mismatch/forged rejected")
+    print("ok — write-graph.py create/update/apply-nrra/check + open/mismatch/forged rejected")
     return 0
 
 

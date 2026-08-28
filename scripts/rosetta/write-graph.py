@@ -3,15 +3,21 @@
 
   write-graph.py --create <tech> --nrra <f> --ledger <f> [--root DIR] [--out PATH] [--source-repo DIR]
   write-graph.py --update <tech> --changeset <f> --ledger <f> [--nrra <f>] [--root DIR]
+  write-graph.py --apply-nrra <tech> --nrra <f> --ledger <f> [--root DIR] [--out PATH] [--source-repo DIR]
   write-graph.py --check  <tech> [--root DIR]
   write-graph.py --adopt  <tech> [--root DIR]
   write-graph.py --backfill [TECH] [--all] [--root DIR] [--sources FILE]
 
-Gate (before create/update acts):
+Gate (before create/update/apply-nrra acts):
   1. ledger closed — closed + named-gap rows == censused
   2. ledger run_id matches the NRRA's run_id
   3. decoder_ring_hash present on both
 Any failure: exit non-zero, write nothing, name the failed check.
+
+--apply-nrra: if dest is absent, same as --create; if present, additive-merge seed
+keys only (no deletes). Reports v.pkg/v.version moves; does not write them.
+# kb:ceiling: nested callers need an explicit --no-graph
+# idempotent apply alone cannot preserve upgrade's accept/improve/roll-back gate
 
 --adopt stamps recoverable fields on a legacy graph; no ledger required.
 --backfill harvests on-disk locators, merges an optional judged --sources overlay,
@@ -392,6 +398,94 @@ def cmd_update(
     return 0
 
 
+def cmd_apply_nrra(
+    tech: str,
+    nrra_path: Path,
+    ledger_path: Path,
+    root: Path,
+    out: Path | None,
+    source_repo: Path | None,
+) -> int:
+    """Create-or-additive-merge from an NRRA seed. Nested bootstrap/upgrade pass --no-graph."""
+    # kb:ceiling: nested callers need an explicit --no-graph
+    # idempotent apply alone cannot preserve upgrade's accept/improve/roll-back gate
+    dest = out or graph_path(root, tech)
+    if not dest.is_file():
+        return cmd_create(tech, nrra_path, ledger_path, root, out, source_repo)
+
+    ledger = load_json(ledger_path)
+    nrra = nrra_path.read_text(encoding="utf-8")
+    meta = parse_nrra_frontmatter(nrra)
+    assert_ledger_closed(ledger)
+    assert_ids_match(ledger, meta)
+
+    seed = seed_from_nrra(nrra, tech)
+    pins, extra_sources = nrra_pins_and_sources(nrra)
+    current = load_json(dest)
+    old_snapshot = json.loads(json.dumps(current))
+    kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
+    hist = dest.parent / ".history"
+    hist.mkdir(parents=True, exist_ok=True)
+    snap = hist / f"{date.today().isoformat()}-v{kb}.json"
+    shutil.copy2(dest, snap)
+
+    fact_sources: dict[str, dict] = {}
+    existing_fs = dest.parent / P.FACT_SOURCES_NAME
+    if existing_fs.is_file():
+        try:
+            loaded = json.loads(existing_fs.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                fact_sources = loaded
+        except json.JSONDecodeError:
+            fact_sources = {}
+    fact_sources.update(extra_sources)
+
+    cur_v = current.get("v") if isinstance(current.get("v"), dict) else {}
+    seed_v = seed.get("v") if isinstance(seed.get("v"), dict) else {}
+    for pin_key in ("pkg", "version"):
+        seed_val = seed_v.get(pin_key)
+        cur_val = cur_v.get(pin_key)
+        if seed_val is not None and seed_val != cur_val:
+            print(
+                f"[write-graph] pin move reported (not written): v.{pin_key} "
+                f"{cur_val!r} → {seed_val!r} (use upgrade Mode B)",
+                file=sys.stderr,
+            )
+
+    for section in ("v", "w", "r", "a", "x", "t"):
+        seed_bucket = seed.get(section) or {}
+        if not isinstance(seed_bucket, dict):
+            continue
+        bucket = current.setdefault(section, {})
+        if not isinstance(bucket, dict):
+            bucket = {}
+            current[section] = bucket
+        for k, val in seed_bucket.items():
+            if section == "v" and k in ("pkg", "version", "kb_version",
+                                        "version_source", "pinned_date", "supersedes"):
+                continue
+            core, src, conf = P.split_source(val)
+            bucket[k] = core
+            if src:
+                fact_sources[f"{section}:{k}"] = {
+                    "source": src,
+                    "confidence": conf or "MEDIUM",
+                }
+
+    old_up = (old_snapshot.get("v") or {}).get("version")
+    new_up = (current.get("v") or {}).get("version")
+    new_kb = P.bump_kb_version(kb, old_snapshot, current, old_up, new_up)
+    current.setdefault("v", {})["kb_version"] = new_kb
+    if new_kb != kb:
+        current["v"]["supersedes"] = kb
+    validate_graph(current)
+    current = stamp(current, ledger)
+    atomic_write(dest, current)
+    persist_siblings(dest, current, pins, fact_sources, status="updated")
+    print(f"[write-graph] apply-nrra {dest} {kb} → {new_kb} (snapshot {snap.name})")
+    return 0
+
+
 def _readme_kb(kb_dir: Path) -> str | None:
     readme = kb_dir / "README.md"
     if not readme.is_file():
@@ -550,6 +644,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--root", default=None)
     p.add_argument("--create", metavar="TECH")
     p.add_argument("--update", metavar="TECH")
+    p.add_argument("--apply-nrra", metavar="TECH")
     p.add_argument("--check", metavar="TECH")
     p.add_argument("--adopt", metavar="TECH")
     p.add_argument("--backfill", metavar="TECH", nargs="?", const="*")
@@ -558,7 +653,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--nrra", type=Path)
     p.add_argument("--ledger", type=Path)
     p.add_argument("--changeset", type=Path)
-    p.add_argument("--out", type=Path, help="override dest path (create only)")
+    p.add_argument("--out", type=Path, help="override dest path (create / apply-nrra create path)")
     p.add_argument("--source-repo", type=Path, help="local tree used to derive v.version")
     args = p.parse_args(argv)
 
@@ -575,10 +670,20 @@ def main(argv: list[str]) -> int:
         RT.warn_if_orphaned(_DOCS_DIR)
 
     try:
+        verbs = [v for v in (args.create, args.update, args.apply_nrra, args.check, args.adopt)
+                 if v] + ([args.backfill] if args.backfill is not None else [])
+        if len(verbs) > 1:
+            _die("usage", "pass exactly one of --create/--update/--apply-nrra/--check/--adopt/--backfill")
         if args.create:
             if not args.nrra or not args.ledger:
                 _die("usage", "--create needs --nrra and --ledger")
             return cmd_create(args.create, args.nrra, args.ledger, root, args.out, args.source_repo)
+        if args.apply_nrra:
+            if not args.nrra or not args.ledger:
+                _die("usage", "--apply-nrra needs --nrra and --ledger")
+            return cmd_apply_nrra(
+                args.apply_nrra, args.nrra, args.ledger, root, args.out, args.source_repo,
+            )
         if args.update:
             if not args.changeset or not args.ledger:
                 _die("usage", "--update needs --changeset and --ledger")

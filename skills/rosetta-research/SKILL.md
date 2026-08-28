@@ -6,7 +6,7 @@ allowed-tools: Bash, Skill, Read, WebSearch, WebFetch
 
 # Rosetta Research
 
-> **Purpose**: Acquire the facts a Rosetta knowledge base needs and return them as one NRRA + a closed coverage ledger. Fanout is a Mastra program shipped in this plugin, not a harness `Task` hint.
+> **Purpose**: Acquire the facts a Rosetta knowledge base needs, return them as one NRRA + a closed coverage ledger, and on success apply that NRRA into `fact-graph.json` via `write-graph.py --apply-nrra`. Fanout is a Mastra program shipped in this plugin, not a harness `Task` hint.
 >
 > **NO-STUB INVARIANT.** Every fact traces to a real source locator. Unknowns go in `gaps[]`. If the engine cannot run, STOP with a named reason and write nothing.
 
@@ -20,7 +20,11 @@ INPUT: base_framework      (what to map FROM)
 INPUT: topics              (optional — skip census; fan out exactly these)
 INPUT: depth               (quick | normal | deep — default normal)
 INPUT: model               (REQUIRED — the invoking session's model; never default)
+INPUT: --no-graph          (optional — skip --apply-nrra; nested bootstrap/upgrade MUST pass this)
 ```
+
+# kb:ceiling: nested callers need an explicit --no-graph
+# idempotent apply alone cannot preserve upgrade's accept/improve/roll-back gate
 
 A bare `https://…` argument is classified: github/gitlab/bitbucket → repo, anything else → docs site. `/rosetta-research https://nextjs.org/docs` is a docs run, not a tech named "https://…".
 
@@ -82,13 +86,19 @@ There is no 3-tier ladder. There is no "floor parallelism you MAY enable". The e
 
 [3] CONSUME STDOUT
     The engine prints JSON: { runId, status, nrra, ledger, blockReason, directiveCount, perClass }.
-    status=BLOCKED → STOP. Surface blockReason. Write nothing else.
-    Otherwise write nrra.md + ledger.json (already in --out-dir) and return the NRRA to the caller.
+    status=BLOCKED → STOP. Surface blockReason. Write nothing else (do not call apply).
+    Open ledger → STOP. Write nothing else.
+    Otherwise write nrra.md + ledger.json (already in --out-dir) and continue to [4].
 
-[4] OPTIONAL GRAPH WRITE (only when the caller asked to persist a graph)
-    python3 "$PLUGIN/scripts/rosetta/write-graph.py" --create {slug} \
+[4] APPLY NRRA → GRAPH (required unless --no-graph)
+    IF --no-graph was passed → skip this step; return the NRRA to the caller.
+    # kb:ceiling: nested callers need an explicit --no-graph
+    # idempotent apply alone cannot preserve upgrade's accept/improve/roll-back gate
+    python3 "$PLUGIN/scripts/rosetta/write-graph.py" --apply-nrra {slug} \
       --nrra {out}/nrra.md --ledger {out}/ledger.json
-    The skill never writes fact-graph.json itself.
+    Absent dest → create semantics. Existing dest → additive merge (no deletes);
+    v.pkg/v.version moves are reported, not auto-written.
+    The skill never writes fact-graph.json itself — only write-graph.py does.
     Do NOT pass --root. With no --root the writer asks rosetta_config.py for the docs class, so
     the KB lands where the config says. Passing --root pins it to that repo and overrides config.
 ```

@@ -48,8 +48,10 @@ scripts/assert-no-drift.sh --scripts-only
 3. **Named `scripts/…` paths must exist.** `assert-no-drift.sh` greps every
    `scripts/…` token out of `SKILL.md` and fails if the file is missing.
 4. **Validate / ab-test / stress-test do not write graphs.** Bootstrap
-   `--create`s. Upgrade `--update`s. Research writes an NRRA only; a graph
-   write is optional and only when the caller asked.
+   `--create`s. Upgrade `--update`s. Research's successful path applies the
+   NRRA via `write-graph.py --apply-nrra` (create-or-additive-merge). Nested
+   bootstrap/upgrade pass `--no-graph` and keep their own `--create` /
+   `--update` writes. Do not edit `grok-skills/` — rematerialize.
 5. **`--model` is passed through, never invented.** Research STOPs if the
    engine is absent — it does not crawl.
 
