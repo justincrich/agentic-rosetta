@@ -158,6 +158,7 @@ describe("real Grok ACP worker lifecycle", () => {
       expect(observation.result.reason).toContain("directive decoderRingHash mismatch");
     }
     expect(observation.pids.length).toBeGreaterThanOrEqual(2);
+    expect(observation.maxConcurrent).toBe(1);
     await expectStopped(observation);
   }, 360_000);
 
