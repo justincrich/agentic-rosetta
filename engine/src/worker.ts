@@ -40,6 +40,7 @@ export function acpOptionsFromCaller(
     command: caller.acp.command,
     args: [...caller.acp.args],
     env,
+    persistSession: false,
     ...(cwd ? { cwd } : {}),
   };
   if (caller.harness === "pi") {
@@ -226,24 +227,27 @@ export async function runWorker(
   const prompt = renderDirective(directive, ring);
   const worker = makeWorker(directive, ring, caller, cwd);
   const timeoutMs = Number(process.env.ROSETTA_WORKER_TIMEOUT_MS ?? DEFAULT_WORKER_TIMEOUT_MS);
-  const withTimeout = <T>(p: Promise<T>): Promise<T> =>
-    Promise.race([
-      p,
-      new Promise<T>((_, rej) =>
-        setTimeout(() => rej(new Error(`worker timeout after ${timeoutMs}ms`)), timeoutMs),
-      ),
-    ]);
   const attempt = async (p: string): Promise<WorkerAccept | WorkerReject> => {
+    const abortController = new AbortController();
+    const timeoutError = new Error(`worker timeout after ${timeoutMs}ms`);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abortController.abort(timeoutError);
+      worker.connection.disconnect();
+    }, timeoutMs);
     try {
-      const result = await withTimeout(worker.generate(p));
+      const result = await worker.generate(p, { abortSignal: abortController.signal });
       const text = typeof result === "object" && result && "text" in result
         ? String((result as { text: string }).text)
         : JSON.stringify(result);
       const raw = extractJson(text);
       return validateReport(raw, directive, ring);
     } catch (err) {
-      const classified = classifyWorkerError(err, caller);
+      const classified = classifyWorkerError(timedOut ? timeoutError : err, caller);
       return { ok: false, reason: classified.message, kind: classified.kind };
+    } finally {
+      clearTimeout(timer);
     }
   };
   const first = await attempt(prompt);
