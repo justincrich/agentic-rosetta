@@ -16,7 +16,7 @@ in `engine/`, not in more skill prose.
 
 | Skill | Primitive |
 |---|---|
-| `rosetta-research` | `engine/src/research.ts` |
+| `rosetta-research` | `engine/src/research.ts` then `write-graph.py --apply-nrra` |
 | `rosetta-bootstrap` | research → `write-graph.py --create` → `/rosetta-sync` |
 | `rosetta-upgrade` | Mode C `--topics` / Mode B `--url` / Mode A → `write-graph.py --update` → embed |
 | `rosetta-sync` | `registry.py` + `embed-graph.sh` |
@@ -48,8 +48,9 @@ scripts/assert-no-drift.sh --scripts-only
 3. **Named `scripts/…` paths must exist.** `assert-no-drift.sh` greps every
    `scripts/…` token out of `SKILL.md` and fails if the file is missing.
 4. **Validate / ab-test / stress-test do not write graphs.** Bootstrap
-   `--create`s. Upgrade `--update`s. Research writes an NRRA only; a graph
-   write is optional and only when the caller asked.
+   `--create`s. Upgrade `--update`s. Research `--apply-nrra`s after a closed
+   successful run unless `--no-graph`. Nested bootstrap/upgrade research
+   passes `--no-graph` so those skills keep their own write/gate steps.
 5. **`--model` is passed through, never invented.** Research STOPs if the
    engine is absent — it does not crawl.
 

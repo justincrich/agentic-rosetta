@@ -6,7 +6,7 @@ allowed-tools: Bash, Skill, Read, WebSearch, WebFetch
 
 # Rosetta Research
 
-> **Purpose**: Acquire the facts a Rosetta knowledge base needs and return them as one NRRA + a closed coverage ledger. Fanout is a Mastra program shipped in this plugin, not a harness `Task` hint.
+> **Purpose**: Acquire the facts a Rosetta knowledge base needs: engine fanout → NRRA + closed ledger → `write-graph.py --apply-nrra` (skip with `--no-graph`). Fanout is a Mastra program shipped in this plugin, not a harness `Task` hint.
 >
 > **NO-STUB INVARIANT.** Every fact traces to a real source locator. Unknowns go in `gaps[]`. If the engine cannot run, STOP with a named reason and write nothing.
 
@@ -20,6 +20,7 @@ INPUT: base_framework      (what to map FROM)
 INPUT: topics              (optional — skip census; fan out exactly these)
 INPUT: depth               (quick | normal | deep — default normal)
 INPUT: model               (REQUIRED — the invoking session's model; never default)
+INPUT: --no-graph          (optional — skip write-graph.py --apply-nrra; nested bootstrap/upgrade pass this)
 ```
 
 A bare `https://…` argument is classified: github/gitlab/bitbucket → repo, anything else → docs site. `/rosetta-research https://nextjs.org/docs` is a docs run, not a tech named "https://…".
@@ -82,13 +83,16 @@ There is no 3-tier ladder. There is no "floor parallelism you MAY enable". The e
 
 [3] CONSUME STDOUT
     The engine prints JSON: { runId, status, nrra, ledger, blockReason, directiveCount, perClass }.
-    status=BLOCKED → STOP. Surface blockReason. Write nothing else.
-    Otherwise write nrra.md + ledger.json (already in --out-dir) and return the NRRA to the caller.
+    status=BLOCKED → STOP. Surface blockReason. Write nothing else (no graph).
+    Otherwise write nrra.md + ledger.json (already in --out-dir).
 
-[4] OPTIONAL GRAPH WRITE (only when the caller asked to persist a graph)
-    python3 "$PLUGIN/scripts/rosetta/write-graph.py" --create {slug} \
+[4] GRAPH WRITE (unless --no-graph)
+    IF the caller passed --no-graph: skip this step. Return the NRRA to the caller.
+    python3 "$PLUGIN/scripts/rosetta/write-graph.py" --apply-nrra {slug} \
       --nrra {out}/nrra.md --ledger {out}/ledger.json
-    The skill never writes fact-graph.json itself.
+    Non-zero (open ledger / run_id mismatch / missing decoder_ring_hash) → STOP. Write nothing else.
+    Dest missing → create persist (stamp + siblings). Dest present → add/change-only seed merge;
+    v.pkg / v.version moves are reported, not written. The skill never writes fact-graph.json itself.
     Do NOT pass --root. With no --root the writer asks rosetta_config.py for the docs class, so
     the KB lands where the config says. Passing --root pins it to that repo and overrides config.
 ```
@@ -125,4 +129,5 @@ Record the resolved absolute path. Do not lie about where the artifact landed.
 /rosetta-research "GPUI" --repo-url https://github.com/zed-industries/zed --base-framework React
 /rosetta-research https://nextjs.org/docs
 /rosetta-research "Tauri v2" --topics "state management, IPC security"
+/rosetta-research "GPUI" --no-graph   # NRRA + ledger only; nested bootstrap/upgrade pass this
 ```

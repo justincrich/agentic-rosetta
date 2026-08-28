@@ -20,7 +20,8 @@ PLUGIN / PROJECT / RESOLVER — same resolution as rosetta-research (never hardc
     KB_DIR = $(python3 "$RESOLVER" path --class docs --slug {tech_slug} --ensure)
 
 [1] RESEARCH
-    INVOKE /rosetta-research "{tech}" with the same repo/docs/depth/model.
+    INVOKE /rosetta-research "{tech}" --no-graph with the same repo/docs/depth/model.
+    Nested research must not --apply-nrra before this skill's own --create.
     CONSUME NRRA + ledger from the engine --out-dir.
 
 [2] GRAPH  (the only write of fact-graph.json)

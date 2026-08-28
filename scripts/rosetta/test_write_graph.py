@@ -231,6 +231,94 @@ def main() -> int:
     check("mig-prepend-sources", "**Sources:**" in mig)
     check("mig-starts-heading", mig.lstrip().startswith("## "))
 
+    # --- --apply-nrra: dest missing → create persist; dest present → add/change only ---
+    apply_root = tmp / "apply-proj"
+    (apply_root / ".git").mkdir(parents=True)
+    apply_dest = apply_root / ".rosetta" / "docs" / "toy" / "fact-graph.json"
+    r_ac = run("--root", str(apply_root), "--apply-nrra", "toy",
+               "--nrra", str(nrra), "--ledger", str(ledger))
+    check("apply-create-ok", r_ac.returncode == 0, r_ac.stderr)
+    check("apply-create-wrote", apply_dest.is_file(), str(apply_dest))
+    if apply_dest.is_file():
+        ga = json.loads(apply_dest.read_text())
+        check("apply-create-stamp", bool((ga.get("_meta") or {}).get("assimilation", {}).get("graph_sha256")))
+        check("apply-create-siblings", (apply_dest.parent / "provenance.json").is_file())
+        check("apply-create-fact-sources", (apply_dest.parent / "fact-sources.json").is_file())
+        check("apply-create-history", (apply_dest.parent / ".history" / "manifest.json").is_file())
+        check("apply-create-kb", ga.get("v", {}).get("kb_version") == "1.0.0")
+
+    planted = json.loads(apply_dest.read_text())
+    planted["v"]["pkg"] = "toy"
+    planted["v"]["version"] = "1.2.3"
+    planted["r"]["keep-me"] = {"verdict": "r", "rule": "unrelated planted key"}
+    planted["w"]["KeepWidget"] = {"t": "sl", "i": "toy", "note": "must survive"}
+    apply_dest.write_text(json.dumps(planted, indent=2) + "\n")
+    apply_nrra2 = tmp / "apply-nrra2.md"
+    apply_nrra2.write_text(NRRA.replace(
+        '"v": {"pkg": "toy", "version": "1.2.3"}',
+        '"v": {"pkg": "toy-moved", "version": "9.9.9"}',
+    ).replace(
+        '"r": {"no-stub": {"verdict": "REJECT", "rule": "no stubs"}}',
+        '"r": {"no-stub": {"verdict": "REJECT", "rule": "no stubs"}, '
+        '"new-from-apply": {"verdict": "r", "rule": "added by apply"}}',
+    ).replace(
+        '"t": {}',
+        '"t": {},\n  "deprecated": {"r": {"keep-me": "gone"}},\n'
+        '  "needs_review": {"x": {"should-not-land": "nope"}}',
+    ).replace(
+        '"note": "a box"',
+        '"note": "a slightly different box"',
+    ))
+    r_au = run("--root", str(apply_root), "--apply-nrra", "toy",
+               "--nrra", str(apply_nrra2), "--ledger", str(ledger))
+    check("apply-update-ok", r_au.returncode == 0, r_au.stderr)
+    gu = json.loads(apply_dest.read_text())
+    check("apply-no-delete-r", "keep-me" in (gu.get("r") or {}), str(gu.get("r")))
+    check("apply-no-delete-w", "KeepWidget" in (gu.get("w") or {}), str(gu.get("w")))
+    check("apply-added", "new-from-apply" in (gu.get("r") or {}), str(gu.get("r")))
+    check("apply-changed-note", (gu.get("w") or {}).get("Widget", {}).get("note") == "a slightly different box",
+          str((gu.get("w") or {}).get("Widget")))
+    check("apply-pin-pkg-unwritten", gu.get("v", {}).get("pkg") == "toy", str(gu.get("v")))
+    check("apply-pin-version-unwritten", gu.get("v", {}).get("version") == "1.2.3", str(gu.get("v")))
+    pin_out = (r_au.stdout + r_au.stderr).lower()
+    check("apply-pin-reported-pkg", "pkg" in pin_out and "toy-moved" in (r_au.stdout + r_au.stderr),
+          r_au.stdout + r_au.stderr)
+    check("apply-pin-reported-version", "9.9.9" in (r_au.stdout + r_au.stderr), r_au.stdout + r_au.stderr)
+    check("apply-no-needs-review", "should-not-land" not in (gu.get("x") or {}), str(gu.get("x")))
+
+    # fail-closed: open ledger / mismatch / missing hash write nothing
+    apply_open_out = tmp / "apply-open-should-not-exist.json"
+    r_ao = run("--root", str(apply_root), "--apply-nrra", "open-toy",
+               "--nrra", str(nrra), "--ledger", str(open_p), "--out", str(apply_open_out))
+    check("apply-open-rejected", r_ao.returncode != 0, r_ao.stderr)
+    check("apply-open-names-check", "ledger-closed" in r_ao.stderr, r_ao.stderr)
+    check("apply-open-wrote-nothing", not apply_open_out.exists())
+
+    before_apply = apply_dest.read_text()
+    r_ao2 = run("--root", str(apply_root), "--apply-nrra", "toy",
+                "--nrra", str(nrra), "--ledger", str(open_p))
+    check("apply-open-existing-rejected", r_ao2.returncode != 0)
+    check("apply-open-existing-unchanged", apply_dest.read_text() == before_apply)
+
+    apply_mismatch_out = tmp / "apply-mismatch.json"
+    r_am = run("--root", str(apply_root), "--apply-nrra", "mismatch",
+               "--nrra", str(bad_nrra), "--ledger", str(ledger), "--out", str(apply_mismatch_out))
+    check("apply-mismatch-rejected", r_am.returncode != 0)
+    check("apply-mismatch-names", "run_id" in r_am.stderr, r_am.stderr)
+    check("apply-mismatch-wrote-nothing", not apply_mismatch_out.exists())
+
+    apply_hash_out = tmp / "apply-forged.json"
+    r_ah = run("--root", str(apply_root), "--apply-nrra", "forged",
+               "--nrra", str(nrra2), "--ledger", str(nh), "--out", str(apply_hash_out))
+    check("apply-forged-rejected", r_ah.returncode != 0)
+    check("apply-forged-names", "decoder_ring_hash" in r_ah.stderr, r_ah.stderr)
+    check("apply-forged-wrote-nothing", not apply_hash_out.exists())
+
+    # --create still refuses overwrite (existing dest from first create in this file)
+    r_cr = run("--root", str(root), "--create", "toy", "--nrra", str(nrra), "--ledger", str(ledger))
+    check("create-still-refuses-after-apply-tests", r_cr.returncode != 0)
+    check("create-still-names-overwrite", "overwrite" in r_cr.stderr.lower() or "existing" in r_cr.stderr.lower())
+
     # legacy unstamped --check warns, does not fail
     legacy_root = tmp / "legacy"
     dest_l = legacy_root / ".rosetta" / "docs" / "old" / "fact-graph.json"
@@ -501,7 +589,7 @@ def main() -> int:
         for f in failures:
             print("FAIL:", f, file=sys.stderr)
         return 1
-    print("ok — write-graph.py create/update/check + open/mismatch/forged rejected")
+    print("ok — write-graph.py create/apply-nrra/update/check + open/mismatch/forged rejected")
     return 0
 
 

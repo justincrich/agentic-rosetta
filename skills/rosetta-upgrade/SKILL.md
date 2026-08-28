@@ -220,7 +220,7 @@ Empty / whitespace-only --topics → STOP. Print usage. Do not fall through to A
 [1] Build research sources:
        - repo/docs URLs from provenance.json source pins (reuse the existing KB's corpus)
        - plus any extra --url values the caller passed (additional docs, not a pin bump)
-[2] INVOKE /rosetta-research "{tech}" --topics "{topics}"
+[2] INVOKE /rosetta-research "{tech}" --topics "{topics}" --no-graph
            [--repo-url / --docs-url from those sources]
            --base-framework {base} --depth {depth} --model {session model}
     Engine --topics skips census and fans those directives. Fail closed: no serial crawl.
@@ -372,7 +372,7 @@ INPUT: --force           (optional; run the refresh even when the staleness prob
 
 ═══════════════ R3 — RESEARCH CURRENT (download the info) ═══════════════
 [6] Invoke the research skill (engine only — fail closed, no serial crawl):
-       /rosetta-research "{tech}" --repo-url {primary --url}
+       /rosetta-research "{tech}" --repo-url {primary --url} --no-graph
            --base-framework {base}
            --focus "release notes, breaking changes, deprecations, migration since {current_version}"
            --topics {additional --url values or --focus areas}
@@ -481,7 +481,7 @@ INPUT: --force           (optional; run the refresh even when the staleness prob
                 - Keep .history/ snapshot + MIGRATION.md
 
      IMPROVE  → User flags specific CHANGESET items or needs_review[] entries to research deeper.
-                - Loop R3–R7 on the flagged subset (e.g. /rosetta-research --topics "{item}")
+                - Loop R3–R7 on the flagged subset (e.g. /rosetta-research --topics "{item}" --no-graph)
                 - Until the user is satisfied
 
      ROLL BACK → Undo the refresh, keep the research.
