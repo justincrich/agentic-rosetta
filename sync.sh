@@ -17,8 +17,10 @@ echo "extras → $LINK -> $ROOT/skills"
 if command -v skillshare >/dev/null 2>&1; then
   # Point extras_source at the extras dir (already the default) and sync.
   skillshare extras source "$EXTRAS" >/dev/null || true
-  skillshare install "$ROOT" --skill 'rosetta-*' --all --yes --force || \
+  skillshare install "$ROOT" --skill 'rosetta-*' --all --yes --force || {
     echo "WARN: skillshare install failed; falling back to install.sh"
+    "$ROOT/install.sh" --force
+  }
   skillshare sync || true
   skillshare status || true
 else
