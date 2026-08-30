@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import {
   classifyPath,
+  cleanDocsUrl,
   extractDocsUrls,
+  isDocumentUrl,
+  urlsFromVitepressHashmap,
   groupIntoDirectives,
   isNamedSingleton,
   listRepoFiles,
@@ -217,3 +220,81 @@ describe("docs vs repo unit caps", () => {
     expect(result.directives[0].territory.include).toHaveLength(25);
   });
 });
+
+describe("isDocumentUrl (build assets must never enter a docs corpus)", () => {
+  const base = "https://example.github.io/proj";
+  test("rejects the asset kinds a VitePress page links in its head", () => {
+    for (const p of [
+      "/assets/style.D49WVbqx.css",
+      "/assets/chunks/framework.BaPQmObz.js",
+      "/assets/chunks/theme.Cs4YiyRq.mjs",
+      "/assets/inter-roman-latin.Di8DUHzh.woff2",
+      "/vp-icons.css",
+      "/logo.svg",
+      "/hero.png",
+      "/bundle.js.map",
+    ]) {
+      expect(isDocumentUrl(base + p)).toBe(false);
+    }
+  });
+  test("accepts extensionless doc routes and .html/.md", () => {
+    for (const p of [
+      "/en/reference/",
+      "/en/reference/subsystems/core",
+      "/en/develop/cordis-tutorial/04-events",
+      "/docs/guide.html",
+      "/docs/guide.md",
+    ]) {
+      expect(isDocumentUrl(base + p)).toBe(true);
+    }
+  });
+  test("a non-URL is not a document", () => {
+    expect(isDocumentUrl("not a url")).toBe(false);
+  });
+});
+
+describe("urlsFromVitepressHashmap", () => {
+  test("maps underscore-separated source keys onto routes", async () => {
+    const hashmapUrl = "https://example.github.io/proj/hashmap.json";
+    const body = JSON.stringify({
+      "en_index.md": "a1",
+      "en_reference_index.md": "b2",
+      "en_reference_subsystems_core.md": "c3",
+      "en_reference_cordis-api_context.md": "d4",
+    });
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+    try {
+      const urls = await urlsFromVitepressHashmap(body, hashmapUrl);
+      expect(urls).toEqual([
+        "https://example.github.io/proj/en/",
+        "https://example.github.io/proj/en/reference/",
+        "https://example.github.io/proj/en/reference/cordis-api/context",
+        "https://example.github.io/proj/en/reference/subsystems/core",
+      ]);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  test("drops routes that do not resolve (underscore ambiguity is HEAD-verified)", async () => {
+    const hashmapUrl = "https://example.github.io/proj/hashmap.json";
+    const body = JSON.stringify({ "en_some_page.md": "x", "en_real.md": "y" });
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const href = typeof input === "string" ? input : input.toString();
+      return new Response(null, { status: href.endsWith("/en/real") ? 200 : 404 });
+    }) as unknown as typeof fetch;
+    try {
+      const urls = await urlsFromVitepressHashmap(body, hashmapUrl);
+      expect(urls).toEqual(["https://example.github.io/proj/en/real"]);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  test("malformed json yields nothing rather than throwing", async () => {
+    expect(await urlsFromVitepressHashmap("{not json", "https://x.dev/hashmap.json")).toEqual([]);
+  });
+});
+

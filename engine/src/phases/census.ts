@@ -125,6 +125,9 @@ export function listRepoFiles(repoPath: string): { rel: string; bytes: number }[
 /** Trailing markdown / list punctuation — not query/hash contents. */
 const TRAILING_DOCS_PUNCT = /[)\]>,.:]+$/;
 
+/** Upper bound on docs units pinned into provenance for one source. */
+export const DOCS_PIN_CAP = 400;
+
 export function cleanDocsUrl(raw: string, baseHref: string): string | null {
   const trimmed = raw.trim().replace(TRAILING_DOCS_PUNCT, "");
   if (!trimmed) return null;
@@ -260,7 +263,9 @@ export async function pinDocs(docsUrl: string, listed: { rel: string }[]): Promi
   const primary = await fetchUnit(docsUrl);
   if (primary) units.push(primary);
   const extras = listed.map((f) => f.rel).filter((u) => u.startsWith("http") && u !== docsUrl);
-  const cap = extras.slice(0, 40);
+  // Bound the fetch, but high enough that an ordinary docs tree pins completely;
+  // a 40-cap silently under-recorded a 60+ page reference tree as "40 units".
+  const cap = extras.slice(0, DOCS_PIN_CAP);
   const fetched = await Promise.all(cap.map((u) => fetchUnit(u)));
   for (const u of fetched) {
     if (u && !units.some((x) => x.locator === u.locator)) units.push(u);
@@ -285,6 +290,68 @@ export function unitsForTerritory(
   return kind === "urls" ? req.docsMaxUnits : req.maxUnits;
 }
 
+/**
+ * Non-document extensions a docs crawl must never hand to a worker. Without this,
+ * the `href=` fallback below scrapes a site's own `<link rel=stylesheet>` and
+ * modulepreload URLs and pins the build bundle as if it were documentation.
+ */
+const NON_DOCUMENT_EXT =
+  /\.(css|m?js|cjs|map|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|webp|avif|ico|bmp|mp[34]|webm|ogg|wasm|zip|t?gz|tar|rar|7z|exe|dmg)$/i;
+
+/** True when the URL's path does not end in a known asset extension. */
+export function isDocumentUrl(href: string): boolean {
+  try {
+    return !NON_DOCUMENT_EXT.test(new URL(href).pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * VitePress ships no sitemap; its page inventory lives in `hashmap.json`, keyed by
+ * source path with `_` as the separator (`en_reference_subsystems_core.md`). The
+ * separator is ambiguous when a filename itself contains `_`, so every derived URL
+ * is HEAD-verified and non-200s are dropped.
+ */
+export async function urlsFromVitepressHashmap(
+  text: string,
+  hashmapUrl: string,
+): Promise<string[]> {
+  let map: unknown;
+  try {
+    map = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!map || typeof map !== "object") return [];
+  const candidates = new Set<string>();
+  for (const key of Object.keys(map as Record<string, unknown>)) {
+    const rel = key
+      .replace(/\.md$/i, "")
+      .split("_")
+      .join("/")
+      .replace(/(^|\/)index$/, "$1");
+    const abs = cleanDocsUrl(rel, hashmapUrl);
+    if (abs) candidates.add(abs);
+  }
+  const found: string[] = [];
+  const queue = [...candidates];
+  const workers = Array.from({ length: Math.min(8, queue.length) }, async () => {
+    for (;;) {
+      const u = queue.shift();
+      if (!u) return;
+      try {
+        const res = await fetch(u, { method: "HEAD", redirect: "follow" });
+        if (res.ok) found.push(u);
+      } catch {
+        /* drop */
+      }
+    }
+  });
+  await Promise.all(workers);
+  return found.sort();
+}
+
 export async function listDocsUrls(docsUrl: string): Promise<{ rel: string; bytes: number }[]> {
   const origin = new URL(docsUrl);
   const base = docsUrl.replace(/\/?$/, "/");
@@ -293,6 +360,8 @@ export async function listDocsUrls(docsUrl: string): Promise<{ rel: string; byte
     new URL("/llms.txt", origin).href,
     new URL("sitemap.xml", base).href,
     new URL("/sitemap.xml", origin).href,
+    new URL("hashmap.json", base).href, // VitePress build map (no sitemap shipped)
+    new URL("/hashmap.json", origin).href,
   ];
   const seen = new Set<string>();
   const urls: string[] = [];
@@ -311,6 +380,10 @@ export async function listDocsUrls(docsUrl: string): Promise<{ rel: string; byte
           const href = cleanDocsUrl(m[1], u);
           if (href) urls.push(href);
         }
+        if (urls.length) break;
+      }
+      if (u.endsWith("hashmap.json")) {
+        urls.push(...(await urlsFromVitepressHashmap(text, u)));
         if (urls.length) break;
       }
     } catch {
@@ -334,9 +407,24 @@ export async function listDocsUrls(docsUrl: string): Promise<{ rel: string; byte
   }
 
   const out: { rel: string; bytes: number }[] = [];
-  for (const u of urls) {
+  for (const raw of urls) {
+    // A `#anchor` addresses a position inside a page, not another page: dedupe on
+    // the fragmentless form so one index page is not researched once per heading.
+    // (`cleanDocsUrl` itself must keep hashes — llms.txt entries rely on them.)
+    let u = raw;
+    try {
+      const parsed = new URL(raw);
+      parsed.hash = "";
+      u = parsed.href;
+    } catch {
+      continue;
+    }
     if (seen.has(u)) continue;
     seen.add(u);
+    // Never hand a build asset to a worker, and stay inside the subtree the
+    // caller pointed at (`--docs-url .../en/reference/` means that tree).
+    if (!isDocumentUrl(u)) continue;
+    if (!u.startsWith(base) && u !== docsUrl) continue;
     out.push({ rel: u, bytes: 0 });
   }
   if (out.length === 0) out.push({ rel: docsUrl, bytes: 0 });
