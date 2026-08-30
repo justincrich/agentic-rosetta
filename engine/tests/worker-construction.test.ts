@@ -37,7 +37,10 @@ describe("makeWorker is constructed only from caller.acp", () => {
     expect(opts.command).toBe("/sentinel/bin/acp");
     expect(opts.args).toEqual(["--flag", "x"]);
     expect(opts.model).toBe("sentinel-model");
-    expect(opts.env).toEqual({ A: "1" });
+    // The caller's env passes through untouched EXCEPT the harness nesting guards,
+    // which are deliberately neutralized so the child is not refused as a nested
+    // session. Asserted exactly, so any future smuggled key still fails this test.
+    expect(opts.env).toEqual({ A: "1", CLAUDECODE: "", CLAUDE_CODE_ENTRYPOINT: "" });
   });
 
   test("pi harness: model goes via PI_MODEL/PI_PROVIDER env, not the ACP client", () => {
@@ -69,5 +72,25 @@ describe("makeWorker is constructed only from caller.acp", () => {
 
   test("makeWorker is a function (do not spawn AcpAgent in this file)", () => {
     expect(typeof makeWorker).toBe("function");
+  });
+});
+
+describe("nesting guards are stripped from the worker env", () => {
+  test("CLAUDECODE / CLAUDE_CODE_ENTRYPOINT are neutralized for every harness", () => {
+    for (const harness of ["claude", "grok", "opencode"] as const) {
+      const caller = {
+        harness,
+        model: "opus[1m]",
+        acp: { command: "/bin/true", args: [], env: { ROSETTA_WORKER: "1" } },
+      } as never;
+      const opts = acpOptionsFromCaller(
+        { id: "t01", class: "reference" } as never,
+        caller,
+      );
+      expect(opts.env?.CLAUDECODE).toBe("");
+      expect(opts.env?.CLAUDE_CODE_ENTRYPOINT).toBe("");
+      // the caller's own env survives
+      expect(opts.env?.ROSETTA_WORKER).toBe("1");
+    }
   });
 });

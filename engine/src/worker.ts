@@ -27,12 +27,25 @@ export type WorkerAccept = {
   report: WorkerReport;
 };
 
+/**
+ * Harness nesting guards that must NOT reach an ACP worker. Claude Code refuses to
+ * launch inside another Claude Code session ("Nested sessions share runtime
+ * resources and will crash all active sessions") by checking CLAUDECODE, so a
+ * worker spawned from a Claude Code session inherits the variable and dies with a
+ * JSON-RPC "Internal error" before the census ever reaches a model. The engine
+ * still READS these to detect the calling harness; it just must not pass them down.
+ * Set to empty rather than deleted: AcpAgent merges over process.env, so removing
+ * the key from this object would leave the inherited value in place.
+ */
+const NESTING_GUARD_ENV = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"] as const;
+
 export function acpOptionsFromCaller(
   directive: ResearchDirective,
   caller: CallerIdentity,
   cwd?: string,
 ): ConstructorParameters<typeof AcpAgent>[0] {
-  const env = { ...caller.acp.env };
+  const env: Record<string, string> = { ...caller.acp.env };
+  for (const key of NESTING_GUARD_ENV) env[key] = "";
   const opts: ConstructorParameters<typeof AcpAgent>[0] = {
     id: directive.id,
     name: `rosetta-${directive.id}`,
