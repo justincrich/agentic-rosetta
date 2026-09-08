@@ -777,7 +777,10 @@ export function directivesFromTopics(
       class: "reference",
       yields: YIELDS_BY_CLASS.reference,
       question: `Research this topic for the knowledge base: ${topic}`,
-      mustFind: [topic],
+      // A URL topic's presence is already enforced by locatorInTerritory on every
+      // fact.source; requiring the raw URL inside a fact key/value rejects valid
+      // reports (mustFind is substring-matched against keys/values, not sources).
+      mustFind: /^https?:\/\//.test(topic.trim()) ? [] : [topic],
       priorArt: [],
       decoderRingHash: ring.hash,
     }),
