@@ -433,7 +433,16 @@ export async function listDocsUrls(docsUrl: string): Promise<{ rel: string; byte
 
 export function classifyUrl(url: string): TerritoryClass | "unclassified" {
   const u = url.toLowerCase();
-  if (/\/(about|index\/?$)/.test(u) || /\/$/.test(new URL(url).pathname) && !/\/docs\//.test(u)) {
+  // Worker pointers are free-form — they can carry annotated strings
+  // ("https://x — named by the page"), not bare URLs. Keyword classification
+  // below still applies; only the trailing-slash heuristic needs a parseable URL.
+  let trailingSlash = false;
+  try {
+    trailingSlash = /\/$/.test(new URL(url).pathname);
+  } catch {
+    // not a parseable URL — skip the heuristic
+  }
+  if (/\/(about|index\/?$)/.test(u) || (trailingSlash && !/\/docs\//.test(u))) {
     if (/\/about/.test(u)) return "orientation";
   }
   if (/changelog|migration|troubleshooting|postmortem/.test(u)) return "scars";
