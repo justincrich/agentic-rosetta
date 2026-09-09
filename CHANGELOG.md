@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.7] — 2026-09-09
+
+### Added
+- **`rosetta-upgrade` Mode F (`--fleet`).** One pass over every KB in the project:
+  `--check-stale-fleet` probes them all, the report drives ONE batch approval
+  (refresh list + skip list with reasons — never one gate per slug), then each
+  stale slug runs the existing Mode B algorithm with `--url` values taken from
+  the moved sources the probe names and `--force` set. `--fleet` is matched
+  before `--topics` / `--url`; a malformed invocation is a usage error, never a
+  silent Benchmark. Probe exit 1 (undeterminable / zero graphs) stops before any
+  research — undeterminable is never guessed at. After the batch,
+  `embed-graph.sh --check --all` and `registry.py validate` must both pass.
+  Research stays engine-only; no new write path.
+- **`provenance.py --check-stale-fleet`.** The fleet probe behind Mode F: one
+  JSON report per project root, one entry per KB the registry finds (all three
+  layouts), each carrying status, moved-source notes, reason, consumers, and
+  duplicate paths. Exit 10 any stale · 1 any undeterminable or zero KBs · 0 all
+  current. One slug's probe failure degrades only that slug to undeterminable.
+
 ## [0.4.6] — 2026-08-25
 
 ### Changed
