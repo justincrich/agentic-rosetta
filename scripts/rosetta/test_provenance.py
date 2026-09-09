@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import http.server
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -92,6 +94,141 @@ def engine_shaped_pin(url: str, body: bytes, etag: str | None = '"pin-etag"') ->
         "corpus_sha256": P.corpus_digest([{"locator": url, "sha256": digest}]),
         "unitPins": [{"locator": url, "sha256": digest}],
     }
+
+
+def _fleet_checks(check) -> None:
+    """--check-stale-fleet: 4 KBs across all 3 registry layouts, docs + repo pin kinds, plus a
+    legacy KB with no provenance.json. Real local HTTP ETag server, real file:// bare remote.
+    Exit precedence is proven by the fixture triple: as-shipped -> 10, fix the stale hash -> 1,
+    add the legacy provenance -> 0."""
+    tmp = Path(tempfile.mkdtemp(prefix="rosetta-fleet-"))
+    proj = tmp / "proj"
+    httpd, url = serve()
+    try:
+        digest = _sha(_EtagHandler.body)
+
+        def docs_pin(etag: str, sha: str) -> dict:
+            return {
+                "kind": "docs", "url": url, "etag": etag,
+                "fetched_at": "2026-09-09T00:00:00Z", "units": 1,
+                "corpus_sha256": P.corpus_digest([{"locator": url, "sha256": sha}]),
+                "unitPins": [{"locator": url, "etag": etag, "sha256": sha}],
+            }
+
+        current, stale = docs_pin(_EtagHandler.etag, digest), docs_pin('"old"', "0" * 64)
+
+        # real bare remote for the repo pin (ls-remote over file://)
+        work = tmp / "work"
+        work.mkdir()
+        (work / "package.json").write_text(json.dumps({"version": "1.2.3"}))
+        subprocess.run(["git", "init"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i"],
+            cwd=work, check=True, capture_output=True,
+        )
+        remote = tmp / "remote.git"
+        subprocess.run(["git", "clone", "--bare", str(work), str(remote)], check=True, capture_output=True)
+        head = subprocess.check_output(["git", "-C", str(work), "rev-parse", "HEAD"], text=True).strip()
+        pin_repo = {
+            "kind": "repo", "url": remote.resolve().as_uri(), "ref": "HEAD", "commit": head,
+            "fetched_at": "2026-09-09T00:00:00Z", "units": 1,
+            "corpus_sha256": P.corpus_digest([]),
+        }
+
+        def graph(tech: str) -> dict:
+            return {"_meta": {"technology": tech}, "v": {"kb_version": "1.0.0"}, "w": {}}
+
+        def put(rel: str, payload) -> None:
+            p = proj / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(payload if isinstance(payload, str) else json.dumps(payload, indent=2),
+                         encoding="utf-8")
+
+        # layout 1: .rosetta/docs/<slug>/ — current docs pin (+ a mirrored copy -> duplicate_paths)
+        put(".rosetta/docs/curiodocs/fact-graph.json", graph("Curio"))
+        put(".rosetta/docs/curiodocs/provenance.json", {"kb_version": "1.0.0", "sources": [current]})
+        put("agents/curiodocs-reviewer/kb/fact-graph.json", graph("Curio"))
+        put("agents/curiodocs-reviewer/kb/provenance.json", {"kb_version": "1.0.0", "sources": [current]})
+        put("agents/curiodocs-reviewer/agent.md", "# curiodocs reviewer\n")
+        # layout 2: docs/<slug>/ — docs pin with a wrong stored hash (stale) + legacy KB (no provenance)
+        put("docs/staledocs/fact-graph.json", graph("StaleDocs"))
+        put("docs/staledocs/provenance.json", {"kb_version": "0.9.0", "sources": [stale]})
+        put("agents/staledocs-implementer/agent.md", "# staledocs\n")
+        put(".rosetta/docs/legacyprov/fact-graph.json", graph("Legacy"))
+        # layout 3: agents/<name>/kb/ — current repo pin vs the bare remote, with a consuming agent.md
+        put("agents/repopin-implementer/kb/fact-graph.json", graph("RepoPin"))
+        put("agents/repopin-implementer/kb/provenance.json", {"kb_version": "1.0.0", "sources": [pin_repo]})
+        put("agents/repopin-implementer/agent.md", "# repopin\n")
+
+        def fleet(target: Path = proj) -> tuple[int, dict]:
+            r = run_probe("--root", str(target), "--check-stale-fleet")
+            try:
+                return r.returncode, json.loads(r.stdout)
+            except json.JSONDecodeError:
+                return r.returncode, {"_unparsable": r.stdout + r.stderr}
+
+        want = {"curiodocs", "staledocs", "repopin", "legacyprov"}
+
+        # phase 1: as-shipped — one stale beats the legacy undeterminable -> 10
+        rc, rep = fleet()
+        rc2, rep2 = fleet()
+        check("fleet-stable", (rc, json.dumps(rep, sort_keys=True)) == (rc2, json.dumps(rep2, sort_keys=True)),
+              f"({rc}/{rep2})")
+        check("fleet-as-shipped-10", rc == 10, f"(rc={rc} {rep})")
+        check("fleet-status-stale", rep.get("status") == "stale", str(rep.get("status")))
+        check("fleet-per-slug-entries", set(rep.get("graphs") or {}) == want, str(sorted(rep.get("graphs") or {})))
+        g = rep.get("graphs") or {}
+        check("fleet-curiodocs-current", g.get("curiodocs", {}).get("status") == "current", str(g.get("curiodocs")))
+        check("fleet-repopin-current", g.get("repopin", {}).get("status") == "current", str(g.get("repopin")))
+        sd = g.get("staledocs", {})
+        check("fleet-staledocs-stale", sd.get("status") == "stale", str(sd))
+        check("fleet-staledocs-moved-names-url", any(url in m for m in (sd.get("moved") or [])), str(sd.get("moved")))
+        lg = g.get("legacyprov", {})
+        check("fleet-legacy-undeterminable", lg.get("status") == "undeterminable", str(lg))
+        check("fleet-legacy-reason", "provenance.json" in str(lg.get("reason")), str(lg.get("reason")))
+        check("fleet-consumers", g.get("repopin", {}).get("consumers") == ["repopin-implementer"],
+              str(g.get("repopin", {}).get("consumers")))
+        check("fleet-curiodocs-consumers", g.get("curiodocs", {}).get("consumers") == ["curiodocs-reviewer"],
+              str(g.get("curiodocs", {}).get("consumers")))
+        dups = g.get("curiodocs", {}).get("duplicate_paths") or []
+        check("fleet-duplicate-paths", "agents/curiodocs-reviewer/kb/fact-graph.json" in dups, str(dups))
+        check("fleet-counts", rep.get("counts") == {"total": 4, "current": 2, "stale": 1, "undeterminable": 1},
+              str(rep.get("counts")))
+
+        # phase 2: fix the stale stored hash — only the legacy KB is left undeterminable -> 1
+        put("docs/staledocs/provenance.json", {"kb_version": "0.9.0", "sources": [current]})
+        rc, rep = fleet()
+        undet = sorted(s for s, e in (rep.get("graphs") or {}).items() if e.get("status") == "undeterminable")
+        check("fleet-fixed-stale-1", rc == 1, f"(rc={rc} {rep})")
+        check("fleet-fixed-stale-status", rep.get("status") == "undeterminable", str(rep.get("status")))
+        check("fleet-fixed-only-legacy", undet == ["legacyprov"], str(undet))
+
+        # phase 3: add the legacy provenance — all current -> 0
+        put(".rosetta/docs/legacyprov/provenance.json", {"kb_version": "1.0.0", "sources": [current]})
+        rc, rep = fleet()
+        check("fleet-all-current-0", rc == 0, f"(rc={rc} {rep})")
+        check("fleet-all-current-status", rep.get("status") == "current", str(rep.get("status")))
+
+        # phase 4: a per-slug probe failure degrades that slug, never kills the report
+        put("agents/repopin-implementer/kb/provenance.json", "{not json")
+        rc, rep = fleet()
+        check("fleet-broken-prov-exit-1", rc == 1, f"(rc={rc})")
+        check("fleet-broken-prov-report-complete", set(rep.get("graphs") or {}) == want, str(rep))
+        check("fleet-broken-prov-degraded", (rep.get("graphs") or {}).get("repopin", {}).get("status")
+              == "undeterminable", str((rep.get("graphs") or {}).get("repopin")))
+        check("fleet-broken-prov-others-fine", (rep.get("graphs") or {}).get("curiodocs", {}).get("status")
+              == "current", str((rep.get("graphs") or {}).get("curiodocs")))
+
+        # zero graphs -> 1 (fail-closed, never "all current")
+        empty = tmp / "empty-proj"
+        empty.mkdir()
+        rc, rep = fleet(empty)
+        check("fleet-zero-graphs-1", rc == 1, f"(rc={rc} {rep})")
+        check("fleet-zero-graphs-reason", rep.get("status") == "undeterminable", str(rep.get("status")))
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main() -> int:
@@ -314,11 +451,13 @@ def main() -> int:
         fs = harvested.get("fact_sources") or {}
         check("harvest-fact-src", "w:Widget" in fs, str(fs))
 
+    _fleet_checks(check)
+
     if failures:
         for f in failures:
             print("FAIL:", f, file=sys.stderr)
         return 1
-    print("ok — provenance digest + stale probe (docs ETag + git ls-remote) + harvest")
+    print("ok — provenance digest + stale probe (docs ETag + git ls-remote) + harvest + fleet")
     return 0
 
 

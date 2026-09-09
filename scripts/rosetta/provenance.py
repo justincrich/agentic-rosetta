@@ -6,6 +6,9 @@ Sibling of write-graph.py. The source manifest is NEVER written into fact-graph.
 CLI:
   provenance.py --check-stale TECH [--root DIR]
     exit 0 current · 10 stale (names which sources moved) · 1 undeterminable
+  provenance.py --check-stale-fleet [--root DIR]
+    one JSON report, one entry per KB the registry finds in the project
+    exit 10 any stale · 1 any undeterminable or zero KBs · 0 all current
 """
 from __future__ import annotations
 
@@ -1053,6 +1056,82 @@ def check_stale(provenance: dict[str, Any], root: Path | None = None) -> tuple[i
     return 0, {"status": "current", "moved": []}
 
 
+# --------------------------------------------------------------------------- fleet probe
+
+def check_stale_fleet(root: Path) -> tuple[int, dict[str, Any]]:
+    """Probe every KB the registry finds under one project. Read-only — scan() never writes.
+
+    Each slug's verdict is the EXISTING check_stale path, resolved layout-blind from the
+    provenance.json sitting beside its fact-graph.json. One slug's failure degrades that slug
+    to undeterminable; the report always completes.
+    """
+    import registry  # lazy: importing provenance must stay free of the registry walk
+
+    def blank() -> dict[str, Any]:
+        return {"total": 0, "current": 0, "stale": 0, "undeterminable": 0}
+
+    counts = blank()
+    report: dict[str, Any] = {"root": str(root), "graphs": {}, "counts": counts}
+    registry.set_repo_root(root)
+    try:
+        reg = registry.scan()
+    except Exception as exc:  # fail closed: a broken walk is never "all current"
+        report.update(status="undeterminable", reason=f"registry scan failed: {exc}")
+        return 1, report
+
+    entries: dict[str, Any] = {}
+    for slug in sorted(reg.get("graphs") or {}):
+        g = reg["graphs"][slug]
+        entry: dict[str, Any] = {
+            "path": g.get("path"),
+            "consumers": list(g.get("consumers") or []),
+            "duplicate_paths": list(g.get("duplicate_paths") or []),
+            "moved": [],
+            "reason": "",
+        }
+        try:
+            graph_path = root / str(g.get("path") or "")
+            prov_path = graph_path.parent / PROVENANCE_NAME
+            # kb: provenance-resolved-as-sibling: a KB whose provenance.json lives elsewhere is
+            # reported undeterminable, not probed (upgrade path: explicit provenance locator in
+            # registry entries).
+            # kb: legacy-kbs-undeterminable: fleet never reports clean while a legacy KB exists;
+            # backfill manual (upgrade path: --backfill over plan_backfill).
+            if not prov_path.is_file():
+                entry.update(status="undeterminable",
+                             reason=f"missing {PROVENANCE_NAME} beside {g.get('path')}")
+            else:
+                prov = json.loads(prov_path.read_text(encoding="utf-8"))
+                _, probe = check_stale(prov, root=root)
+                entry["status"] = probe.get("status")
+                entry["moved"] = list(probe.get("moved") or [])
+                entry["reason"] = str(probe.get("reason") or "")
+                if probe.get("undeterminable"):
+                    entry["undeterminable"] = list(probe["undeterminable"])
+        except Exception as exc:  # one slug's probe failure must not kill the report
+            entry.update(status="undeterminable", reason=f"probe failed: {exc}")
+        entries[slug] = entry
+
+    counts.update(
+        total=len(entries),
+        current=sum(1 for e in entries.values() if e.get("status") == "current"),
+        stale=sum(1 for e in entries.values() if e.get("status") == "stale"),
+        undeterminable=sum(1 for e in entries.values() if e.get("status") == "undeterminable"),
+    )
+    report["graphs"] = entries
+    if not entries:
+        report.update(status="undeterminable", reason=f"no fact-graph.json under {root} (fail-closed)")
+        return 1, report
+    if counts["stale"]:
+        report["status"] = "stale"
+        return 10, report
+    if counts["undeterminable"]:
+        report["status"] = "undeterminable"
+        return 1, report
+    report["status"] = "current"
+    return 0, report
+
+
 def load_provenance(root: Path, tech: str, docs_override: Path | None = None) -> dict[str, Any]:
     path = _roots().docs_dir(root, docs_override) / tech / PROVENANCE_NAME
     if not path.is_file():
@@ -1063,12 +1142,20 @@ def load_provenance(root: Path, tech: str, docs_override: Path | None = None) ->
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--check-stale", metavar="TECH")
+    p.add_argument("--check-stale-fleet", action="store_true",
+                   help="probe every KB the registry finds under --root; one JSON report")
     p.add_argument("--root", default=None)
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
     # Must agree with write-graph.py, or the staleness probe reads a different KB than the one
     # the upgrade skill is about to update.
     root, docs_override = _roots().choose(args.root)
+    if args.check_stale_fleet:
+        # kb: one-project-per-invocation: no machine-wide report (upgrade path: caller loops
+        # per project root — the registry indexes exactly one project).
+        code, fleet_report = check_stale_fleet(root)
+        print(json.dumps(fleet_report, indent=2, sort_keys=True))
+        return code
     if args.check_stale:
         try:
             prov = load_provenance(root, args.check_stale, docs_override)
