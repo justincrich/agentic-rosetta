@@ -27,9 +27,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- build an isolated project root ---
 ROOT="$TMP/brain"
-mkdir -p "$ROOT/scripts/kb-delivery" "$ROOT/agents/cloudflare-workers-implementer" "$ROOT/.rosetta/docs/cloudflare-workers"
+mkdir -p "$ROOT/scripts/kb-delivery" "$ROOT/scripts/rosetta" "$ROOT/agents/cloudflare-workers-implementer" "$ROOT/.rosetta/docs/cloudflare-workers"
 cp "$HERE/generate_excerpt.py" "$ROOT/scripts/kb-delivery/"
 cp "$HERE/embed-graph.sh" "$ROOT/scripts/kb-delivery/"
+# generate_excerpt.py imports version_label from its resolved ../rosetta sibling
+cp "$PLUGIN_ROOT/scripts/rosetta/version_label.py" "$ROOT/scripts/rosetta/"
 chmod +x "$ROOT/scripts/kb-delivery/embed-graph.sh"
 cp "$GRAPH_FIXTURE" "$ROOT/.rosetta/docs/cloudflare-workers/fact-graph.json"
 
