@@ -59,7 +59,8 @@ export async function orient(req: ResearchRequest): Promise<DecoderRing> {
     decoderRingHash: seed.hash,
   });
   try {
-    const result = await runWorker(directive, seed, req.caller);
+    // Same cwd fanout gives its workers: the include list is repo-relative ("README.md").
+    const result = await runWorker(directive, seed, req.caller, req.sources.repoPath);
     if (result.ok) {
       const purpose = result.report.facts.find((f) => f.key === "purpose")?.value;
       const nouns = result.report.facts
