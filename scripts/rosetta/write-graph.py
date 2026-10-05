@@ -214,6 +214,15 @@ def seed_from_nrra(nrra_text: str, tech: str) -> dict:
 def apply_derived_version(graph: dict, pins: list[dict], repo_path: Path | None) -> None:
     ver, src = P.derive_upstream_version(pins, repo_path=repo_path)
     v = graph.setdefault("v", {})
+    if ver is None:
+        # No version evidence in the incoming research (e.g. a Mode C --update
+        # whose changeset carries no v changes). Never demote an existing pin
+        # to null/"undetermined"; leave an already-stamped source/date alone.
+        if not v.get("version_source"):
+            v["version_source"] = src
+        if not v.get("pinned_date"):
+            v["pinned_date"] = date.today().isoformat()
+        return
     v["version"] = ver
     v["version_source"] = src
     v["pinned_date"] = date.today().isoformat()
