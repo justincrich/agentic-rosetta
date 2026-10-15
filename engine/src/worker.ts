@@ -66,6 +66,13 @@ export function acpOptionsFromCaller(
     const slash = caller.model.indexOf("/");
     env.PI_PROVIDER = slash >= 0 ? caller.model.slice(0, slash) : (caller.provider ?? "");
     env.PI_MODEL = slash >= 0 ? caller.model.slice(slash + 1) : caller.model;
+  } else if (caller.harness === "opencode") {
+    // `opencode acp` registers session/set_mode + session/set_config_option but
+    // NOT session/set_model (verified against opencode v2.0.29), so
+    // `options.model` would hard-fail every worker at session init. The model is
+    // applied after session/new via session/set_config_option instead — see
+    // wireOpencodeModel/applyModelViaConfigOption. Unlike pi, model selection is
+    // NOT dropped: it is deferred, not defaulted.
   } else {
     opts.model = caller.model;
   }
@@ -79,7 +86,99 @@ export function makeWorker(
   caller: CallerIdentity,
   cwd?: string,
 ): AcpAgent {
-  return new AcpAgent(acpOptionsFromCaller(directive, caller, cwd));
+  const agent = new AcpAgent(acpOptionsFromCaller(directive, caller, cwd));
+  if (caller.harness === "opencode" && caller.model) {
+    wireOpencodeModel(agent, caller.model);
+  }
+  return agent;
+}
+
+/**
+ * The shape of @mastra/acp's ACPConnection we depend on for opencode model
+ * selection: `initializeSession` (TS-`private`, i.e. a prototype method, called
+ * lazily on first prompt) and the live `connection`/`session` it leaves behind.
+ */
+type ConfigOptionConn = {
+  session?: { sessionId?: string } | null;
+  connection?: {
+    setSessionConfigOption?: (params: {
+      sessionId: string;
+      configId: string;
+      value: string;
+    }) => Promise<{ configOptions?: Array<{ id?: string; currentValue?: string }> | null }>;
+  } | null;
+};
+
+type InitializeSessionConn = ConfigOptionConn & {
+  initializeSession?: () => Promise<void>;
+  constructor: { prototype: { initializeSession?: unknown } };
+};
+
+/**
+ * opencode acp selects a session's model with `session/set_config_option`
+ * (`configId: "model"`, value `provider/model-id`) — it never registers
+ * `session/set_model`, so `@mastra/acp`'s built-in `options.model` path dies at
+ * session init with `Method not found: session/set_model` (observed killing all
+ * 11 workers of the livekit refresh fanout on 2026-10-15 against opencode
+ * v2.0.29). We therefore omit `options.model` and apply the model right after
+ * `session/new`, then verify the agent echoed our model back. Fails CLOSED:
+ * seam drift or a landed-on-different-model throws a named error rather than
+ * letting a worker silently research on the wrong model.
+ *
+ * Value must be `provider/model-id` (opencode's model catalog keys); a bare
+ * id surfaces as `model not found`, which classifyWorkerError maps to MODEL.
+ */
+export async function applyModelViaConfigOption(
+  conn: ConfigOptionConn,
+  model: string,
+): Promise<void> {
+  const sessionId = conn.session?.sessionId;
+  if (!sessionId) {
+    throw new Error(
+      "opencode model wiring: no sessionId after session/new — refusing to run with an unselected model",
+    );
+  }
+  const set = conn.connection?.setSessionConfigOption;
+  if (typeof set !== "function") {
+    throw new Error(
+      "opencode model wiring: ACPConnection has no setSessionConfigOption — @mastra/acp seam drift; refusing to run with an unselected model",
+    );
+  }
+  const response = await set.call(conn.connection, {
+    sessionId,
+    configId: "model",
+    value: model,
+  });
+  const current = response?.configOptions?.find((o) => o?.id === "model")?.currentValue;
+  if (current !== model) {
+    throw new Error(
+      `opencode model wiring: model mismatch — requested "${model}", session reports "${current ?? "(none)"}"; refusing to run on the wrong model`,
+    );
+  }
+}
+
+/**
+ * Wrap the instance's `initializeSession` so the model lands via
+ * `session/set_config_option` after `session/new`. Instance-level only: the
+ * prototype is never patched, so other workers in this process are unaffected.
+ * Throws (fail closed) if @mastra/acp's private surface has drifted.
+ */
+function wireOpencodeModel(agent: AcpAgent, model: string): void {
+  const conn = (agent as unknown as { connection?: InitializeSessionConn }).connection;
+  if (
+    !conn ||
+    typeof conn.initializeSession !== "function" ||
+    typeof conn.constructor?.prototype?.initializeSession !== "function"
+  ) {
+    throw new Error(
+      "opencode model wiring: ACPConnection.initializeSession seam missing — refusing to run with an unselected model",
+    );
+  }
+  const runOriginal = conn.initializeSession.bind(conn);
+  conn.initializeSession = async () => {
+    await runOriginal();
+    await applyModelViaConfigOption(conn, model);
+  };
 }
 
 const AUTH_PATTERNS = /api.?key|unauthorized|authentication|invalid.*key|401|403/;

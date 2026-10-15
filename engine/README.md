@@ -65,6 +65,17 @@ Stdout is JSON: `{ runId, status, nrra, ledger, blockReason, … }`.
 > env (handoff §6 fallback) and omits it from the ACP client so sessions start;
 > pi therefore runs with its own configured default model until an upstream
 > pi-acp fix lands.
+>
+> **opencode note (verified 2026-10-15):** `opencode acp` (v2.0.29) registers
+> `session/set_mode` and `session/set_config_option` but **not**
+> `session/set_model`, so leaving `model` on the ACP client hard-fails every
+> worker at session init with `"Method not found": session/set_model` (observed
+> killing all 11 workers of a research fanout). The engine omits `options.model`
+> for opencode and applies the model right after `session/new` via
+> `session/set_config_option` (`configId: "model"`, value `provider/model-id`),
+> then verifies the agent echoed the same model back — a seam drift or a
+> model mismatch throws instead of silently researching on the wrong model.
+> Unlike pi, model selection is deferred, not defaulted.
 
 ## Layout
 
