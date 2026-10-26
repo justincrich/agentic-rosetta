@@ -244,7 +244,7 @@ embed_one() {
         close(blk); print ""; while ((getline b < blk) > 0) print b; close(blk)
       }
       NR==1 && /^---[[:space:]]*$/ { in_fm=1; print; next }
-      in_fm && /^---[[:space:]]*$/ { print; emit_block(); done=1; next }
+      in_fm && /^---[[:space:]]*$/ { in_fm=0; print; emit_block(); done=1; next }
       { print }
       END { if (!done) { } }
     ' "$md" >"$tmp"

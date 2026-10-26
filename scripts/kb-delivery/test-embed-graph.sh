@@ -30,6 +30,8 @@ ROOT="$TMP/brain"
 mkdir -p "$ROOT/scripts/kb-delivery" "$ROOT/agents/cloudflare-workers-implementer" "$ROOT/.rosetta/docs/cloudflare-workers"
 cp "$HERE/generate_excerpt.py" "$ROOT/scripts/kb-delivery/"
 cp "$HERE/embed-graph.sh" "$ROOT/scripts/kb-delivery/"
+mkdir -p "$ROOT/scripts/rosetta"
+cp "$PLUGIN_ROOT/scripts/rosetta/registry.py" "$PLUGIN_ROOT/scripts/rosetta/version_label.py" "$ROOT/scripts/rosetta/"
 chmod +x "$ROOT/scripts/kb-delivery/embed-graph.sh"
 cp "$GRAPH_FIXTURE" "$ROOT/.rosetta/docs/cloudflare-workers/fact-graph.json"
 
@@ -101,6 +103,80 @@ if "$EG" no-graph-agent >/dev/null 2>&1; then
 else
   echo "fail-closed: ok"
 fi
+
+# (e) Fresh frontmatter followed by a Markdown rule inserts once and converges immediately.
+MD="$ROOT/agents/cloudflare-workers-reviewer/agent.md"
+mkdir -p "$(dirname "$MD")"
+cat > "$MD" <<'EOF'
+---
+name: cloudflare-workers-reviewer
+description: real frontmatter and Markdown rule regression
+---
+# Reviewer
+
+Keep this hand-authored prose exactly.
+
+---
+
+Keep the horizontal rule and final newline.
+EOF
+cp "$MD" "$TMP/original.md"
+python3 "$ROOT/scripts/rosetta/registry.py" --root "$ROOT" scan > "$TMP/scan.json" || fail "rule-scan" "(rc=$?)"
+python3 "$ROOT/scripts/rosetta/registry.py" --root "$ROOT" graph-for cloudflare-workers-reviewer > "$TMP/mapping.json" || fail "rule-mapping-exit" "(rc=$?)"
+python3 - "$ROOT/.rosetta/registry.json" <<'PYREG'
+import json, sys
+reg = json.load(open(sys.argv[1]))
+assert reg["agents"]["cloudflare-workers-reviewer"]["graphs"] == ["cloudflare-workers"]
+PYREG
+[ "$?" -eq 0 ] || fail "rule-registry-mapping" "(wrong graph)"
+python3 "$ROOT/scripts/kb-delivery/generate_excerpt.py" --root "$ROOT" --agent cloudflare-workers-reviewer --embed > "$TMP/render.md" || fail "rule-render" "(rc=$?)"
+
+# Independent byte splice oracle: no YAML reserialization or whitespace normalization.
+# The single newline preceding the generated block is the writer's insertion separator.
+verify_rule_bytes() {
+  python3 - "$TMP/original.md" "$TMP/render.md" "$1" <<'PYBYTES'
+from pathlib import Path
+import sys
+original, block, actual = (Path(p).read_bytes() for p in sys.argv[1:])
+lines = original.splitlines(keepends=True)
+assert lines[0] == b"---\n"
+cut = sum(map(len, lines[:1 + next(i for i in range(1, len(lines)) if lines[i] == b"---\n")]))
+prefix, suffix = original[:cut], original[cut:]
+assert actual.count(b"<!-- rosetta-kb:begin") == 1, "duplicate begin block"
+assert actual.count(b"<!-- rosetta-kb:end -->") == 1, "duplicate end block"
+assert actual == prefix + b"\n" + block + suffix, "full splice bytes changed"
+assert actual[:len(prefix)] == prefix, "frontmatter bytes changed"
+assert actual[len(prefix) + 1 + len(block):] == suffix, "hand prose bytes changed"
+PYBYTES
+}
+for phase in first second third; do
+  "$EG" --root "$ROOT" --sync cloudflare-workers-reviewer > "$TMP/$phase.stdout" 2> "$TMP/$phase.stderr" || fail "rule-$phase-sync" "(rc=$?)"
+  cp "$MD" "$TMP/$phase.md"
+  verify_rule_bytes "$TMP/$phase.md" || fail "rule-$phase-bytes" "(duplicate block or changed prose)"
+done
+cmp -s "$TMP/first.md" "$TMP/second.md" || fail "rule-first-second-identical" "(bytes changed)"
+cmp -s "$TMP/first.md" "$TMP/third.md" || fail "rule-first-third-identical" "(bytes changed)"
+"$EG" --root "$ROOT" --check cloudflare-workers-reviewer > "$TMP/check.stdout" 2> "$TMP/check.stderr" || fail "rule-check-clean" "(rc=$?)"
+cmp -s "$TMP/third.md" "$MD" || fail "rule-check-readonly" "(check wrote bytes)"
+
+# A real hand-prose corruption must be rejected by the identical byte oracle.
+cp "$TMP/first.md" "$TMP/corrupt.md"
+python3 - "$TMP/corrupt.md" <<'PYCORRUPT'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+raw = p.read_bytes()
+assert raw.count(b"Keep this hand-authored prose exactly.") == 1
+p.write_bytes(raw.replace(b"Keep this hand-authored prose exactly.", b"Keep this hand-authored prose changed.", 1))
+PYCORRUPT
+if verify_rule_bytes "$TMP/corrupt.md" > "$TMP/corrupt.stdout" 2> "$TMP/corrupt.stderr"; then
+  fail "rule-prose-control" "(oracle accepted changed prose)"
+else
+  echo "rule-prose-control: rejected actual changed prose"
+fi
+cp "$TMP/first.md" "$TMP/corrupt.md"
+verify_rule_bytes "$TMP/corrupt.md" || fail "rule-prose-control-restored" "(restore failed)"
+echo "rule-regression: real registry + renderer + three syncs + readonly check exercised"
 
 if [ "$fail" -eq 0 ]; then
   echo "ok — embed-graph.sh insert + drift-detect + idempotency + fail-closed all passed"
