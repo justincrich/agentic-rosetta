@@ -45,8 +45,8 @@ def _tld_alternation(tlds: frozenset[str]) -> str:
     return "|".join(sorted(tlds, key=lambda t: (-len(t), t)))
 
 
-_URL_RE = re.compile(r"https?://[^\s)\]>\"'`,]+")
-_HOST_RE = re.compile(
+URL_RE = re.compile(r"https?://[^\s)\]>\"'`,]+")
+HOST_RE = re.compile(
     rf"(?<![\w./@-])((?:[A-Za-z0-9-]+\.)+(?:{_tld_alternation(TLDS)})"
     r"(?:/[^\s)\]>\"'`,]*)?)",
     re.I,
@@ -55,12 +55,12 @@ _HOST_RE = re.compile(
 
 def find_urls(text: str) -> list[str]:
     """Every ``http(s)://`` URL in prose."""
-    return _URL_RE.findall(text)
+    return URL_RE.findall(text)
 
 
 def find_hosts(text: str) -> list[str]:
     """Every scheme-less host in prose (``developers.cloudflare.com/workers``)."""
-    return _HOST_RE.findall(text)
+    return HOST_RE.findall(text)
 
 
 def sanitize_url(raw: str | None) -> str | None:

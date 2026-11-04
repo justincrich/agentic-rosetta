@@ -11,9 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import ipaddress
 import json
-import os
 import re
 import subprocess
 import sys
@@ -26,6 +24,12 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+
+# Sibling homes. This module is a FACADE over them: the logic lives in one place each,
+# and these names stay because callers and documentation reach them here.
+from jsonfile import canonical_json, sha256_text, write_json
+from locators import HOST_RE as _HOST_RE, URL_RE as _URL_RE, classify_locator, sanitize_url
+from versions import bump_kb_version, looks_like_version as _looks_like_version
 
 
 def _roots():
@@ -45,25 +49,6 @@ V_URL_KEYS = (
     "canonical_skill", "web_api_page",
 )
 META_URL_KEYS = ("repo", "docs", "docs_url", "source")
-_URL_RE = re.compile(r"https?://[^\s)\]>\"'`,]+")
-_HOST_RE = re.compile(
-    r"(?<![\w./@-])((?:[A-Za-z0-9-]+\.)+(?:com|org|net|io|dev|ai|app|so|cloud|rs|sh|to|co|gg|ms|tv|me|info|edu|gov)(?:/[^\s)\]>\"'`,]*)?)",
-    re.I,
-)
-_OK_TLDS = frozenset({
-    "com", "org", "net", "io", "dev", "ai", "app", "so", "cloud", "rs", "sh",
-    "to", "co", "gg", "ms", "tv", "me", "info", "edu", "gov",
-})
-
-_VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?")
-
-
-def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def corpus_digest(units: list[dict[str, Any]]) -> str:
@@ -128,16 +113,6 @@ def _git_describe(root: Path) -> str | None:
     return out or None
 
 
-def _looks_like_version(text: str) -> str | None:
-    m = _VERSION_RE.match(text.strip())
-    if not m:
-        return None
-    major = m.group(1)
-    minor = m.group(2) or "0"
-    patch = m.group(3) or "0"
-    return f"{major}.{minor}.{patch}"
-
-
 def derive_upstream_version(
     pins: list[dict[str, Any]] | None = None,
     repo_path: str | Path | None = None,
@@ -168,107 +143,6 @@ def derive_upstream_version(
             if m:
                 return m.group(1), "docs-marker"
     return None, "undetermined"
-
-
-def parse_semver(value: Any) -> tuple[int, int, int] | None:
-    if value is None:
-        return None
-    m = _VERSION_RE.match(str(value).strip())
-    if not m:
-        return None
-    return int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0)
-
-
-def _inc(parts: list[int], idx: int) -> str:
-    out = list(parts)
-    while len(out) < 3:
-        out.append(0)
-    out[idx] += 1
-    for j in range(idx + 1, len(out)):
-        out[j] = 0
-    return ".".join(str(p) for p in out[:3])
-
-
-def parse_kb(kb: str) -> list[int]:
-    bits = []
-    for p in str(kb or "1.0.0").split("."):
-        try:
-            bits.append(int(re.sub(r"\D.*", "", p) or "0"))
-        except ValueError:
-            bits.append(0)
-    return bits or [1, 0, 0]
-
-
-def _verdict(val: Any) -> str | None:
-    if isinstance(val, dict):
-        v = val.get("verdict")
-        return str(v) if v is not None else None
-    if isinstance(val, str):
-        return val
-    return None
-
-
-def r_flipped_to_reject(old_r: dict | None, new_r: dict | None) -> bool:
-    old_r = old_r or {}
-    new_r = new_r or {}
-    for key, new_val in new_r.items():
-        if str(key).endswith("_note"):
-            continue
-        new_v = _verdict(new_val)
-        old_v = _verdict(old_r[key]) if key in old_r else None
-        if new_v == "REJECT" and old_v != "REJECT":
-            return True
-    return False
-
-
-def t_contract_changed(old_t: dict | None, new_t: dict | None) -> bool:
-    old_t = old_t or {}
-    new_t = new_t or {}
-    if set(old_t) - set(new_t):
-        return True
-    for key in set(old_t) & set(new_t):
-        if old_t[key] != new_t[key]:
-            return True
-    return False
-
-
-_V_BOOKKEEPING = {"kb_version", "pinned_date", "pinned", "version_source", "supersedes", "version"}
-
-
-def keys_added(old_graph: dict, new_graph: dict) -> bool:
-    for sec in ("v", "w", "r", "a", "x", "t"):
-        old_keys = set((old_graph.get(sec) or {}))
-        new_keys = set((new_graph.get(sec) or {}))
-        if sec == "v":
-            old_keys -= _V_BOOKKEEPING
-            new_keys -= _V_BOOKKEEPING
-        if new_keys - old_keys:
-            return True
-    return False
-
-
-def bump_kb_version(
-    old_kb: str,
-    old_graph: dict,
-    new_graph: dict,
-    old_upstream: Any = None,
-    new_upstream: Any = None,
-) -> str:
-    """major / minor / patch from the section diff — never a model choice."""
-    parts = parse_kb(old_kb)
-    old_s = parse_semver(old_upstream)
-    new_s = parse_semver(new_upstream)
-    if old_s and new_s and new_s[0] != old_s[0]:
-        return _inc(parts, 0)
-    if r_flipped_to_reject(old_graph.get("r"), new_graph.get("r")):
-        return _inc(parts, 0)
-    if t_contract_changed(old_graph.get("t"), new_graph.get("t")):
-        return _inc(parts, 0)
-    if keys_added(old_graph, new_graph):
-        return _inc(parts, 1)
-    if old_s and new_s and new_s != old_s:
-        return _inc(parts, 1)
-    return _inc(parts, 2)
 
 
 def parse_nrra_json_block(text: str, heading: str) -> dict[str, Any] | None:
@@ -307,13 +181,6 @@ def split_source(val: Any) -> tuple[Any, str | None, str | None]:
     if set(core) == {"value"}:
         core = core["value"]
     return core, (str(src) if src is not None else None), (str(conf) if conf is not None else None)
-
-
-def write_json(path: Path, obj: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
 
 
 def source_urls(pins: list[dict[str, Any]] | None, extra: list[str] | None = None) -> list[str]:
@@ -445,76 +312,6 @@ def upsert_readme_kb_line(kb_dir: Path, graph: dict[str, Any], provenance: dict[
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def sanitize_url(raw: str | None) -> str | None:
-    """Keep fetchable http(s)/file URLs. Drop localhost, templates, junk hosts."""
-    text = (raw or "").strip()
-    text = re.sub(r"\s+\(.*$", "", text)
-    text = text.rstrip(".,;:)\"'")
-    if not text:
-        return None
-    if any(ch in text for ch in "{}<> \t\n"):
-        return None
-    if text.startswith("file:"):
-        return text
-    if not re.match(r"^https?://", text, re.I):
-        if re.match(r"^(?:github|gitlab|bitbucket)\.com/", text, re.I):
-            text = "https://" + text
-        elif re.match(r"^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:[/?#]|$)", text):
-            text = "https://" + text
-        else:
-            return None
-    try:
-        parsed = urllib.parse.urlparse(text)
-    except ValueError:
-        return None
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return None
-    if host in {"localhost", "::1"}:
-        return None
-    try:
-        ipaddress.ip_address(host)
-        return text
-    except ValueError:
-        pass
-    if "." not in host:
-        return None
-    if host.startswith("_") or host.endswith(".internal") or ".svc." in host:
-        return None
-    tld = host.rsplit(".", 1)[-1]
-    if tld not in _OK_TLDS:
-        return None
-    # Scheme-less promotions: reject CamelCase code tokens (Dispatchers.IO, Cargo.to)
-    # and toy two-letter hosts (e.me, t3.me). Explicit https:// keeps them if a TLD matches.
-    original = (raw or "").strip()
-    had_scheme = bool(re.match(r"^https?://", original, re.I))
-    if not had_scheme:
-        raw_host = original.split("/")[0].split(":")[0]
-        if any(c.isupper() for c in raw_host):
-            return None
-        labels = host.split(".")
-        if len(labels) < 2 or len(labels[0]) <= 2:
-            return None
-        if tld not in {"com", "org", "net", "io", "dev", "ai", "app", "cloud"}:
-            return None
-    return text
-
-
-def classify_locator(url: str) -> str:
-    """``repo`` for a git remote root; ``docs`` otherwise."""
-    if url.startswith("file:"):
-        return "repo"
-    parsed = urllib.parse.urlparse(url)
-    host = (parsed.hostname or "").lower().removeprefix("www.")
-    if host in {"github.com", "gitlab.com", "bitbucket.org"}:
-        parts = [p for p in parsed.path.split("/") if p]
-        if parts and parts[-1].endswith(".git"):
-            parts = parts[:-1] + [parts[-1][:-4]]
-        if len(parts) == 2:
-            return "repo"
-    return "docs"
 
 
 def resolve_local_path(src: str, root: Path | None, kb_dir: Path) -> Path | None:

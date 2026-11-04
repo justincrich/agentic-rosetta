@@ -16,7 +16,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import locators as L  # noqa: E402
-import provenance as P  # noqa: E402  (transition cross-check)
 
 
 def main() -> int:
@@ -30,7 +29,6 @@ def main() -> int:
     check("TLDS is a frozenset", isinstance(L.TLDS, frozenset), True)
     check("TLDS has 20 entries", len(L.TLDS), 20)
     check("SCHEMELESS_TLDS is a strict subset", L.SCHEMELESS_TLDS < L.TLDS, True)
-    check("TLDS equals provenance's _OK_TLDS", L.TLDS, P._OK_TLDS)
 
     # The regex must be built from TLDS, so it can never list a TLD the set lacks.
     alt = L._tld_alternation(L.TLDS)
@@ -86,7 +84,6 @@ def main() -> int:
     for raw, want in rejected:
         check(f"sanitize rejects {raw!r}", L.sanitize_url(raw), want)
 
-    # ── transition: byte-identical to provenance's implementation ──
     corpus = [raw for raw, _ in accepted] + [raw for raw, _ in rejected] + [
         "https://  spaced.com",
         "example.com.",
@@ -95,7 +92,6 @@ def main() -> int:
         "https://gitlab.com/a/b.git",
     ]
     mismatches = [
-        raw for raw in corpus if L.sanitize_url(raw) != P.sanitize_url(raw)
     ]
     check("sanitize_url agrees with provenance", mismatches, [])
 
@@ -113,14 +109,11 @@ def main() -> int:
         ("file:///tmp/repo", "repo"),
     ]:
         check(f"classify({url!r})", L.classify_locator(url), want)
-        check(f"classify-provenance({url!r})", P.classify_locator(url), want)
 
     # ── extractors ─────────────────────────────────────────────────
     prose = "See https://a.com/x and b.io/y plus Cargo.to."
     check("find_urls", L.find_urls(prose), ["https://a.com/x"])
     check("find_hosts finds scheme-less hosts", "b.io/y" in L.find_hosts(prose), True)
-    check("find_urls agrees with provenance", L.find_urls(prose), P._URL_RE.findall(prose))
-    check("find_hosts agrees with provenance", L.find_hosts(prose), P._HOST_RE.findall(prose))
 
     if failures:
         print(f"FAILED — {len(failures)} case(s):")

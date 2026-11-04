@@ -2,9 +2,8 @@
 """test_versions.py — pins the version decisions extracted from provenance.py.
 
 Every case asserts a CONCRETE expected value, transcribed from the behaviour of
-provenance.py before versions.py existed. While provenance.py still owns its own
-copies (until the repoint lands), each case is also cross-checked against it, so a
-transcription slip fails loudly instead of silently changing how KBs are versioned.
+provenance.py before versions.py existed. Those values are the contract: a change to
+any of them changes how a knowledge base is versioned, so it must be deliberate.
 
 Run: python3 scripts/rosetta/test_versions.py
 """
@@ -16,7 +15,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import provenance as P  # noqa: E402  (transition cross-check only)
 import versions as V  # noqa: E402
 
 
@@ -41,11 +39,9 @@ def main() -> int:
         (7, (7, 0, 0)),
     ]:
         check(f"parse_semver({raw!r})", V.parse_semver(raw), want)
-        check(f"parse_semver-provenance({raw!r})", P.parse_semver(raw), want)
 
     for raw, want in [("v1.4-rc2", "1.4.0"), ("abc", None), ("2", "2.0.0"), ("0.9", "0.9.0")]:
         check(f"looks_like_version({raw!r})", V.looks_like_version(raw), want)
-        check(f"looks_like_version-provenance({raw!r})", P._looks_like_version(raw), want)
 
     # ── tuple → text ───────────────────────────────────────────────
     for parts, idx, want in [
@@ -57,7 +53,6 @@ def main() -> int:
         ([0, 0, 0], 0, "1.0.0"),
     ]:
         check(f"increment({parts}, {idx})", V.increment(parts, idx), want)
-        check(f"increment-provenance({parts}, {idx})", P._inc(parts, idx), want)
 
     for raw, want in [
         ("2.1.0", [2, 1, 0]),
@@ -68,7 +63,6 @@ def main() -> int:
         ("x.y.z", [0, 0, 0]),
     ]:
         check(f"parse_kb({raw!r})", V.parse_kb(raw), want)
-        check(f"parse_kb-provenance({raw!r})", P.parse_kb(raw), want)
 
     # ── graph diff → bump ──────────────────────────────────────────
     base: dict = {"v": {}, "w": {}, "r": {}, "a": {}, "x": {}, "t": {}}
@@ -116,19 +110,9 @@ def main() -> int:
     for name, old_graph, new_graph, old_up, new_up, want in cases:
         got = V.bump_kb_version("1.0.0", old_graph, new_graph, old_up, new_up)
         check(f"bump[{name}]", got, want)
-        check(
-            f"bump-provenance[{name}]",
-            P.bump_kb_version("1.0.0", old_graph, new_graph, old_up, new_up),
-            want,
-        )
 
     # A legacy two-part label must bump cleanly rather than raise.
     check("legacy two-part label", V.bump_kb_version("1.5", diff(), diff(), "1.5", "1.5"), "1.5.1")
-    check(
-        "legacy two-part label-provenance",
-        P.bump_kb_version("1.5", diff(), diff(), "1.5", "1.5"),
-        "1.5.1",
-    )
 
     # A bookkeeping-only change must never produce a MAJOR bump.
     got = V.bump_kb_version(
