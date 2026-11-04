@@ -26,8 +26,8 @@
       "pr": null,
       "tasks": {
         "COMPOSE-01": {
-          "status": "pending",
-          "merge_sha": null
+          "status": "completed",
+          "merge_sha": "00dfc0257327b8b8180d1d50b7ce8084ed149c1c"
         }
       }
     }
