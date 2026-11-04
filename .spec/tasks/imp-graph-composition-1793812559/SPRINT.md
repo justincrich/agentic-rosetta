@@ -14,7 +14,7 @@ base_branch: improvement/imp-graph-composition-1793812559-graph-composition
 
 | ID | Title | Assignee | Priority |
 |----|-------|----------|----------|
-| imp-graph-composition-1793812559-graph-composition | Compose Rosetta graphs by value with versioned dependent sync | python-implementer | P1 |
+| COMPOSE-01 | Compose Rosetta graphs by value with versioned dependent sync | python-implementer | P1 |
 
 ## Dependencies
 

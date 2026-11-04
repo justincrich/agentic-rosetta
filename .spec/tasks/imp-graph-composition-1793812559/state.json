@@ -18,14 +18,14 @@
       "history": [
         {
           "status": "planned",
-          "at": "2026-11-04T20:54:50Z",
+          "at": "2026-11-04T20:59:39Z",
           "by": "agent"
         }
       ],
       "branch": null,
       "pr": null,
       "tasks": {
-        "imp-graph-composition-1793812559-graph-composition": {
+        "COMPOSE-01": {
           "status": "pending",
           "merge_sha": null
         }
