@@ -40,6 +40,14 @@ bash "$EMB" --root "$PROJECT" --check --all
 
 Every `rosetta-kb` region is blown away and replaced with one fresh render. The body above the sentinels is hand-authored and never regenerated.
 
+## Composed knowledge bases
+
+A graph that borrowed another's facts **by value** carries them in its own body under
+`composed[<slug>]`, so the same block renders the borrowed facts under a `[composed: <slug>]`
+banner. `--sync` needs nothing extra; if the original moved, propagate first (see
+`/rosetta-upgrade` § Propagation) and check with
+`python3 scripts/rosetta/write-graph.py --root "$PROJECT" --check-composed <borrower>`.
+
 ## Output
 
 - `registry.py validate` → `OK`

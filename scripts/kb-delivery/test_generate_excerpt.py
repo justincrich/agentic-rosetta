@@ -108,6 +108,95 @@ def main() -> int:
         cw = run("--domain", "cloudflare-workers", "--print-version").stdout.strip()
         check("agent-shared-graph", cr == cw, f"({cr} != {cw})")
 
+        # ── AC-2: a composed KB's embed carries the original's facts BY VALUE ──
+        # The borrower is produced by the REAL writer (write-graph.py --create
+        # --composed-with rust), not by pasting a container here, so what is rendered is
+        # what the writer actually writes. A green `--check` would prove nothing: it hashes
+        # the body only.
+        WG = PLUGIN / "scripts" / "rosetta" / "write-graph.py"
+        nrra = tmp / "compose-nrra.md"
+        ledger = tmp / "compose-ledger.json"
+        nrra.write_text(
+            "---\n"
+            'artifact: rosetta-research\n'
+            'tech: "Herdr"\n'
+            'tech_slug: "herdrdev"\n'
+            'run_id: "run-compose"\n'
+            'decoder_ring_hash: "cafebabe12345678"\n'
+            "---\n\n# Herdr\n\n## 9. Fact-Graph Seed\n```json\n"
+            '{"v": {"pkg": "herdrdev"}, "w": {}, "r": {}, "a": {}, "x": {}, "t": {}}\n'
+            "```\n"
+        )
+        ledger.write_text(json.dumps({
+            "run_id": "run-compose", "tech": "herdrdev", "source_mode": "repo",
+            "decoder_ring_hash": "cafebabe12345678", "waves": 1, "censused": 0,
+            "closed": 0, "rows": [], "gaps": [],
+        }))
+        created = subprocess.run(
+            [sys.executable, str(WG), "--root", str(root), "--create", "herdrdev",
+             "--nrra", str(nrra), "--ledger", str(ledger), "--composed-with", "rust"],
+            capture_output=True, text=True)
+        check("compose-create-exit0", created.returncode == 0, created.stdout + created.stderr)
+
+        rust_graph = json.loads(
+            (root / ".rosetta" / "docs" / "rust" / "fact-graph.json").read_text())
+        sys.path.insert(0, str(PLUGIN / "scripts" / "rosetta"))
+        import version_label as VL  # noqa: E402
+
+        rust_edition = VL.kb_edition(rust_graph)
+        rust_rules = [k for k in (rust_graph.get("r") or {}) if not k.endswith("_note")]
+        check("compose-fixture-has-rust-rules", bool(rust_rules), repr(list(rust_graph.get("r") or {})))
+
+        composed_embed = run("--agent", "herdrdev-implementer", "--embed").stdout
+        composed_lines = composed_embed.splitlines()
+        check("compose-embed-three-lines", len(composed_lines) == 3, f"(got {len(composed_lines)})")
+        composed_body = None
+        try:
+            composed_body = json.loads(composed_lines[1]) if len(composed_lines) == 3 else None
+        except json.JSONDecodeError as e:  # noqa: BLE001
+            check("compose-embed-json", False, f"({e})")
+        borrowed = (composed_body or {}).get("composed", {}).get("rust", {})
+        check("compose-embed-carries-container", bool(borrowed), repr(composed_body)[:200])
+        check("compose-embed-carries-edition",
+              borrowed.get("kb_version") == rust_edition, repr(borrowed.get("kb_version")))
+        check("compose-embed-carries-a-rule-key",
+              any(key in (borrowed.get("facts", {}).get("r") or {}) for key in rust_rules),
+              repr(list((borrowed.get("facts", {}).get("r") or {})))[:200])
+        check("compose-embed-text-visible",
+              bool(rust_rules) and rust_rules[0] in composed_embed,
+              f"({rust_rules[:1]} not in embed)")
+        check("compose-embed-no-meta", "_meta" not in (composed_body or {}))
+
+        composed_md = run("--agent", "herdrdev-implementer", "--embed",
+                          "--embed-format", "markdown").stdout
+        check("compose-md-banner", "[composed: rust]" in composed_md, composed_md[:400])
+
+        # ── fail closed: a declaration with no copy, and a copy with no original ──
+        declared_only = tmp / "declared-only.json"
+        declared_only.write_text(json.dumps({
+            "v": {"kb_version": "1.0.0", "pkg": "herdrdev"},
+            "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+            "_meta": {"composed_with": [{"graph": "rust", "kb_version": "1.0.0"}]},
+        }))
+        no_copy = run("--graph", str(declared_only), "--embed")
+        check("compose-missing-copy-exit", no_copy.returncode == 2, f"(rc={no_copy.returncode})")
+        check("compose-missing-copy-named", "composed-copy-missing" in no_copy.stderr, no_copy.stderr)
+        check("compose-missing-copy-no-render", "rosetta-kb:begin" not in no_copy.stdout, no_copy.stdout)
+
+        ghost_copy = tmp / "ghost-copy.json"
+        ghost_copy.write_text(json.dumps({
+            "v": {"kb_version": "1.0.0", "pkg": "herdrdev"},
+            "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+            "composed": {"ghost": {"kb_version": "1.0.0", "fingerprint": "deadbeef",
+                                   "facts": {"v": {}, "w": {}, "r": {}, "a": {}, "x": {}, "t": {}}}},
+            "_meta": {"composed_with": [{"graph": "ghost", "kb_version": "1.0.0"}]},
+        }))
+        no_original = run("--graph", str(ghost_copy), "--embed")
+        check("compose-missing-original-exit", no_original.returncode == 2,
+              f"(rc={no_original.returncode})")
+        check("compose-missing-original-named",
+              "composed-original-missing" in no_original.stderr, no_original.stderr)
+
         # v.pinned (no pinned_date) still fills the @ date half
         pinned_only = tmp / "pinned-only.json"
         pinned_only.write_text(json.dumps({

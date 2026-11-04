@@ -162,12 +162,65 @@ def main() -> int:
     check("verdict_of on a dict", F.verdict_of({"verdict": "nr"}), "nr")
     check("verdict_of on junk", F.verdict_of(3), None)
 
+    # ── composition: copy the facts by value, mirror the declaration ──
+    contributed = {
+        "v": {"pkg": "rust", "kb_version": "3.1.0"},
+        "w": {"Vec": {"t": "type", "i": "Vec"}},
+        "r": {"unwrap_in_library_code": {"verdict": "REJECT", "rule": "no unwrap"}},
+        "a": {"new_vec_push": "Vec::push"},
+        "x": {"unwrap in lib": "propagate with ?"},
+        "t": {"Result<T, E>": "enum"},
+    }
+    host = {
+        "v": {"kb_version": "1.0.0", "pkg": "herdrdev"},
+        "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+        "_meta": {"technology": "Herdr"},
+    }
+    composed = F.compose_by_value(host, contributed, "rust")
+    copy_entry = composed[F.COMPOSED_KEY]["rust"]
+    check("compose records the edition", copy_entry["kb_version"], "3.1.0")
+    check("compose copies a rule", copy_entry["facts"]["r"]["unwrap_in_library_code"]["rule"], "no unwrap")
+    check("compose copies every section", sorted(copy_entry["facts"]), ["a", "r", "t", "v", "w", "x"])
+    check("compose does not merge into the host body", composed["r"], {})
+    check("compose does not mutate its input", F.COMPOSED_KEY in host, False)
+    check("compose fingerprint is stable",
+          F.compose_by_value(host, contributed, "rust")[F.COMPOSED_KEY]["rust"]["fingerprint"],
+          copy_entry["fingerprint"])
+
+    mirrored = F.sync_composed_with(composed)
+    check("sync mirrors the declaration",
+          mirrored["_meta"]["composed_with"], [{"graph": "rust", "kb_version": "3.1.0"}])
+    check("sync keeps the rest of _meta", mirrored["_meta"]["technology"], "Herdr")
+    check("sync without a copy leaves the graph alone",
+          F.sync_composed_with({"v": {"kb_version": "1"}}), {"v": {"kb_version": "1"}})
+
+    both("a well-formed composed container", copy.deepcopy(composed), "ok")
+    bad_container = {"v": {"kb_version": "1"}, F.COMPOSED_KEY: {"rust": "nope"}}
+    both("composed entry that is not an object", bad_container, "reject:schema")
+    both("composed entry with no fingerprint",
+         {"v": {"kb_version": "1"}, F.COMPOSED_KEY: {"rust": {"kb_version": "1", "facts": {}}}},
+         "reject:schema")
+    both("composed entry with no edition",
+         {"v": {"kb_version": "1"}, F.COMPOSED_KEY: {"rust": {"fingerprint": "x", "facts": {}}}},
+         "reject:schema")
+    both("composed facts that are not an object",
+         {"v": {"kb_version": "1"},
+          F.COMPOSED_KEY: {"rust": {"kb_version": "1", "fingerprint": "x", "facts": "nope"}}},
+         "reject:schema")
+    both("composed facts section that is not a graph section",
+         {"v": {"kb_version": "1"},
+          F.COMPOSED_KEY: {"rust": {"kb_version": "1", "fingerprint": "x", "facts": {"z": {}}}}},
+         "reject:schema")
+    both("composed container given as a list",
+         {"v": {"kb_version": "1"}, F.COMPOSED_KEY: []}, "reject:schema")
+
     if failures:
         print(f"FAILED — {len(failures)} case(s):")
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("ok — factgraph.py reproduces write-graph's gate exactly (26 rejects, 11 accepts, 2 permissive)")
+    print("ok — factgraph.py reproduces write-graph's gate exactly (26 rejects, 11 accepts, "
+          "2 permissive) + copies composed facts by value (7 rejects on a bad container)")
     return 0
 
 

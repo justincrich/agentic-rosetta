@@ -5,6 +5,8 @@
   write-graph.py --apply-nrra <tech> --nrra <f> --ledger <f> [--root DIR] [--out PATH] [--source-repo DIR]
   write-graph.py --update <tech> --changeset <f> --ledger <f> [--nrra <f>] [--root DIR]
   write-graph.py --check  <tech> [--root DIR]
+  write-graph.py --check-composed <tech> [--root DIR]
+  write-graph.py --propagate <graph> [--borrowers a,b] --confirm [--root DIR]
   write-graph.py --adopt  <tech> [--root DIR]
   write-graph.py --backfill [TECH] [--all] [--root DIR] [--sources FILE]
 
@@ -23,6 +25,13 @@ deprecated / needs_review from an NRRA seed are never applied.
 and writes now-pins (status=backfill-now). The overlay is agent-produced (search +
 judgment); this writer never invents URLs.
 --check on an unstamped (legacy) graph warns, does not fail.
+
+--composed-with copies the named graphs' v/w/r/a/x/t facts into this graph's body by
+value (``composed[<slug>]``) and rebuilds ``_meta.composed_with`` from that copy.
+--propagate re-copies one original's facts into every borrower that declares it; it asks
+update-all / a named subset / skip and refuses to write without ``--confirm`` when stdin
+is not a terminal. --check-composed fails when a recorded copy is not the original's
+current edition, or when the copy's own facts changed (see versions.composed_freshness).
 """
 from __future__ import annotations
 
@@ -48,9 +57,16 @@ import factgraph
 import provenance as P
 import roots as RT
 from jsonfile import body_digest, read_json, sha256_bytes, write_json
-from versions import bump_kb_version
+from versions import (
+    COMPOSED_DIVERGED,
+    COMPOSED_FRESH,
+    bump_kb_version,
+    composed_freshness,
+    composed_slugs,
+    declared_composed_slugs,
+)
 
-WRITER = "write-graph.py@1.1.0"
+WRITER = "write-graph.py@1.2.0"
 
 
 class GateError(SystemExit):
@@ -202,6 +218,23 @@ def graph_sha(graph: dict) -> str:
     return body_digest(graph)
 
 
+def restamp(graph: dict) -> dict:
+    """Refresh the integrity stamp after a body-only rewrite (composition propagation).
+
+    Same keys ``stamp()`` writes. Only the fields a propagate actually changes are
+    touched, so the run_id / censused provenance of the last research run survives.
+    """
+    meta = dict(graph.get("_meta") or {})
+    assimilation = dict(meta.get("assimilation") or {})
+    assimilation["graph_sha256"] = body_digest(graph)
+    assimilation["written_at"] = date.today().isoformat()
+    assimilation["writer"] = WRITER
+    meta["assimilation"] = assimilation
+    out = dict(graph)
+    out["_meta"] = meta
+    return out
+
+
 def persist_siblings(
     dest: Path,
     graph: dict,
@@ -230,18 +263,18 @@ def nrra_pins_and_sources(nrra_text: str) -> tuple[list[dict], dict]:
     return pins, sources if isinstance(sources, dict) else {}
 
 
-def resolve_composed_with(root: Path, slugs: list[str]) -> list[dict]:
-    """Resolve composition sources to [{graph, kb_version}] — fail closed on unknown slugs.
+def resolve_composed_with(root: Path, slugs: list[str]) -> list[tuple[str, dict]]:
+    """Resolve composition sources to ``(slug, graph)`` — fail closed on unknown slugs.
 
     A composed-with slug naming a graph that does not exist in this project's docs root is
-    a typo, not a soft warning: the resulting KB would claim a composition it cannot back."""
-    out: list[dict] = []
+    a typo, not a soft warning: the resulting KB would claim a composition it cannot back.
+    The loaded graph is what gets copied by value, so resolution and copy read one file."""
+    out: list[tuple[str, dict]] = []
     for slug in slugs:
         p = graph_path(root, slug)
         if not p.is_file():
             _die("composed-with", f"composed graph {slug!r} has no fact-graph at {p}")
-        kb = str((load_json(p).get("v") or {}).get("kb_version") or "")
-        out.append({"graph": slug, "kb_version": kb})
+        out.append((slug, load_json(p)))
     return out
 
 
@@ -267,9 +300,12 @@ def cmd_create(
     apply_derived_version(graph, pins, source_repo)
     graph["_meta"] = {"technology": tech, "slug": tech}
     if composed_with:
-        # Survives stamp() (which preserves _meta) and is excluded from graph_sha (which
-        # hashes only the body). Registry scan mirrors these slugs into graphs.{slug}.
-        graph["_meta"]["composed_with"] = resolve_composed_with(root, composed_with)
+        # Copy BY VALUE into the body. `_meta` is stripped from every render, so the
+        # declaration alone would reach no agent; sync_composed_with then rebuilds the
+        # declaration from the copy, leaving one record of which edition was taken.
+        for slug, original in resolve_composed_with(root, composed_with):
+            graph = factgraph.compose_by_value(graph, original, slug)
+        graph = factgraph.sync_composed_with(graph)
     validate_graph(graph)
     graph = stamp(graph, ledger)
     write_json(dest, graph)
@@ -302,6 +338,12 @@ def cmd_update(
             _die("decoder_ring_hash", "absent on ledger (pass --nrra to cross-check)")
     assert_ledger_closed(ledger)
     current = load_json(dest)
+    # A declaration is a promise that the original lives in this project. If it does not,
+    # stop instead of refreshing a KB that claims a composition nothing can back (AC-3).
+    absent = [s for s in declared_composed_slugs(current) if not graph_path(root, s).is_file()]
+    if absent:
+        _die("composed-with",
+             f"declared composed graph(s) absent from the project: {', '.join(absent)}")
     old_snapshot = json.loads(json.dumps(current))
     kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
     hist = dest.parent / ".history"
@@ -603,6 +645,169 @@ def cmd_check(tech: str, root: Path) -> int:
     return 0
 
 
+# ─────────────────────────── composed sources ───────────────────────────
+
+def cmd_check_composed(tech: str, root: Path) -> int:
+    """Fail when a recorded copy is not the original's current edition, or was edited.
+
+    Offline: every original is read from this project, never fetched (AC-8)."""
+    dest = graph_path(root, tech)
+    if not dest.is_file():
+        _die("check", f"no graph at {dest}")
+    graph = load_json(dest)
+    validate_graph(graph)
+    sources = composed_slugs(graph)
+    if not sources:
+        print(f"[write-graph] {tech} composes nothing")
+        return 1
+    problems: list[str] = []
+    for slug in sources:
+        path = graph_path(root, slug)
+        original = load_json(path) if path.is_file() else None
+        report = composed_freshness(graph, original, slug)
+        print(
+            f"[write-graph] {tech} <- {slug}: "
+            f"recorded={report['recorded_kb_version'] or '-'} "
+            f"current={report['current_kb_version'] or '-'} {report['status']}"
+        )
+        if report["status"] != COMPOSED_FRESH:
+            problems.append(f"{slug}={report['status']}")
+    if problems:
+        _die("composed-version", f"copies not current: {', '.join(problems)}")
+    print(f"[write-graph] OK {tech} composed sources current")
+    return 0
+
+
+def parse_borrower_selection(answer: str, borrowers: list[str]) -> list[str]:
+    """``all``/empty → every borrower, ``skip`` → none, ``a,b`` → that named subset.
+
+    Unknown names die: a silently ignored name would look like a refresh that ran."""
+    text = (answer or "").strip().lower()
+    if text in ("", "all"):
+        return list(borrowers)
+    if text in ("skip", "none", "no"):
+        return []
+    wanted = [part.strip() for part in text.split(",") if part.strip()]
+    unknown = [name for name in wanted if name not in borrowers]
+    if unknown:
+        _die("composed-with", f"not a borrower of this graph: {', '.join(unknown)}")
+    return wanted
+
+
+def persist_after_compose(dest: Path, graph: dict, status: str = "propagated") -> None:
+    """Rewrite the sibling files so provenance does not contradict the graph it describes."""
+    kb_dir = dest.parent
+    pins: list[dict] = []
+    prov_path = kb_dir / P.PROVENANCE_NAME
+    if prov_path.is_file():
+        try:
+            loaded = json.loads(prov_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                pins = list(loaded.get("sources") or [])
+        except json.JSONDecodeError:
+            pins = []
+    fact_sources: dict = {}
+    fs_path = kb_dir / P.FACT_SOURCES_NAME
+    if fs_path.is_file():
+        try:
+            loaded_fs = json.loads(fs_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_fs, dict):
+                fact_sources = loaded_fs
+        except json.JSONDecodeError:
+            fact_sources = {}
+    v = graph.get("v") or {}
+    prov = P.build_provenance(
+        kb_version=str(v.get("kb_version") or ""),
+        upstream_version=v.get("version"),
+        pins=pins,
+        status=status,
+        graph_sha256=graph_sha(graph),
+    )
+    P.write_siblings(kb_dir, provenance=prov, fact_sources=fact_sources)
+    P.upsert_readme_kb_line(kb_dir, graph, prov)
+
+
+def cmd_propagate(
+    original_slug: str,
+    root: Path,
+    subset: list[str] | None,
+    confirm: bool,
+) -> int:
+    """Re-copy one original's facts into every borrower that declares it. Never unattended.
+
+    Exit 0 all selected borrowers rewritten (or skip), 1 nobody borrows it, 2 a gate refused,
+    10 at least one selected borrower was left alone because its copy had diverged.
+    """
+    original_path = graph_path(root, original_slug)
+    if not original_path.is_file():
+        _die("composed-with",
+             f"composed graph {original_slug!r} has no fact-graph at {original_path}")
+    original = load_json(original_path)
+    if R is None:
+        _die("registry", "registry module unavailable — cannot find borrowers")
+    found = R.find_borrowers(original_slug, root)
+    borrowers = found["borrowers"]
+    names = [borrower["graph"] for borrower in borrowers]
+
+    print(f"[write-graph] {original_slug} kb_version={found['kb_version'] or '-'} "
+          f"— {len(borrowers)} borrower(s)")
+    for borrower in borrowers:
+        print(f"  {borrower['graph']:28} recorded={borrower['recorded_kb_version'] or '-':12} "
+              f"current={borrower['current_kb_version'] or '-':12} {borrower['status']}")
+    if not borrowers:
+        print(f"[write-graph] nobody composes {original_slug!r}; nothing to propagate")
+        return 1
+
+    # AC-5: propagation never runs unattended. The explicit argument is required for a
+    # non-interactive run, and the terminal check is what makes that real rather than prose.
+    if not confirm and not sys.stdin.isatty():
+        _die("confirm",
+             "propagation rewrites other knowledge bases; pass --confirm. A non-interactive "
+             "run cannot ask update-all / a named subset / skip.")
+
+    if subset:
+        selected = parse_borrower_selection(",".join(subset), names)
+    elif confirm:
+        selected = list(names)  # default: update all
+    else:
+        print("Update all (default), a named subset (a,b), or skip? [all]: ",
+              end="", flush=True)
+        selected = parse_borrower_selection(sys.stdin.readline(), names)
+
+    if not selected:
+        print("[write-graph] skip — wrote nothing")
+        return 0
+
+    rc = 0
+    for borrower in borrowers:
+        name = borrower["graph"]
+        if name not in selected:
+            continue
+        if borrower["status"] == COMPOSED_DIVERGED:
+            # AC-4: report THAT the copy diverged, never which fact changed.
+            print(f"[write-graph] SKIP {name}: its recorded copy diverged from its own facts "
+                  f"(a local edit changed the copy); refusing to overwrite", file=sys.stderr)
+            rc = 10
+            continue
+        dest = graph_path(root, name)
+        graph = load_json(dest)
+        old_kb = str((graph.get("v") or {}).get("kb_version") or "1.0.0")
+        old_up = (graph.get("v") or {}).get("version")
+        updated = factgraph.compose_by_value(graph, original, original_slug)
+        updated = factgraph.sync_composed_with(updated)
+        new_up = (updated.get("v") or {}).get("version")
+        new_kb = bump_kb_version(old_kb, graph, updated, old_up, new_up)
+        updated.setdefault("v", {})["kb_version"] = new_kb
+        updated["v"]["supersedes"] = old_kb
+        validate_graph(updated)
+        updated = restamp(updated)
+        write_json(dest, updated)
+        persist_after_compose(dest, updated)
+        print(f"[write-graph] propagated {original_slug} -> {name} {old_kb} -> {new_kb}")
+    return rc
+
+
+
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", default=None)
@@ -610,6 +815,15 @@ def main(argv: list[str]) -> int:
     p.add_argument("--apply-nrra", metavar="TECH")
     p.add_argument("--update", metavar="TECH")
     p.add_argument("--check", metavar="TECH")
+    p.add_argument("--check-composed", metavar="TECH",
+                   help="fail when a graph's recorded composed editions are not the "
+                        "originals' current ones (offline)")
+    p.add_argument("--propagate", metavar="GRAPH",
+                   help="re-copy a graph's facts into every borrower that declares it")
+    p.add_argument("--borrowers", metavar="SLUGS",
+                   help="comma-separated borrower subset for --propagate (default: all)")
+    p.add_argument("--confirm", action="store_true",
+                   help="explicit consent for --propagate; required when stdin is not a terminal")
     p.add_argument("--adopt", metavar="TECH")
     p.add_argument("--backfill", metavar="TECH", nargs="?", const="*")
     p.add_argument("--all", action="store_true")
@@ -655,6 +869,11 @@ def main(argv: list[str]) -> int:
             return cmd_update(args.update, args.changeset, args.ledger, args.nrra, root, args.source_repo)
         if args.adopt:
             return cmd_adopt(args.adopt, root)
+        if args.propagate:
+            subset = [s.strip() for s in (args.borrowers or "").split(",") if s.strip()]
+            return cmd_propagate(args.propagate, root, subset or None, args.confirm)
+        if args.check_composed:
+            return cmd_check_composed(args.check_composed, root)
         if args.backfill is not None:
             techs = (
                 list_docs_techs(root)
