@@ -13,6 +13,7 @@ Run: python3 scripts/rosetta/test_registry.py
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -107,6 +108,48 @@ def main() -> int:
             [sys.executable, str(HERE / "registry.py"), "--root", str(root), "validate"],
             capture_output=True, text=True)
         check("cli-validate-exit0", cli.returncode == 0, f"(rc={cli.returncode} {cli.stderr})")
+
+        # _composed_with: mirror _meta.composed_with slugs (tolerant on junk/corrupt)
+        cw_file = root / ".rosetta" / "docs" / "rust" / "fact-graph.json"
+        orig_cw = cw_file.read_text()
+        g = json.loads(orig_cw)
+        g.setdefault("_meta", {})["composed_with"] = [
+            {"graph": "mastra", "kb_version": "1.0.0"},
+            "junk-entry",
+        ]
+        cw_file.write_text(json.dumps(g))
+        check("composed-with-mirror", R._composed_with(cw_file) == ["mastra"],
+              repr(R._composed_with(cw_file)))
+        scan_cw = {s: gg["composed_with"] for s, gg in R.scan()["graphs"].items()}
+        check("composed-with-in-scan", scan_cw.get("rust") == ["mastra"],
+              repr(scan_cw.get("rust")))
+        cw_file.write_text(orig_cw)
+
+        # multi-slug register binds ALL slugs (single-slug register would drop the primary)
+        agent_dir = root / "agents" / "polyglot-implementer"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "agent.md").write_text("# polyglot test agent\n")
+        cli_reg = subprocess.run(
+            [sys.executable, str(HERE / "registry.py"), "--root", str(root),
+             "register", "polyglot-implementer", "rust", "mastra"],
+            capture_output=True, text=True)
+        check("register-multi-exit0", cli_reg.returncode == 0,
+              f"(rc={cli_reg.returncode} {cli_reg.stderr})")
+        reg2 = R.load()
+        check("register-multi-bound",
+              reg2.get("manual_bindings", {}).get("polyglot-implementer") == ["rust", "mastra"],
+              repr(reg2.get("manual_bindings")))
+        check("register-multi-agent-graphs",
+              reg2["agents"].get("polyglot-implementer", {}).get("graphs") == ["rust", "mastra"],
+              repr(reg2["agents"].get("polyglot-implementer")))
+        # unknown slug fails closed without binding
+        cli_reg_bad = subprocess.run(
+            [sys.executable, str(HERE / "registry.py"), "--root", str(root),
+             "register", "polyglot-implementer", "rust", "no-such-graph"],
+            capture_output=True, text=True)
+        check("register-unknown-dies", cli_reg_bad.returncode != 0
+              and "no-such-graph" in cli_reg_bad.stderr, cli_reg_bad.stderr.strip())
+
 
         # No path in the written registry escapes the target project.
         for slug, g in R.load()["graphs"].items():

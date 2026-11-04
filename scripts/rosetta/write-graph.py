@@ -287,6 +287,21 @@ def nrra_pins_and_sources(nrra_text: str) -> tuple[list[dict], dict]:
     return pins, sources if isinstance(sources, dict) else {}
 
 
+def resolve_composed_with(root: Path, slugs: list[str]) -> list[dict]:
+    """Resolve composition sources to [{graph, kb_version}] — fail closed on unknown slugs.
+
+    A composed-with slug naming a graph that does not exist in this project's docs root is
+    a typo, not a soft warning: the resulting KB would claim a composition it cannot back."""
+    out: list[dict] = []
+    for slug in slugs:
+        p = graph_path(root, slug)
+        if not p.is_file():
+            _die("composed-with", f"composed graph {slug!r} has no fact-graph at {p}")
+        kb = str((load_json(p).get("v") or {}).get("kb_version") or "")
+        out.append({"graph": slug, "kb_version": kb})
+    return out
+
+
 def cmd_create(
     tech: str,
     nrra_path: Path,
@@ -294,6 +309,7 @@ def cmd_create(
     root: Path,
     out: Path | None,
     source_repo: Path | None,
+    composed_with: list[str] | None = None,
 ) -> int:
     dest = out or graph_path(root, tech)
     if dest.is_file():
@@ -307,6 +323,10 @@ def cmd_create(
     pins, fact_sources = nrra_pins_and_sources(nrra)
     apply_derived_version(graph, pins, source_repo)
     graph["_meta"] = {"technology": tech, "slug": tech}
+    if composed_with:
+        # Survives stamp() (which preserves _meta) and is excluded from graph_sha (which
+        # hashes only the body). Registry scan mirrors these slugs into graphs.{slug}.
+        graph["_meta"]["composed_with"] = resolve_composed_with(root, composed_with)
     validate_graph(graph)
     graph = stamp(graph, ledger)
     atomic_write(dest, graph)
@@ -658,6 +678,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--changeset", type=Path)
     p.add_argument("--out", type=Path, help="override dest path (create / apply-nrra)")
     p.add_argument("--source-repo", type=Path, help="local tree used to derive v.version")
+    p.add_argument("--composed-with",
+                   help="comma-separated graph slugs this KB composes; stamped into "
+                        "_meta.composed_with with each graph's current kb_version")
     args = p.parse_args(argv)
 
     # Where the KB goes is a CONFIGURED decision, not "wherever the shell happens to be
@@ -676,7 +699,9 @@ def main(argv: list[str]) -> int:
         if args.create:
             if not args.nrra or not args.ledger:
                 _die("usage", "--create needs --nrra and --ledger")
-            return cmd_create(args.create, args.nrra, args.ledger, root, args.out, args.source_repo)
+            composed = [s.strip() for s in (args.composed_with or "").split(",") if s.strip()]
+            return cmd_create(args.create, args.nrra, args.ledger, root, args.out,
+                              args.source_repo, composed_with=composed)
         if args.apply_nrra:
             if not args.nrra or not args.ledger:
                 _die("usage", "--apply-nrra needs --nrra and --ledger")

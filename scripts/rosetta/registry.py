@@ -175,6 +175,16 @@ def _kb_version(path: Path) -> str:
     return format_kb_version(graph, raw)
 
 
+def _composed_with(path: Path) -> list[str]:
+    """Graph slugs this graph declares as compositional sources (``_meta.composed_with``)."""
+    try:
+        meta = json.loads(path.read_bytes()).get("_meta") or {}
+        cw = meta.get("composed_with") or []
+        return sorted({str(e["graph"]) for e in cw if isinstance(e, dict) and e.get("graph")})
+    except Exception:
+        return []
+
+
 def _provenance_fields(path: Path) -> tuple[object, object]:
     """upstream_version + corpus_sha256 from the graph / sibling provenance.json."""
     upstream = None
@@ -233,6 +243,7 @@ def scan() -> dict:
                 "kb_version": _kb_version(path),
                 "upstream_version": upstream,
                 "corpus_sha256": corpus,
+                "composed_with": _composed_with(path),
                 "shared_from": None,
             }
         else:
@@ -388,9 +399,9 @@ def _cli(argv: list[str]) -> int:
     cs.add_argument("slug")
     sub.add_parser("validate", help="registry ↔ filesystem consistency (exit 0 = clean)")
     sub.add_parser("agents", help="list all graph-blessed agents")
-    rg = sub.add_parser("register", help="manually bind an agent (by name) to a graph slug")
+    rg = sub.add_parser("register", help="manually bind an agent (by name) to one or more graph slugs")
     rg.add_argument("agent")
-    rg.add_argument("slug")
+    rg.add_argument("slug", nargs="+")
     ur = sub.add_parser("unregister", help="remove a manual agent→graph binding")
     ur.add_argument("agent")
     args = p.parse_args(argv)
@@ -437,14 +448,17 @@ def _cli(argv: list[str]) -> int:
             print(f"register: no agent.md at agents/{args.agent}/", file=sys.stderr)
             return 2
         reg = load()
-        if args.slug not in reg.get("graphs", {}):
-            print(f"register: unknown graph slug {args.slug!r} — run 'list' to see slugs",
-                  file=sys.stderr)
+        unknown = [s for s in args.slug if s not in reg.get("graphs", {})]
+        if unknown:
+            print(f"register: unknown graph slug(s) {', '.join(map(repr, unknown))} — "
+                  f"run 'list' to see slugs", file=sys.stderr)
             return 2
-        reg.setdefault("manual_bindings", {})[args.agent] = [args.slug]
+        # Bind ALL slugs at once: a single-slug register on a multi-graph agent would
+        # REPLACE its bindings and silently drop the primary graph on the next sync.
+        reg.setdefault("manual_bindings", {})[args.agent] = list(args.slug)
         write(reg)        # persist the manual_bindings
         write(scan())     # rescan → re-derives agents WITH manual_bindings applied
-        print(f"[register] {args.agent} → {args.slug} (manual binding; survives rescan)")
+        print(f"[register] {args.agent} → [{', '.join(args.slug)}] (manual binding; survives rescan)")
         return 0
     if args.cmd == "unregister":
         reg = load()

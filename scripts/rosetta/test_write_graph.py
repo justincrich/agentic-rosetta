@@ -100,6 +100,32 @@ def main() -> int:
     c = run("--root", str(root), "--check", "toy")
     check("check-fresh", c.returncode == 0, c.stderr)
 
+    # --composed-with: stamp _meta.composed_with with the composed graph's kb_version
+    comp_root = tmp / "comp-proj"
+    (comp_root / ".git").mkdir(parents=True)
+    comp_docs = comp_root / ".rosetta" / "docs"
+    (comp_docs / "rust").mkdir(parents=True)
+    (comp_docs / "rust" / "fact-graph.json").write_text(
+        json.dumps({"v": {"pkg": "rust", "kb_version": "3.1.0"}}))
+    rcw = run("--root", str(comp_root), "--create", "toy", "--nrra", str(nrra),
+              "--ledger", str(ledger), "--composed-with", "rust")
+    check("composed-with-create", rcw.returncode == 0, f"{rcw.returncode} {rcw.stderr}")
+    comp_dest = comp_docs / "toy" / "fact-graph.json"
+    if comp_dest.is_file():
+        cg = json.loads(comp_dest.read_text())
+        got_cw = (cg.get("_meta") or {}).get("composed_with")
+        check("composed-with-stamped",
+              got_cw == [{"graph": "rust", "kb_version": "3.1.0"}], repr(got_cw))
+        cc = run("--root", str(comp_root), "--check", "toy")
+        check("composed-with-check-green", cc.returncode == 0, cc.stderr)
+    else:
+        check("composed-with-wrote", False, str(comp_dest))
+    # unknown slug fails closed — a claimed composition must be backed by a real graph
+    rcb = run("--root", str(comp_root), "--create", "toy2", "--nrra", str(nrra),
+              "--ledger", str(ledger), "--composed-with", "no-such-graph")
+    check("composed-with-unknown-dies", rcb.returncode != 0 and "no fact-graph" in rcb.stderr,
+          rcb.stderr.strip())
+
     # open ledger rejected
     open_l = dict(CLOSED, censused=2, rows=CLOSED["rows"] + [{
         "id": "t02", "territory": "x", "class": "reference",
