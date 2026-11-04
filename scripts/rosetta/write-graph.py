@@ -6,7 +6,7 @@
   write-graph.py --update <tech> --changeset <f> --ledger <f> [--nrra <f>] [--root DIR]
   write-graph.py --check  <tech> [--root DIR]
   write-graph.py --check-composed <tech> [--root DIR]
-  write-graph.py --propagate <graph> [--borrowers a,b] --confirm [--root DIR]
+  write-graph.py --propagate <graph> [--list] [--borrowers a,b] [--force] --confirm [--root DIR]
   write-graph.py --adopt  <tech> [--root DIR]
   write-graph.py --backfill [TECH] [--all] [--root DIR] [--sources FILE]
 
@@ -28,10 +28,12 @@ judgment); this writer never invents URLs.
 
 --composed-with copies the named graphs' v/w/r/a/x/t facts into this graph's body by
 value (``composed[<slug>]``) and rebuilds ``_meta.composed_with`` from that copy.
---propagate re-copies one original's facts into every borrower that declares it; it asks
-update-all / a named subset / skip and refuses to write without ``--confirm`` when stdin
-is not a terminal. --check-composed fails when a recorded copy is not the original's
-current edition, or when the copy's own facts changed (see versions.composed_freshness).
+--propagate lists every borrower and its editions, then re-copies one original's facts into
+them; it asks update-all / a named subset / skip and refuses to write without ``--confirm``
+when stdin is not a terminal. ``--list`` prints the table and exits without prompting or
+writing; a borrower already current is skipped unless ``--force``.
+--check-composed reports each copy's recorded vs current edition and exits 10 when any is
+not current (0 current, 1 composes nothing, 2 a real error).
 """
 from __future__ import annotations
 
@@ -647,9 +649,16 @@ def cmd_check(tech: str, root: Path) -> int:
 
 # ─────────────────────────── composed sources ───────────────────────────
 
-def cmd_check_composed(tech: str, root: Path) -> int:
-    """Fail when a recorded copy is not the original's current edition, or was edited.
+#: Exit code for "a composed copy is not current" — the repo's established stale code, shared
+#: with ``provenance.py --check-stale`` and ``--propagate``'s divergence report.
+EXIT_COMPOSED_STALE = 10
 
+
+def cmd_check_composed(tech: str, root: Path) -> int:
+    """Report each composed copy's edition; exit 10 when any copy is not current.
+
+    Exit codes: 0 every copy is current, 1 the graph composes nothing, 10 at least one copy is
+    stale / diverged / missing, 2 a real error (no graph, or the schema gate refused).
     Offline: every original is read from this project, never fetched (AC-8)."""
     dest = graph_path(root, tech)
     if not dest.is_file():
@@ -673,7 +682,8 @@ def cmd_check_composed(tech: str, root: Path) -> int:
         if report["status"] != COMPOSED_FRESH:
             problems.append(f"{slug}={report['status']}")
     if problems:
-        _die("composed-version", f"copies not current: {', '.join(problems)}")
+        print(f"[write-graph] STALE {tech}: {', '.join(problems)}", file=sys.stderr)
+        return EXIT_COMPOSED_STALE
     print(f"[write-graph] OK {tech} composed sources current")
     return 0
 
@@ -732,11 +742,18 @@ def cmd_propagate(
     root: Path,
     subset: list[str] | None,
     confirm: bool,
+    list_only: bool = False,
+    force: bool = False,
 ) -> int:
     """Re-copy one original's facts into every borrower that declares it. Never unattended.
 
-    Exit 0 all selected borrowers rewritten (or skip), 1 nobody borrows it, 2 a gate refused,
-    10 at least one selected borrower was left alone because its copy had diverged.
+    ``list_only`` is the side-effect-free ``--list`` verb: print the table, exit 0, never
+    prompt and never write. A borrower already at the original's current edition is skipped
+    unless ``force`` — re-copying it would churn ``v.kb_version`` on an unchanged project.
+
+    Exit 0 every selected borrower handled (refreshed, skipped as current, or skip chosen),
+    1 nobody borrows it, 2 a gate refused, 10 at least one selected borrower was left alone
+    because its copy diverged.
     """
     original_path = graph_path(root, original_slug)
     if not original_path.is_file():
@@ -757,13 +774,15 @@ def cmd_propagate(
     if not borrowers:
         print(f"[write-graph] nobody composes {original_slug!r}; nothing to propagate")
         return 1
+    if list_only:
+        return 0
 
     # AC-5: propagation never runs unattended. The explicit argument is required for a
     # non-interactive run, and the terminal check is what makes that real rather than prose.
     if not confirm and not sys.stdin.isatty():
         _die("confirm",
-             "propagation rewrites other knowledge bases; pass --confirm. A non-interactive "
-             "run cannot ask update-all / a named subset / skip.")
+             "confirmation required: propagation rewrites other knowledge bases; pass "
+             "--confirm. A non-interactive run cannot ask update-all / a named subset / skip.")
 
     if subset:
         selected = parse_borrower_selection(",".join(subset), names)
@@ -785,9 +804,16 @@ def cmd_propagate(
             continue
         if borrower["status"] == COMPOSED_DIVERGED:
             # AC-4: report THAT the copy diverged, never which fact changed.
-            print(f"[write-graph] SKIP {name}: its recorded copy diverged from its own facts "
-                  f"(a local edit changed the copy); refusing to overwrite", file=sys.stderr)
+            print(f"[write-graph] SKIP {name}: copy fingerprint mismatch — its recorded copy "
+                  f"diverged from its own facts (a local edit changed the copy); refusing to "
+                  f"overwrite", file=sys.stderr)
             rc = 10
+            continue
+        if borrower["status"] == COMPOSED_FRESH and not force:
+            # No-op churn guard: re-copying an identical body would still bump the host
+            # edition (1.0.0 → 1.0.1 → 1.0.2 on an unchanged project) for nothing.
+            print(f"[write-graph] SKIP {name}: already current at "
+                  f"{borrower['recorded_kb_version'] or '-'}")
             continue
         dest = graph_path(root, name)
         graph = load_json(dest)
@@ -822,6 +848,12 @@ def main(argv: list[str]) -> int:
                    help="re-copy a graph's facts into every borrower that declares it")
     p.add_argument("--borrowers", metavar="SLUGS",
                    help="comma-separated borrower subset for --propagate (default: all)")
+    p.add_argument("--list", action="store_true",
+                   help="with --propagate: print every borrower and the two editions, exit 0, "
+                        "never prompt and never write")
+    p.add_argument("--force", action="store_true",
+                   help="with --propagate: also rewrite a borrower already current at the "
+                        "original's edition (default: skip it)")
     p.add_argument("--confirm", action="store_true",
                    help="explicit consent for --propagate; required when stdin is not a terminal")
     p.add_argument("--adopt", metavar="TECH")
@@ -871,7 +903,8 @@ def main(argv: list[str]) -> int:
             return cmd_adopt(args.adopt, root)
         if args.propagate:
             subset = [s.strip() for s in (args.borrowers or "").split(",") if s.strip()]
-            return cmd_propagate(args.propagate, root, subset or None, args.confirm)
+            return cmd_propagate(args.propagate, root, subset or None, args.confirm,
+                                 list_only=args.list, force=args.force)
         if args.check_composed:
             return cmd_check_composed(args.check_composed, root)
         if args.backfill is not None:

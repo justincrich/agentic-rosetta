@@ -196,6 +196,11 @@ def main() -> int:
               f"(rc={no_original.returncode})")
         check("compose-missing-original-named",
               "composed-original-missing" in no_original.stderr, no_original.stderr)
+        check("compose-missing-original-names-source",
+              "ghost" in no_original.stderr, no_original.stderr)
+        check("compose-missing-original-names-path",
+              str(root / ".rosetta" / "docs" / "ghost" / "fact-graph.json") in no_original.stderr,
+              no_original.stderr)
 
         # v.pinned (no pinned_date) still fills the @ date half
         pinned_only = tmp / "pinned-only.json"

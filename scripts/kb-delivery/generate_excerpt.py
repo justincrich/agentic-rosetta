@@ -426,9 +426,12 @@ def assert_composed_complete(graph: dict, slug: str) -> None:
         source for source in declared if not _original_graph_path(source).is_file()
     ]
     if missing_original:
+        details = "; ".join(
+            f"{source} -> {_original_graph_path(source)}" for source in missing_original
+        )
         raise ValueError(
-            f"composed-original-missing: {slug} declares {missing_original} but this project "
-            f"has no fact-graph for it"
+            f"composed-original-missing: {slug} declares {details} but no such fact-graph "
+            f"exists in this project"
         )
 
 

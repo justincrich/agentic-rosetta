@@ -193,7 +193,8 @@ def main() -> int:
     # AC-5: non-interactive, no --confirm → refuse, write nothing, but still list borrowers
     r = run_no_tty("--root", str(compose_root), "--propagate", "rust")
     check("propagate-refuses-without-confirm", r.returncode != 0, f"(rc={r.returncode})")
-    check("propagate-names-confirm-check", "confirm" in r.stderr.lower(), r.stderr)
+    check("propagate-names-confirm-check",
+          "confirmation required" in r.stderr, r.stderr)
     check("propagate-lists-borrowers",
           "herdrdev" in r.stdout and "mobile" in r.stdout, r.stdout)
     check("propagate-lists-recorded-and-current",
@@ -210,11 +211,14 @@ def main() -> int:
     check("propagate-subset-left-herdrdev",
           herdrdev_path.read_text() == before_listing)
 
-    # AC-1: the default is update ALL
+    # AC-1: the default is update ALL — every stale borrower moves, and one already current
+    # is reported as current rather than churned.
     r = run("--root", str(compose_root), "--propagate", "rust", "--confirm")
     check("propagate-all-exit0", r.returncode == 0, r.stdout + r.stderr)
     check("propagate-all-names-every-borrower",
-          "propagated rust -> herdrdev" in r.stdout and "propagated rust -> mobile" in r.stdout,
+          f"— 2 borrower(s)" in r.stdout
+          and "propagated rust -> herdrdev" in r.stdout
+          and "SKIP mobile: already current at" in r.stdout,
           r.stdout)
     hg = graph_at("herdrdev")
     check("propagate-all-copied-new-rule",
@@ -224,6 +228,42 @@ def main() -> int:
           hg["_meta"]["composed_with"] == [{"graph": "rust", "kb_version": rust_kb_b}],
           repr(hg["_meta"].get("composed_with")))
     check("propagate-all-bumped-host-edition", hg["v"]["kb_version"] != "1.0.0", repr(hg["v"]))
+
+    # AC-1's named action: `--propagate <slug> --list` is side-effect free — no prompt, no write
+    before_list = herdrdev_path.read_text()
+    mobile_before_list = mobile_path.read_text()
+    r = run_no_tty("--root", str(compose_root), "--propagate", "rust", "--list")
+    check("propagate-list-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("propagate-list-shows-borrowers",
+          "herdrdev" in r.stdout and "mobile" in r.stdout, r.stdout)
+    check("propagate-list-shows-both-editions",
+          f"recorded={rust_kb_b}" in r.stdout and f"current={rust_kb_b}" in r.stdout, r.stdout)
+    check("propagate-list-does-not-prompt", "Update all" not in r.stdout, r.stdout)
+    check("propagate-list-wrote-nothing",
+          herdrdev_path.read_text() == before_list
+          and mobile_path.read_text() == mobile_before_list)
+
+    # no-op churn guard: re-propagating a project that is already current skips and does not bump
+    hg_before = graph_at("herdrdev")["v"]["kb_version"]
+    r = run("--root", str(compose_root), "--propagate", "rust", "--confirm")
+    check("propagate-fresh-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("propagate-fresh-skips",
+          "SKIP herdrdev: already current at" in r.stdout
+          and "SKIP mobile: already current at" in r.stdout, r.stdout)
+    check("propagate-fresh-no-bump",
+          graph_at("herdrdev")["v"]["kb_version"] == hg_before
+          and graph_at("mobile")["v"]["kb_version"] == hg_before,
+          f"{hg_before} -> {graph_at('herdrdev')['v']['kb_version']}")
+    check("propagate-fresh-wrote-nothing", herdrdev_path.read_text() == before_list)
+
+    # --force gives a deliberate path past the guard
+    r = run("--root", str(compose_root), "--propagate", "rust", "--confirm", "--force",
+            "--borrowers", "mobile")
+    check("propagate-force-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("propagate-force-rewrote",
+          "propagated rust -> mobile" in r.stdout
+          and graph_at("mobile")["v"]["kb_version"] != hg_before,
+          f"{r.stdout} / {graph_at('mobile')['v']['kb_version']}")
 
     # AC-6: the refresh ran through the writer, so the stamp is current; a hand edit is not
     c = run("--root", str(compose_root), "--check", "herdrdev")
@@ -249,14 +289,19 @@ def main() -> int:
     r = run("--root", str(compose_root), "--update", "rust", "--changeset", str(rust_step3),
             "--ledger", str(ledger), "--nrra", str(nrra))
     check("compose-rust-step3", r.returncode == 0, r.stderr)
+    rust_kb_c = kb_of("rust")
     r = run("--root", str(compose_root), "--propagate", "rust", "--confirm")
     check("propagate-diverged-exit10", r.returncode == 10, f"(rc={r.returncode}) {r.stdout}")
     check("propagate-diverged-reported", "diverged" in (r.stdout + r.stderr), r.stdout + r.stderr)
+    check("propagate-diverged-fingerprint-wording",
+          "copy fingerprint mismatch" in r.stderr, r.stderr)
     check("propagate-diverged-does-not-name-the-fact",
           "use_question_mark" not in (r.stdout + r.stderr), r.stdout + r.stderr)
     check("propagate-diverged-wrote-nothing", herdrdev_path.read_text() == hand_bytes)
     check("propagate-per-borrower-outcome",
-          "propagated rust -> mobile" in r.stdout, r.stdout)
+          "propagated rust -> mobile" in r.stdout
+          and graph_at("mobile")["composed"]["rust"]["kb_version"] == rust_kb_c,
+          r.stdout)
 
     # AC-8: a fresh copy that is merely behind fails the composed-version check as stale
     rust_step4 = tmp / "rust-step4.json"
@@ -267,10 +312,25 @@ def main() -> int:
     r = run("--root", str(compose_root), "--update", "rust", "--changeset", str(rust_step4),
             "--ledger", str(ledger), "--nrra", str(nrra))
     check("compose-rust-step4", r.returncode == 0, r.stderr)
+    rust_kb_d = kb_of("rust")
     cc = run("--root", str(compose_root), "--check-composed", "mobile")
-    check("check-composed-stale-fails", cc.returncode != 0, f"(rc={cc.returncode})")
-    check("check-composed-names-composed-version", "composed-version" in cc.stderr, cc.stderr)
+    check("check-composed-stale-exit10", cc.returncode == 10, f"(rc={cc.returncode})")
+    check("check-composed-reports-recorded-and-current",
+          f"recorded={rust_kb_c}" in cc.stdout and f"current={rust_kb_d}" in cc.stdout,
+          cc.stdout)
     check("check-composed-reports-stale", "stale" in (cc.stdout + cc.stderr), cc.stdout + cc.stderr)
+    check("check-composed-stale-line", "[write-graph] STALE" in cc.stderr, cc.stderr)
+
+    # the same code covers a diverged copy (not current, and not a schema error)
+    cc = run("--root", str(compose_root), "--check-composed", "herdrdev")
+    check("check-composed-diverged-exit10", cc.returncode == 10, f"(rc={cc.returncode})")
+    check("check-composed-diverged-status", "diverged" in cc.stdout, cc.stdout)
+
+    # a real error is not the stale code: no graph at all → 2; nothing composed → 1
+    cc = run("--root", str(compose_root), "--check-composed", "no-such-graph")
+    check("check-composed-missing-graph-exit2", cc.returncode == 2, f"(rc={cc.returncode})")
+    cc = run("--root", str(compose_root), "--check-composed", "rust")
+    check("check-composed-nothing-exit1", cc.returncode == 1, f"(rc={cc.returncode})")
 
     # AC-3: a declaration whose original left the project fails closed, writing nothing
     absent_root = tmp / "absent-proj"
@@ -298,7 +358,7 @@ def main() -> int:
     check("absent-original-names-the-graph", "rust" in r.stderr, r.stderr)
     check("absent-original-wrote-nothing", orphan_path.read_text() == orphan_before)
     cc = run("--root", str(absent_root), "--check-composed", "orphan")
-    check("absent-original-check-composed-fails", cc.returncode != 0, f"(rc={cc.returncode})")
+    check("absent-original-check-composed-exit10", cc.returncode == 10, f"(rc={cc.returncode})")
     check("absent-original-check-names-missing", "missing-original" in (cc.stdout + cc.stderr),
           cc.stdout + cc.stderr)
 
@@ -812,7 +872,8 @@ def main() -> int:
             print("FAIL:", f, file=sys.stderr)
         return 1
     print("ok — write-graph.py create/apply-nrra/update/check + open/mismatch/forged rejected + "
-          "composition copied by value, listed, confirm-gated, fingerprint-guarded")
+          "composition copied by value, listed (--propagate --list), confirm-gated, "
+          "fingerprint-guarded, fresh copies skipped, --check-composed exits 10 when stale")
     return 0
 
 

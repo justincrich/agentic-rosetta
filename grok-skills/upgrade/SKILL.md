@@ -523,10 +523,12 @@ After an upgrade of an original lands (`--update` / `--apply-nrra` on, say, `rus
 
    ```bash
    python3 "$PLUGIN/scripts/rosetta/registry.py" --root "$PROJECT" borrowers <slug>
+   python3 "$PLUGIN/scripts/rosetta/write-graph.py" --root "$PROJECT" --propagate <slug> --list
    ```
 
    Each line shows the copy's `recorded=` edition and the original's `current=` edition, plus
-   `fresh` / `stale` / `diverged` / `missing-copy`. Exit 1 when nobody borrows it.
+   `fresh` / `stale` / `diverged` / `missing-copy`. Both commands are read-only: `--list` never
+   prompts and never writes (`registry.py borrowers` exits 1 when nobody borrows it).
 
 2. **Ask the person** — update all (the default), a named subset, or skip. Never propagate on
    your own judgment.
@@ -535,19 +537,32 @@ After an upgrade of an original lands (`--update` / `--apply-nrra` on, say, `rus
 
    ```bash
    python3 "$PLUGIN/scripts/rosetta/write-graph.py" --root "$PROJECT" \
-       --propagate <slug> --confirm [--borrowers name-a,name-b]
+       --propagate <slug> --confirm [--borrowers name-a,name-b] [--force]
    ```
 
    Without `--confirm`, a non-interactive run exits non-zero and writes nothing. On a terminal
-   it asks update-all / subset / skip itself, defaulting to update all.
+   it asks update-all / subset / skip itself, defaulting to update all. A borrower already at
+   the original's edition is skipped (`SKIP <name>: already current at <edition>`) so an
+   unchanged project does not churn `kb_version`; `--force` is the deliberate way past that.
 
-4. Verify and redistribute: `write-graph.py --check-composed <borrower>` (offline: fails when
-   a recorded edition is not the original's current one, or when a copy's own facts changed),
-   then `/rosetta:sync`.
+4. Verify and redistribute: `write-graph.py --check-composed <borrower>`, then `/rosetta:sync`.
 
-Exit codes for `--propagate`: `0` selected copies refreshed (or skip), `1` nobody borrows it,
-`2` a gate refused, `10` at least one selected borrower was left alone because **its copy
-diverged** — report it to the person and let them resolve it; never force the overwrite.
+Exit codes for `--propagate`: `0` every selected borrower handled (refreshed, or skipped as
+current, or skip chosen), `1` nobody borrows it, `2` a gate refused, `10` at least one selected
+borrower was left alone because **its copy diverged** (`copy fingerprint mismatch`) — report it
+to the person and let them resolve it; never force the overwrite.
+
+Exit codes for `--check-composed`, which is offline (it reads the originals from this project):
+
+| Code | Meaning |
+|---|---|
+| `0` | every composed copy is current — recorded edition equals the original's `v.kb_version` and the copy's facts still match its fingerprint |
+| `1` | the graph composes nothing, so there is nothing to compare |
+| `10` | at least one copy is not current (`stale`, `diverged`, `missing-copy`, `missing-original`); the recorded and current editions are printed, and a `[write-graph] STALE` line goes to stderr |
+| `2` | a real error — no graph at the path, or the schema gate refused |
+
+`10` is the repo's established stale code (`provenance.py --check-stale`, and `--propagate`'s
+divergence report); do not treat it as a crash.
 
 ## Usage
 
@@ -568,6 +583,7 @@ diverged** — report it to the person and let them resolve it; never force the 
 
 # Propagation after an upgrade of a composed original (asks the person; --confirm is required)
 python3 scripts/rosetta/registry.py --root . borrowers rust
+python3 scripts/rosetta/write-graph.py --root . --propagate rust --list
 python3 scripts/rosetta/write-graph.py --root . --propagate rust --confirm
 python3 scripts/rosetta/write-graph.py --root . --check-composed herdrdev
 ```
