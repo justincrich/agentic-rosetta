@@ -2,7 +2,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { zodToJsonSchema } from "./zod-json-schema.ts";
+import { bundleWithDefs } from "./json-schema-defs.ts";
 import {
   CallerIdentity,
   CorpusUnit,
@@ -35,15 +35,9 @@ const schemas = {
   ProvenanceManifest,
 } as const;
 
-const bundle: Record<string, unknown> = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://agentic-rosetta.dev/schema/pipeline.json",
-  title: "agentic-rosetta pipeline contract",
-  generatedFrom: "engine/src/contract.ts",
-};
-for (const [name, schema] of Object.entries(schemas)) {
-  bundle[name] = zodToJsonSchema(schema, name);
-}
+// One definition per type, referenced by $ref. Inlining every shared object is what made
+// this artifact 1723 lines for ~250 lines of distinct content.
+const bundle = bundleWithDefs(schemas);
 
 const dest = resolve(outDir, "pipeline.schema.json");
 writeFileSync(dest, JSON.stringify(bundle, null, 2) + "\n");
