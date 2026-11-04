@@ -5,7 +5,7 @@ registry, embeds renders into `agent.md`, and materializes the Grok pack.
 Root contract: [`../AGENTS.md`](../AGENTS.md). Inventory: [`README.md`](README.md).
 
 Do **not** edit `grok-skills/` by hand. Do **not** add a `~/Projects/brain`
-special case to any `discover_repo_root()`.
+special case to `resolve.project_root()`.
 
 ## What this tree owns
 
@@ -13,7 +13,14 @@ special case to any `discover_repo_root()`.
 |---|---|
 | `rosetta/write-graph.py` | **Only** writer of `fact-graph.json` |
 | `rosetta/registry.py` | Exhaustive per-project graph + consumer index |
-| `rosetta/provenance.py` | Source pins, staleness probe, version bump helpers |
+| `rosetta/factgraph.py` | The fact-graph **shape**: pydantic model + the write gate |
+| `rosetta/naming.py` | Agent name → (stem, role), agent → graph slug, graph path → slug |
+| `rosetta/resolve.py` | Which project a run is about (5-tier precedence) |
+| `rosetta/versions.py` | Semver parse/increment + the `kb_version` bump rule |
+| `rosetta/locators.py` | What counts as a URL, where it points, the one TLD table |
+| `rosetta/jsonfile.py` | Atomic JSON/text write, strict read, canonical digest |
+| `rosetta/provenance.py` | **Facade** over the three above; pins, staleness, companion files |
+| `rosetta/roots.py` | Where the KB goes (deliberately does NOT walk up — see `resolve.py`) |
 | `rosetta/version_label.py` | Shared `kb_version` label |
 | `kb-delivery/embed-graph.sh` | **Only** writer of the `rosetta-kb` region |
 | `kb-delivery/generate_excerpt.py` | Graph → embeddable render |
@@ -22,14 +29,25 @@ special case to any `discover_repo_root()`.
 | `assert-no-drift.sh` | Skill-copy + named-script + Grok-pack gate |
 | `testdata/` | Real committed fixtures for selftests |
 
+**Where a new decision goes.** If it has one right answer and no I/O, it belongs in the
+matching pure module above — not in a new file beside them, and not inline in
+`provenance.py` or `write-graph.py`. `../docs/code-quality/profile.md` holds the full
+table of which module owns which decision.
+
 `assets/rosetta_config.py` (repo root, not this folder) is the storage
 resolver. After editing it, run `./sync-assets.sh` from the repo root — do
 not hand-copy into `skills/*/assets/`.
 
+**pydantic is a dependency of this tree, and only this tree.** `factgraph.py` imports it
+(declared in `../pyproject.toml`). `assets/` and `kb-delivery/` stay stdlib-only because
+they ship as bare `.py` into harness skill directories, where nothing runs `pip`. A
+missing pydantic fails closed with the install command; never add a silent fallback that
+validates less.
+
 ## Rules
 
 1. **`--root` / `$ROSETTA_PROJECT` always win.**
-   `discover_repo_root()` order (do not add a brain branch):
+   `resolve.project_root()` order (do not add a brain branch):
 
    | What you pass | What you get |
    |---|---|
@@ -42,6 +60,10 @@ not hand-copy into `skills/*/assets/`.
    **the plugin**, which has no `agents/` and is the wrong place to write a
    KB. Always pass `--root` / `$ROSETTA_PROJECT` unless you are already cwd’d
    in the consumer.
+
+   `roots.choose()` is a **different question** and must not be merged into it: it answers
+   "where does the KB go" and deliberately does not walk up, because a shell standing in a
+   repo is already the answer it wants.
 2. **`write-graph.py` is the only mutator of `fact-graph.json`.** Gate before
    `--create` / `--update`: ledger closed (closed + named-gap rows ==
    censused), `run_id` matches the NRRA, `decoder_ring_hash` present on both.
@@ -57,9 +79,15 @@ not hand-copy into `skills/*/assets/`.
    value — those go to `fact-sources.json`.
 4. **Registry discovery is exhaustive.** Any `fact-graph.json` outside
    excluded dirs enters the index. The **only** hand tables are
-   `AGENT_PREFIX_TO_SLUG` (name ≠ slug) and `SHARED_GRAPHS` (no graph of
-   their own). Matching stem==slug domains need no entry.
+   `naming.AGENT_PREFIX_TO_SLUG` (name ≠ slug) and `naming.SHARED_GRAPHS` (no
+   graph of their own). Matching stem==slug domains need no entry.
    `manual_bindings` survive a rescan.
+
+   There is a **second, deliberately separate** table:
+   `naming.LEGACY_DOCS_DOMAIN_BY_PREFIX`, for graphs under the legacy `docs/<domain>/`
+   layout. It is a superset and is NOT interchangeable with `AGENT_PREFIX_TO_SLUG` —
+   merging them would point one consumer at the other's directory. Both live in one
+   module; neither is a duplicate of the other.
 5. **`provenance.py --check-stale` exit codes:** `0` current, `10` stale,
    `1` undeterminable (missing file, legacy pin, `ls-remote` failed). Do
    **not** treat `1` as current. Source identity is never written into
@@ -84,6 +112,12 @@ From the repo root, the scripts that cover this tree:
 python3 scripts/rosetta/test_registry.py
 python3 scripts/rosetta/test_write_graph.py
 python3 scripts/rosetta/test_provenance.py
+python3 scripts/rosetta/test_factgraph.py
+python3 scripts/rosetta/test_naming.py
+python3 scripts/rosetta/test_resolve.py
+python3 scripts/rosetta/test_versions.py
+python3 scripts/rosetta/test_locators.py
+python3 scripts/rosetta/test_jsonfile.py
 python3 scripts/kb-delivery/test_assign.py
 python3 scripts/kb-delivery/test_generate_excerpt.py
 python3 scripts/kb-delivery/test_multigraph.py
@@ -93,3 +127,14 @@ python3 assets/rosetta_config.py --selftest
 ./sync-assets.sh --check
 python3 scripts/materialize-grok-skills.py --check
 ```
+
+**The shared modules each have their own test, and those tests are the contract.** When you
+extract a decision into `naming`/`resolve`/`versions`/`locators`/`jsonfile`/`factgraph`, pin
+the behaviour it replaces with concrete expected values first — including the deliberately
+permissive branches (a non-dict `w` node, a null `t`, a section given as `[]`). Several of
+those are pinned as *accepted* on purpose; tightening one is a behaviour change and needs its
+own commit, not a refactor.
+
+`scripts/kb-delivery/test-embed-graph.sh` copies **every** `.py` from `scripts/rosetta` into
+its temp fixture. Do not reintroduce a hand-written module list there: it silently breaks the
+moment a new module is added, and the failure reads as a bug in the code under test.

@@ -14,7 +14,14 @@ Do **not** edit `skills/` or `grok-skills/` from here. Do **not** write
 - `src/phases/` — `[A0]`–`[A6]`. Keep one concern per file.
 - `src/prompts/` — worker constitution, one file per territory class.
 - `src/worker.ts` / `src/resolve-caller.ts` — ACP inheritance of harness + model.
+- `src/json-schema-defs.ts` — emits the JSON Schema bundle with `$defs`/`$ref`.
 - `tests/` — Bun tests against real fixtures and (for integration) a real ACP path.
+
+**`scripts/rosetta/schema/pipeline.schema.json` is GENERATED.** Do not hand-edit it. It comes
+from `bun run contract:json`, which converts `contract.ts` through `json-schema-defs.ts` — that
+module exists because converting one schema at a time inlined every shared object, which made a
+~250-line contract into a 1723-line file. If you add a shared shape, add it to `contract.ts`
+only; the `$defs` pass dedupes it by structural equality automatically.
 
 ## Rules
 

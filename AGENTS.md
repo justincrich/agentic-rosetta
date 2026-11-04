@@ -45,10 +45,16 @@ in skill prose.
 
 | Artifact | Only writer | Gate |
 |---|---|---|
-| `fact-graph.json` | `scripts/rosetta/write-graph.py` | ledger closed + matching `run_id` + `decoder_ring_hash`; `--create` refuses if the graph exists |
+| `fact-graph.json` | `scripts/rosetta/write-graph.py` | schema gate in `scripts/rosetta/factgraph.py`; ledger closed + matching `run_id` + `decoder_ring_hash`; `--create` refuses if the graph exists |
 | Agent `<!-- rosetta-kb -->` block | `scripts/kb-delivery/embed-graph.sh` (via `generate_excerpt.py`) | `--check` must match the render; prose outside the sentinels is never touched |
 | Storage path | `assets/rosetta_config.py` | CODE, not skill prose. Three *locations* kept byte-identical by `./sync-assets.sh`: repo `assets/`, each `skills/*/assets/` copy, and `$ROSETTA_HOME/bin/` |
 | Research facts (NRRA + ledger) | `engine/` | fail closed; no serial crawl |
+| `scripts/rosetta/schema/pipeline.schema.json` | `engine/` (`bun run contract:json`) | generated; never hand-edited |
+
+**Shared decisions have one home.** A path, a version bump, a slug, a URL verdict, or a
+file shape gets exactly one module under `scripts/rosetta/` — never a second copy beside
+it. Which module owns which decision: [`docs/code-quality/profile.md`](docs/code-quality/profile.md).
+The most recent copies of these decisions had already drifted apart in behaviour.
 
 ## Iron rules
 
@@ -140,6 +146,12 @@ python3 assets/rosetta_config.py --selftest
 python3 scripts/rosetta/test_registry.py
 python3 scripts/rosetta/test_write_graph.py
 python3 scripts/rosetta/test_provenance.py
+python3 scripts/rosetta/test_factgraph.py
+python3 scripts/rosetta/test_naming.py
+python3 scripts/rosetta/test_resolve.py
+python3 scripts/rosetta/test_versions.py
+python3 scripts/rosetta/test_locators.py
+python3 scripts/rosetta/test_jsonfile.py
 python3 scripts/kb-delivery/test_assign.py
 python3 scripts/kb-delivery/test_generate_excerpt.py
 python3 scripts/kb-delivery/test_multigraph.py
@@ -147,6 +159,10 @@ bash scripts/kb-delivery/test-embed-graph.sh
 python3 scripts/test_materialize_grok_skills.py
 ( cd engine && bun test && bun run typecheck )
 ```
+
+`bun test` has **3 known-failing** cases at the baseline (`real Grok ACP worker lifecycle`;
+they spawn a real ACP child and are environmental, not code regressions). Everything else must
+be green. A new failure blamed on "pre-existing" needs the baseline re-run to prove it.
 
 `assert-no-drift.sh` *without* `--scripts-only` also compares
 `~/.claude/skills`, `~/.codex/skills`, and `~/.config/opencode/skills` to
