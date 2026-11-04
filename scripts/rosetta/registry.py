@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from naming import slug_for_agent, slug_from_graph_path, split_agent_name
@@ -38,18 +39,41 @@ from resolve import project_root as discover_repo_root
 from version_label import format_kb_version
 
 
+@dataclass(frozen=True)
+class Paths:
+    """Everything reached from the target project root, derived in one place.
+
+    Replaces three independently-rebound globals (_paths.root, _paths.registry,
+    _paths.agents). One object, one rebinding point, so the three can no longer disagree
+    about which project a scan is about.
+    """
+
+    root: Path
+
+    @property
+    def registry(self) -> Path:
+        return self.root / ".rosetta" / "registry.json"
+
+    @property
+    def agents(self) -> Path:
+        return self.root / "agents"
+
+
+_paths = Paths(discover_repo_root())
+
+
+def repo_root() -> Path:
+    """The project this registry is about."""
+    return _paths.root
+
+
 def set_repo_root(path: str | Path) -> Path:
-    """Rebind module-level paths. Used by tests and --root."""
-    global REPO_ROOT, REGISTRY_PATH, AGENTS_DIR
-    REPO_ROOT = Path(path).expanduser().resolve()
-    REGISTRY_PATH = REPO_ROOT / ".rosetta" / "registry.json"
-    AGENTS_DIR = REPO_ROOT / "agents"
-    return REPO_ROOT
+    """Rebind the target project. Used by tests and ``--root``."""
+    global _paths
+    _paths = Paths(Path(path).expanduser().resolve())
+    return _paths.root
 
 
-REPO_ROOT = discover_repo_root()
-REGISTRY_PATH = REPO_ROOT / ".rosetta" / "registry.json"
-AGENTS_DIR = REPO_ROOT / "agents"
 REGISTRY_VERSION = 1
 
 # Dirs that never hold a canonical fact-graph.json — pruned during the walk.
@@ -62,7 +86,7 @@ EXCLUDE_DIR_NAMES = {
 
 def _iter_fact_graphs():
     """Yield (absolute_path, slug) for every fact-graph.json in the repo (exhaustive)."""
-    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+    for dirpath, dirnames, filenames in os.walk(_paths.root):
         # prune excluded dirs in-place so os.walk doesn't descend
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR_NAMES]
         for fn in filenames:
@@ -80,7 +104,7 @@ def _split_name_role(name: str) -> tuple[str, str]:
 
 def _slug_for_graph(path: Path) -> str | None:
     """Delegating alias: the three graph layouts are described in ``naming``."""
-    return slug_from_graph_path(path, REPO_ROOT)
+    return slug_from_graph_path(path, _paths.root)
 
 
 def _slug_for_agent(name: str, known_slugs: set[str] | None = None) -> str | None:
@@ -177,16 +201,16 @@ def scan() -> dict:
     agents from names, manual bindings are applied on top (override or add)."""
     # preserve manual_bindings from the prior registry (survives rescan)
     manual: dict[str, list[str]] = {}
-    if REGISTRY_PATH.is_file():
+    if _paths.registry.is_file():
         try:
-            manual = json.loads(REGISTRY_PATH.read_text()).get("manual_bindings", {})
+            manual = json.loads(_paths.registry.read_text()).get("manual_bindings", {})
         except Exception:
             manual = {}
 
     graphs: dict[str, dict] = {}
     # 1. discover every graph file (dedup by slug — e.g. morph-cloud's 3 pre-consolidation copies)
     for path, slug in _iter_fact_graphs():
-        rel = str(path.relative_to(REPO_ROOT))
+        rel = str(path.relative_to(_paths.root))
         if slug not in graphs:
             graphs[slug] = _graph_record(path, rel)
         else:
@@ -198,8 +222,8 @@ def scan() -> dict:
     known = set(graphs)
     for slug in graphs:
         graphs[slug]["consumers"] = []
-    if AGENTS_DIR.is_dir():
-        for agent_dir in sorted(AGENTS_DIR.iterdir()):
+    if _paths.agents.is_dir():
+        for agent_dir in sorted(_paths.agents.iterdir()):
             if not agent_dir.is_dir() or not (agent_dir / "agent.md").is_file():
                 continue
             name = agent_dir.name
@@ -226,19 +250,19 @@ def scan() -> dict:
 def write(registry: dict | None = None) -> Path:
     """Scan (if needed) and write the registry to disk. Returns the path."""
     registry = registry or scan()
-    REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = REGISTRY_PATH.with_suffix(".json.tmp")
+    _paths.registry.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _paths.registry.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(registry, indent=2, sort_keys=True) + "\n")
-    tmp.replace(REGISTRY_PATH)
-    return REGISTRY_PATH
+    tmp.replace(_paths.registry)
+    return _paths.registry
 
 
 def load(force_rescan: bool = False) -> dict:
     """Load the registry; auto-scan if missing or stale-flagged."""
-    if force_rescan or not REGISTRY_PATH.is_file():
+    if force_rescan or not _paths.registry.is_file():
         return scan()
     try:
-        return json.loads(REGISTRY_PATH.read_text())
+        return json.loads(_paths.registry.read_text())
     except Exception:
         return scan()
 
@@ -302,19 +326,19 @@ def validate() -> dict:
 
     # every registered graph file must actually exist
     for slug, g in reg.get("graphs", {}).items():
-        p = REPO_ROOT / g.get("path", "")
+        p = _paths.root / g.get("path", "")
         if not p.is_file():
             errors.append(f"registered path missing: {slug} -> {g.get('path')}")
 
     # every listed consumer must have an agent.md
     for slug, g in reg.get("graphs", {}).items():
         for name in g.get("consumers", []):
-            if not (AGENTS_DIR / name / "agent.md").is_file():
+            if not (_paths.agents / name / "agent.md").is_file():
                 errors.append(f"consumer agent missing: {slug} -> {name}")
 
     # stored kb_version label vs recomputed from the graph bytes
     for slug, g in reg.get("graphs", {}).items():
-        p = REPO_ROOT / g.get("path", "")
+        p = _paths.root / g.get("path", "")
         if not p.is_file():
             continue
         stored = g.get("kb_version")
@@ -350,7 +374,7 @@ def _cli(argv: list[str]) -> int:
     args = p.parse_args(argv)
     if args.root:
         set_repo_root(args.root)
-        os.environ["ROSETTA_PROJECT"] = str(REPO_ROOT)
+        os.environ["ROSETTA_PROJECT"] = str(_paths.root)
 
     if args.cmd == "scan":
         path = write()
@@ -387,7 +411,7 @@ def _cli(argv: list[str]) -> int:
         return 1
     if args.cmd == "register":
         # fail-closed: agent.md must exist; slug must be a known graph
-        if not (AGENTS_DIR / args.agent / "agent.md").is_file():
+        if not (_paths.agents / args.agent / "agent.md").is_file():
             print(f"register: no agent.md at agents/{args.agent}/", file=sys.stderr)
             return 2
         reg = load()

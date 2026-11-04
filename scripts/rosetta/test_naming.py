@@ -153,7 +153,7 @@ def main() -> int:
 
 def _registry_slug(rel: str) -> str | None:
     """Call registry's version against a synthetic path under ITS OWN repo root."""
-    return R._slug_for_graph(R.REPO_ROOT / rel)
+    return R._slug_for_graph(R.repo_root() / rel)
 
 
 if __name__ == "__main__":

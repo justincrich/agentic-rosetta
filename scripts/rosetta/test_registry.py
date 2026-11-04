@@ -154,9 +154,9 @@ def main() -> int:
 
         # No path in the written registry escapes the target project.
         for slug, g in R.load()["graphs"].items():
-            p = R.REPO_ROOT / g["path"]
+            p = R.repo_root() / g["path"]
             check(f"path-inside-target-{slug}",
-                  p.resolve() == p.resolve() and str(p).startswith(str(R.REPO_ROOT)),
+                  p.resolve() == p.resolve() and str(p).startswith(str(R.repo_root())),
                   f"({p})")
 
         # Optional live-fleet floor (the original brain-shaped check).

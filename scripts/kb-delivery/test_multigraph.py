@@ -27,7 +27,7 @@ def _items_for(slugs: list[str], role: str) -> list[tuple[dict, bytes, str]]:
     reg = R.load()
     out = []
     for slug in slugs:
-        path = R.REPO_ROOT / reg["graphs"][slug]["path"]
+        path = R.repo_root() / reg["graphs"][slug]["path"]
         raw = path.read_bytes()
         out.append((json.loads(raw), raw, slug))
     return out
