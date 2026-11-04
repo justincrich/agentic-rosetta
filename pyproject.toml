@@ -1,0 +1,28 @@
+[project]
+name = "agentic-rosetta"
+version = "0.4.5"
+description = "Agentic Rosetta — Rosetta KB machinery (writers, registry, delivery)"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6,<3",
+]
+
+[project.optional-dependencies]
+# The delivery renderer and the storage resolver stay stdlib-only on purpose: both ship
+# into harness skill directories as bare .py files, where nothing runs pip.
+dev = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# This repo is a plugin, not an importable distribution: the entry points are scripts
+# invoked by path (write-graph.py has a hyphen and cannot be imported by name). Declaring
+# no packages keeps `pip install -e .` a dependency install and nothing more.
+packages = []
+
+[tool.pytest.ini_options]
+# The test_*.py files are plain `main()` selftests runnable as scripts; pytest collects
+# them only as a convenience.
+testpaths = ["scripts"]

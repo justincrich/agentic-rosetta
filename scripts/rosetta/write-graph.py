@@ -44,11 +44,11 @@ try:
 except ImportError:
     R = None  # type: ignore
 
+import factgraph
 import provenance as P
 import roots as RT
 
 WRITER = "write-graph.py@1.1.0"
-R_VERDICTS = {"r", "nr", "REJECT"}
 
 
 class GateError(SystemExit):
@@ -130,63 +130,16 @@ def assert_ids_match(ledger: dict, nrra_meta: dict) -> None:
 
 
 def validate_graph(graph: dict) -> None:
-    if not isinstance(graph, dict):
-        _die("schema", "graph is not an object")
-    raw = json.dumps(graph)
-    if "rosetta-kb:end" in raw:
-        _die("schema", "graph contains literal rosetta-kb:end (would poison embed)")
-    v = graph.get("v")
-    if not isinstance(v, dict):
-        _die("schema", "v missing")
-    if not v.get("kb_version"):
-        _die("schema", "v needs kb_version")
-    if v.get("version") == "0.0.0":
-        _die("schema", 'v.version must not be the fake "0.0.0"')
-    w = graph.get("w") or {}
-    if not isinstance(w, dict):
-        _die("schema", "w must be an object")
-    for name, node in w.items():
-        if isinstance(node, dict) and not (node.get("t") and node.get("i")):
-            _die("schema", f"w.{name} needs t + i")
-    r = graph.get("r") or {}
-    if not isinstance(r, dict):
-        _die("schema", "r must be an object")
-    for k, val in r.items():
-        if k.endswith("_note"):
-            continue
-        verdict = val.get("verdict") if isinstance(val, dict) else val
-        if verdict not in R_VERDICTS:
-            _die("schema", f"r.{k} verdict {verdict!r} not in {sorted(R_VERDICTS)}")
-    x = graph.get("x") or {}
-    if not isinstance(x, dict):
-        _die("schema", "x must be an object")
-    for k, val in x.items():
-        if isinstance(val, dict):
-            if not (val.get("wrong") or val.get("right") or val.get("to")):
-                _die("schema", f"x.{k} pair incomplete")
-        elif not isinstance(val, str) or not val:
-            _die("schema", f"x.{k} empty")
-    a = graph.get("a") or {}
-    if not isinstance(a, dict):
-        _die("schema", "a must be an object")
-    for k, val in a.items():
-        if not isinstance(val, str) or not val.strip():
-            _die("schema", f"a.{k} must be a non-empty string")
-    t = graph.get("t")
-    if t is None:
-        graph["t"] = {}
-        t = graph["t"]
-    if not isinstance(t, dict):
-        _die("schema", "t must be an object")
-    for k, val in t.items():
-        if isinstance(val, str):
-            if not val.strip():
-                _die("schema", f"t.{k} must be a non-empty string")
-        elif isinstance(val, dict):
-            if not val:
-                _die("schema", f"t.{k} empty")
-        else:
-            _die("schema", f"t.{k} must be a string or object")
+    """The write gate. Owned by factgraph.py; translated to this CLI's GateError.
+
+    Kept as a named function rather than inlined because ``--check``, ``--adopt``,
+    ``--apply-nrra`` and ``--update`` all catch ``GateError`` to warn-and-continue on a
+    legacy graph. That control flow is this script's, not the schema's.
+    """
+    try:
+        factgraph.validate(graph)
+    except factgraph.SchemaError as exc:
+        raise GateError(exc.check, exc.detail) from exc
 
 
 def seed_from_nrra(nrra_text: str, tech: str) -> dict:

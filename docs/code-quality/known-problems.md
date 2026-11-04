@@ -14,6 +14,7 @@ them, so the next run does not have to re-diagnose.
 | 5 | `assets/rosetta_config.py` ships 220 lines of `selftest()` inside the artifact copied to 14 locations. | `assets/rosetta_config.py` |
 | 6 | `sanitize_url` returns early for any IP literal, so `http://127.0.0.1/x` and other private addresses are accepted as "fetchable" URLs. Hostname checks (`localhost`, `::1`) do run, so the two paths disagree. | `scripts/rosetta/locators.py` |
 | 7 | `sanitize_url` strips trailing `)` as punctuation, so a URL whose path genuinely ends in a paren (`.../a(b)`) is silently truncated to `.../a(b`. | `scripts/rosetta/locators.py` |
+| 8 | The graph gate coerces a section given as an empty list (`"w": []`) to `{}` instead of rejecting it, because `graph.get("w") or {}` treats `[]` as falsy. A non-empty list is rejected correctly. Preserved during extraction; tightening it is a behaviour change. | `scripts/rosetta/factgraph.py` |
 
 ## Fixed in the 2026-11-04 run
 
