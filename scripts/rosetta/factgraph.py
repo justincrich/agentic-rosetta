@@ -32,12 +32,27 @@ THE SENTINEL RULE
   extracts the embedded region by sentinel, so a smuggled sentinel truncates the agent
   body and wedges the drift guard into a re-embed loop. This is checked on the whole
   serialised graph, because the sentinel can hide in any section.
+
+COMPOSITION IS COPY-BY-VALUE
+  A graph may borrow another graph's ``v/w/r/a/x/t`` facts into its BODY under
+  ``composed[<slug>]``. The declaration in ``_meta.composed_with`` is not the delivery
+  mechanism any more: ``_meta`` is stripped from every render, so a declaration alone
+  reaches no agent. ``compose_by_value()`` takes the copy, and ``sync_composed_with()``
+  rebuilds the declaration from the copy, so the two can never disagree.
+
+  Because the container is part of the body, the write gate sees the borrowed facts and
+  ``jsonfile.body_digest`` covers them — a hand-edited borrowed fact fails ``--check``.
+  The edition/fingerprint DECISION lives in ``versions.py``; this module only holds the
+  write shape.
 """
 from __future__ import annotations
 
 import json
 from enum import Enum
 from typing import Any
+
+from versions import COMPOSED_KEY, fact_fingerprint
+from version_label import kb_edition
 
 try:
     # pydantic is confined to scripts/rosetta/. The delivery renderer and the storage
@@ -146,6 +161,63 @@ def parse(graph: dict) -> FactGraph:
     return FactGraph.model_validate(graph)
 
 
+# ──────────────────────────── composed facts ────────────────────────────
+
+def fact_sections(graph: dict) -> dict[str, dict]:
+    """A shallow copy of the six fact sections — the part a borrower copies."""
+    out: dict[str, dict] = {}
+    for section in SECTIONS:
+        body = graph.get(section)
+        out[section] = dict(body) if isinstance(body, dict) else {}
+    return out
+
+
+def compose_by_value(borrower: dict, original: dict, slug: str) -> dict:
+    """Return ``borrower`` with ``original``'s facts copied into ``composed[slug]``.
+
+    Replaces any earlier copy of the same source wholesale. The caller decides whether an
+    overwrite is allowed (see ``versions.composed_freshness``); this function assumes yes.
+    """
+    facts = fact_sections(original)
+    existing = borrower.get(COMPOSED_KEY)
+    container = (
+        {key: value for key, value in existing.items() if isinstance(value, dict)}
+        if isinstance(existing, dict)
+        else {}
+    )
+    container[str(slug)] = {
+        # The edition label is read through the shared helper, so a legacy graph with only
+        # _meta.version still records a real label ("unknown" when there is none at all).
+        "kb_version": kb_edition(original),
+        "fingerprint": fact_fingerprint(facts),
+        "facts": facts,
+    }
+    out = dict(borrower)
+    out[COMPOSED_KEY] = container
+    return out
+
+
+def sync_composed_with(graph: dict) -> dict:
+    """Rebuild ``_meta.composed_with`` from the body container. The mirror has one writer.
+
+    A declaration with no body copy is deliberately NOT erased: that state is what
+    ``--check-composed`` reports and what ``cmd_update`` fails closed on.
+    """
+    container = graph.get(COMPOSED_KEY)
+    if not isinstance(container, dict) or not container:
+        return graph
+    declared = [
+        {"graph": str(slug), "kb_version": str((entry or {}).get("kb_version") or "")}
+        for slug, entry in container.items()
+        if isinstance(entry, dict)
+    ]
+    meta = dict(graph.get("_meta") or {})
+    meta["composed_with"] = declared
+    out = dict(graph)
+    out["_meta"] = meta
+    return out
+
+
 # ─────────────────────────────── the gate ───────────────────────────────
 
 def validate(graph: dict) -> None:
@@ -166,6 +238,7 @@ def validate(graph: dict) -> None:
     _validate_x(graph)
     _validate_a(graph)
     _validate_t(graph)
+    _validate_composed(graph)
 
 
 def _validate_v(graph: dict) -> None:
@@ -237,3 +310,32 @@ def _validate_t(graph: dict) -> None:
                 _fail(f"t.{key} empty")
         else:
             _fail(f"t.{key} must be a string or object")
+
+
+def _validate_composed(graph: dict) -> None:
+    """Shape only. A changed borrowed fact is caught by the stamp, not by the gate.
+
+    Keeping the two apart means ``--check`` reports an edited copy as a stamp mismatch
+    (one message for the whole body) while ``--check-composed`` names the source.
+    """
+    if COMPOSED_KEY not in graph:
+        return
+    container = graph.get(COMPOSED_KEY)
+    if not isinstance(container, dict):
+        _fail(f"{COMPOSED_KEY} must be an object")
+    for slug, entry in container.items():
+        if not isinstance(entry, dict):
+            _fail(f"{COMPOSED_KEY}.{slug} must be an object")
+        if not entry.get("kb_version"):
+            _fail(f"{COMPOSED_KEY}.{slug} needs kb_version")
+        if not entry.get("fingerprint"):
+            _fail(f"{COMPOSED_KEY}.{slug} needs fingerprint")
+        facts = entry.get("facts")
+        if not isinstance(facts, dict):
+            _fail(f"{COMPOSED_KEY}.{slug}.facts must be an object")
+        for section, body in facts.items():
+            if section not in SECTIONS:
+                _fail(f"{COMPOSED_KEY}.{slug}.facts.{section} is not a graph section")
+            if not isinstance(body, dict):
+                _fail(f"{COMPOSED_KEY}.{slug}.facts.{section} must be an object")
+

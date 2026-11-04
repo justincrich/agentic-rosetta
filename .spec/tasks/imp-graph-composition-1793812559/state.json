@@ -1,0 +1,35 @@
+{
+  "schema": "kb-prd-state/v1",
+  "prd": "imp-graph-composition-1793812559",
+  "home_branch": "improvement/imp-graph-composition-1793812559-graph-composition",
+  "pr_sequencing": false,
+  "concurrency": {
+    "max_running": 2,
+    "plan_ahead": 1
+  },
+  "sprints": [
+    {
+      "id": "imp-graph-composition-1793812559",
+      "number": 1,
+      "title": "Compose Rosetta graphs by value with versioned dependent sync",
+      "dir": ".",
+      "depends_on": [],
+      "status": "planned",
+      "history": [
+        {
+          "status": "planned",
+          "at": "2026-11-04T20:59:39Z",
+          "by": "agent"
+        }
+      ],
+      "branch": null,
+      "pr": null,
+      "tasks": {
+        "COMPOSE-01": {
+          "status": "completed",
+          "merge_sha": "00dfc0257327b8b8180d1d50b7ce8084ed149c1c"
+        }
+      }
+    }
+  ]
+}

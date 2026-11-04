@@ -24,6 +24,7 @@ CLI:
   registry.py graph-for <agent>   print the slug(s) an agent consumes
   registry.py consumers <slug>    print the agents that consume a graph
   registry.py validate            registry ↔ filesystem consistency (exit 0 = clean)
+  registry.py borrowers <slug>    graphs that copied <slug>'s facts by value, with editions
 """
 from __future__ import annotations
 
@@ -36,7 +37,8 @@ from pathlib import Path
 
 from naming import slug_for_agent, slug_from_graph_path, split_agent_name
 from resolve import project_root as discover_repo_root
-from version_label import format_kb_version
+from version_label import format_kb_version, kb_edition
+from versions import composed_entries, composed_freshness, declared_composed_slugs
 
 
 @dataclass(frozen=True)
@@ -84,17 +86,19 @@ EXCLUDE_DIR_NAMES = {
 
 # --------------------------------------------------------------------------- scan
 
-def _iter_fact_graphs():
+def _iter_fact_graphs(root: Path | None = None):
     """Yield (absolute_path, slug) for every fact-graph.json in the repo (exhaustive)."""
-    for dirpath, dirnames, filenames in os.walk(_paths.root):
+    base = Path(root).expanduser().resolve() if root is not None else _paths.root
+    for dirpath, dirnames, filenames in os.walk(base):
         # prune excluded dirs in-place so os.walk doesn't descend
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR_NAMES]
         for fn in filenames:
             if fn == "fact-graph.json":
                 p = Path(dirpath) / fn
-                slug = _slug_for_graph(p)
+                slug = slug_from_graph_path(p, base)
                 if slug:
                     yield p, slug
+    return
 
 
 def _split_name_role(name: str) -> tuple[str, str]:
@@ -290,6 +294,49 @@ def all_graphs() -> list[str]:
     return sorted(load().get("graphs", {}).keys())
 
 
+def find_borrowers(slug: str, root: Path | None = None) -> dict:
+    """Reverse query: the original graph plus every graph that copied it BY VALUE.
+
+    Walks the project's fact-graphs directly rather than reading ``registry.json``: the
+    caller is usually the writer, immediately after the original moved, and a stale index
+    would hide exactly the borrowers it needs to rewrite. One walk, one answer.
+
+    Each borrower carries the edition it recorded, the original's current edition, and the
+    freshness verdict from ``versions.composed_freshness``.
+    """
+    base = Path(root).expanduser().resolve() if root is not None else _paths.root
+    original: dict | None = None
+    original_rel: str | None = None
+    found: list[tuple[str, str, dict]] = []
+    for path, graph_slug in _iter_fact_graphs(base):
+        graph, _raw = _read_graph(path)
+        if graph is None:
+            continue
+        rel = str(path.relative_to(base))
+        if graph_slug == slug and original is None:
+            original, original_rel = graph, rel
+            continue
+        declares = slug in declared_composed_slugs(graph)
+        copied = slug in composed_entries(graph)
+        if declares or copied:
+            found.append((graph_slug, rel, graph))
+    borrowers = []
+    for graph_slug, rel, graph in found:
+        report = composed_freshness(graph, original, slug)
+        # `report` carries the ORIGINAL's slug; the borrower's own name must win here.
+        record = dict(report)
+        record.update({"graph": graph_slug, "path": rel})
+        borrowers.append(record)
+    borrowers.sort(key=lambda item: item["graph"])
+    return {
+        "graph": slug,
+        "path": original_rel,
+        "kb_version": kb_edition(original) if isinstance(original, dict) else "",
+        "present": original is not None,
+        "borrowers": borrowers,
+    }
+
+
 # --------------------------------------------------------------------------- mutation
 
 def add_graph(slug: str, path: str, technology: str = "") -> None:
@@ -364,6 +411,8 @@ def _cli(argv: list[str]) -> int:
     gf.add_argument("agent")
     cs = sub.add_parser("consumers", help="agents that consume a graph")
     cs.add_argument("slug")
+    bw = sub.add_parser("borrowers", help="graphs that copied a graph's facts by value")
+    bw.add_argument("slug")
     sub.add_parser("validate", help="registry ↔ filesystem consistency (exit 0 = clean)")
     sub.add_parser("agents", help="list all graph-blessed agents")
     rg = sub.add_parser("register", help="manually bind an agent (by name) to one or more graph slugs")
@@ -396,6 +445,23 @@ def _cli(argv: list[str]) -> int:
         cs = consumers(args.slug)
         print("\n".join(cs) if cs else f"(no consumers for {args.slug})")
         return 0 if cs else 1
+    if args.cmd == "borrowers":
+        found = find_borrowers(args.slug)
+        if not found["present"]:
+            print(f"(no fact-graph for {args.slug} in this project)", file=sys.stderr)
+            return 1
+        print(f"{args.slug} kb_version={found['kb_version'] or '-'}")
+        for borrower in found["borrowers"]:
+            print(
+                f"{borrower['graph']:28} "
+                f"recorded={borrower['recorded_kb_version'] or '-':12} "
+                f"current={borrower['current_kb_version'] or '-':12} "
+                f"{borrower['status']}"
+            )
+        if not found["borrowers"]:
+            print(f"(no borrowers for {args.slug})")
+            return 1
+        return 0
     if args.cmd == "agents":
         for a in all_agents():
             print(a)

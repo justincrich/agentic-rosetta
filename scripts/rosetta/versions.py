@@ -14,11 +14,28 @@ WHY THIS EXISTS
 WHAT THIS MODULE DOES NOT DO
   It does not read or write files, and it does not fetch anything. A KB version is a
   pure function of the old label, the old graph, and the new graph.
+
+COMPOSED EDITIONS
+  A knowledge base may borrow another's facts *by value*. The borrower's body then
+  carries ``composed[<slug>] = {kb_version, fingerprint, facts}``: the edition it copied,
+  a digest of the exact facts it took, and the facts themselves. That is an edition
+  identity, so its shape and its freshness rule live here — not in ``factgraph.py``.
+
+  WHY THE CONTAINER KEY IS HERE AND NOT IN factgraph.py
+    ``factgraph.py`` requires pydantic. The renderer (``kb-delivery``) and the registry
+    must read the container to render and to answer "who borrowed Rust", and neither may
+    import pydantic, so the key and the readers live in this stdlib-only module.
+
+  ``_meta.composed_with`` is a MIRROR of this container, rebuilt by ``factgraph`` from the
+  body. It is never an independent record; a declaration with no body copy is a bug.
 """
 from __future__ import annotations
 
 import re
 from typing import Any
+
+from jsonfile import canonical_json, sha256_text
+from version_label import kb_edition
 
 #: Three numeric components, optional leading "v", trailing junk tolerated (``1.2.3-rc1``).
 VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?")
@@ -151,3 +168,107 @@ def bump_kb_version(
     if old_semver and new_semver and new_semver != old_semver:
         return increment(parts, 1)
     return increment(parts, 2)
+
+
+# ─────────────────────────── composed editions ───────────────────────────
+
+#: Body key holding borrowed facts by value. See the module docstring for why it is here.
+COMPOSED_KEY = "composed"
+
+#: A copy is current: its recorded edition and its facts both agree with the original.
+COMPOSED_FRESH = "fresh"
+#: The original's ``v.kb_version`` moved on; the copy is behind.
+COMPOSED_STALE = "stale"
+#: The recorded fingerprint no longer matches the facts in the copy (it was edited).
+COMPOSED_DIVERGED = "diverged"
+#: The graph declares the source but carries no copy at all.
+COMPOSED_MISSING_COPY = "missing-copy"
+#: The declared original has no fact-graph in this project.
+COMPOSED_MISSING_ORIGINAL = "missing-original"
+
+#: Statuses that mean "this copy must not be overwritten silently".
+COMPOSED_PROBLEMS = frozenset({COMPOSED_STALE, COMPOSED_DIVERGED,
+                              COMPOSED_MISSING_COPY, COMPOSED_MISSING_ORIGINAL})
+
+
+def fact_fingerprint(facts: Any) -> str:
+    """Digest of an exact set of copied facts. Key order and whitespace do not matter."""
+    return sha256_text(canonical_json(facts))
+
+
+def composed_entries(graph: Any) -> dict[str, dict]:
+    """The body container as ``{slug: entry}``, tolerant of a legacy/absent container."""
+    if not isinstance(graph, dict):
+        return {}
+    container = graph.get(COMPOSED_KEY)
+    if not isinstance(container, dict):
+        return {}
+    return {str(slug): entry for slug, entry in container.items() if isinstance(entry, dict)}
+
+
+def declared_composed(graph: Any) -> list[dict]:
+    """``[{graph, kb_version}]`` from ``_meta.composed_with``, junk entries dropped."""
+    if not isinstance(graph, dict):
+        return []
+    meta = graph.get("_meta")
+    if not isinstance(meta, dict):
+        return []
+    entries = meta.get("composed_with")
+    if not isinstance(entries, list):
+        return []
+    out: list[dict] = []
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("graph"):
+            out.append({
+                "graph": str(entry["graph"]),
+                "kb_version": str(entry.get("kb_version") or ""),
+            })
+    return out
+
+
+def declared_composed_slugs(graph: Any) -> list[str]:
+    """Sorted unique slugs the graph declares as compositional sources."""
+    return sorted({entry["graph"] for entry in declared_composed(graph)})
+
+
+def composed_slugs(graph: Any) -> list[str]:
+    """Every composed source the graph knows about: declared or actually copied."""
+    return sorted(set(declared_composed_slugs(graph)) | set(composed_entries(graph)))
+
+
+def composed_freshness(borrower: Any, original: Any, slug: str) -> dict:
+    """Compare one copy against its original. Offline: both graphs are already in hand.
+
+    The divergence check runs FIRST and reports THAT the copy differs, never which fact
+    differs — a whole-block refresh has no three-way view of the clash.
+    """
+    entry = composed_entries(borrower).get(slug)
+    facts = (entry or {}).get("facts")
+    recorded = str((entry or {}).get("kb_version") or "")
+    # Same label rule the registry and the renderer stamp, so a legacy graph's edition is
+    # compared as "unknown" rather than as an empty string on one side only.
+    current = kb_edition(original) if isinstance(original, dict) else ""
+    report = {
+        "graph": slug,
+        "recorded_kb_version": recorded,
+        "current_kb_version": current,
+        "copy_intact": False,
+        "status": COMPOSED_MISSING_COPY,
+    }
+    if entry is None or not isinstance(facts, dict):
+        return report
+    report["copy_intact"] = fact_fingerprint(facts) == str(entry.get("fingerprint") or "")
+    if not report["copy_intact"]:
+        report["status"] = COMPOSED_DIVERGED
+        return report
+    if not isinstance(original, dict):
+        report["status"] = COMPOSED_MISSING_ORIGINAL
+        return report
+    report["status"] = COMPOSED_STALE if recorded != current else COMPOSED_FRESH
+    return report
+
+
+def composed_versions_match(borrower: Any, original: Any, slug: str) -> bool:
+    """True only when the recorded edition is the original's current ``v.kb_version``."""
+    return composed_freshness(borrower, original, slug)["status"] == COMPOSED_FRESH
+
