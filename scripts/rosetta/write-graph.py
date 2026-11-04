@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """write-graph.py — the ONLY writer of fact-graph.json.
 
-  write-graph.py --create <tech> --nrra <f> --ledger <f> [--root DIR] [--out PATH] [--source-repo DIR]
+  write-graph.py --create <tech> --nrra <f> --ledger <f> [--composed-with a,b] [--root DIR] [--out PATH] [--source-repo DIR]
   write-graph.py --apply-nrra <tech> --nrra <f> --ledger <f> [--root DIR] [--out PATH] [--source-repo DIR]
-  write-graph.py --update <tech> --changeset <f> --ledger <f> [--nrra <f>] [--root DIR]
+  write-graph.py --update <tech> --changeset <f> --ledger <f> [--nrra <f>] [--composed-with a,b] [--root DIR]
   write-graph.py --check  <tech> [--root DIR]
   write-graph.py --check-composed <tech> [--root DIR]
   write-graph.py --propagate <graph> [--list] [--borrowers a,b] [--force] --confirm [--root DIR]
@@ -27,7 +27,9 @@ judgment); this writer never invents URLs.
 --check on an unstamped (legacy) graph warns, does not fail.
 
 --composed-with copies the named graphs' v/w/r/a/x/t facts into this graph's body by
-value (``composed[<slug>]``) and rebuilds ``_meta.composed_with`` from that copy.
+value (``composed[<slug>]``) and rebuilds ``_meta.composed_with`` from that copy. It is an
+input to ``--create`` and ``--update`` only (composing two graphs that already exist is an
+``--update``); on any other verb it is a usage error, never a silent no-op.
 --propagate lists every borrower and its editions, then re-copies one original's facts into
 them; it asks update-all / a named subset / skip and refuses to write without ``--confirm``
 when stdin is not a terminal. ``--list`` prints the table and exits without prompting or
@@ -59,6 +61,7 @@ import factgraph
 import provenance as P
 import roots as RT
 from jsonfile import body_digest, read_json, sha256_bytes, write_json
+from version_label import kb_edition
 from versions import (
     COMPOSED_DIVERGED,
     COMPOSED_FRESH,
@@ -323,6 +326,7 @@ def cmd_update(
     nrra_path: Path | None,
     root: Path,
     source_repo: Path | None,
+    composed_with: list[str] | None = None,
 ) -> int:
     dest = graph_path(root, tech)
     if not dest.is_file():
@@ -400,6 +404,20 @@ def cmd_update(
         )
 
     apply_derived_version(current, pins, source_repo)
+    composed_reports: list[str] = []
+    if composed_with:
+        # Composing an EXISTING graph is the normal case (`--update herdrdev --composed-with
+        # rust`): both graphs predate the composition. Copy through the same path `--create`
+        # uses — resolve fail-closed, then copy by value — so there is one implementation of
+        # the copy. The copy lands before the bump, so the host edition records that its
+        # borrowed edition changed, and before sync_composed_with rebuilds the mirror.
+        for slug, original in resolve_composed_with(root, composed_with):
+            current = factgraph.compose_by_value(current, original, slug)
+            composed_reports.append(
+                f"[write-graph] composed {tech} <- {slug} "
+                f"kb_version={kb_edition(original)}"
+            )
+        current = factgraph.sync_composed_with(current)
     old_up = (old_snapshot.get("v") or {}).get("version")
     new_up = (current.get("v") or {}).get("version")
     new_kb = bump_kb_version(kb, old_snapshot, current, old_up, new_up)
@@ -409,6 +427,8 @@ def cmd_update(
     current = stamp(current, ledger)
     write_json(dest, current)
     persist_siblings(dest, current, pins, fact_sources, status="updated")
+    for line in composed_reports:
+        print(line)
     print(f"[write-graph] updated {dest} {kb} → {new_kb} (snapshot {snap.name})")
     return 0
 
@@ -834,6 +854,33 @@ def cmd_propagate(
 
 
 
+#: Verbs in the order ``main()`` dispatches them, with the name used in messages. One place
+#: names the verb that will run, so a flag guard cannot drift from the dispatch it guards.
+_VERB_ORDER = (
+    ("create", "--create"),
+    ("apply_nrra", "--apply-nrra"),
+    ("update", "--update"),
+    ("adopt", "--adopt"),
+    ("propagate", "--propagate"),
+    ("check_composed", "--check-composed"),
+    ("backfill", "--backfill"),
+    ("check", "--check"),
+)
+
+
+def active_verb(args: argparse.Namespace) -> str | None:
+    """The verb ``main()`` will dispatch, as its flag spelling, or ``None`` when none is set."""
+    for attr, flag in _VERB_ORDER:
+        if getattr(args, attr) is not None:
+            return flag
+    return None
+
+
+def split_slugs(value: str | None) -> list[str]:
+    """``"a, b ,"`` → ``["a", "b"]``. Empty input is no composition, not an empty slug."""
+    return [part.strip() for part in (value or "").split(",") if part.strip()]
+
+
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", default=None)
@@ -866,7 +913,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--out", type=Path, help="override dest path (create / apply-nrra)")
     p.add_argument("--source-repo", type=Path, help="local tree used to derive v.version")
     p.add_argument("--composed-with",
-                   help="comma-separated graph slugs this KB composes; stamped into "
+                   help="comma-separated graph slugs this KB composes (--create / --update "
+                        "only); copied by value into composed[<slug>] and mirrored into "
                         "_meta.composed_with with each graph's current kb_version")
     args = p.parse_args(argv)
 
@@ -883,10 +931,17 @@ def main(argv: list[str]) -> int:
         RT.warn_if_orphaned(_DOCS_DIR)
 
     try:
+        composed = split_slugs(args.composed_with)
+        # --composed-with is an input to a WRITE that composes. On a verb that cannot honour
+        # it the flag used to be accepted and ignored: exit 0, a normal run, no composition
+        # change — the exact silent fallback composition exists to prevent. Reject it instead.
+        if args.composed_with is not None and active_verb(args) not in ("--create", "--update"):
+            _die("usage",
+                 f"--composed-with applies to --create and --update only; "
+                 f"{active_verb(args) or 'no verb'} cannot compose")
         if args.create:
             if not args.nrra or not args.ledger:
                 _die("usage", "--create needs --nrra and --ledger")
-            composed = [s.strip() for s in (args.composed_with or "").split(",") if s.strip()]
             return cmd_create(args.create, args.nrra, args.ledger, root, args.out,
                               args.source_repo, composed_with=composed)
         if args.apply_nrra:
@@ -898,7 +953,8 @@ def main(argv: list[str]) -> int:
         if args.update:
             if not args.changeset or not args.ledger:
                 _die("usage", "--update needs --changeset and --ledger")
-            return cmd_update(args.update, args.changeset, args.ledger, args.nrra, root, args.source_repo)
+            return cmd_update(args.update, args.changeset, args.ledger, args.nrra, root,
+                              args.source_repo, composed_with=composed)
         if args.adopt:
             return cmd_adopt(args.adopt, root)
         if args.propagate:

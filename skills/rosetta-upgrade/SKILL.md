@@ -550,17 +550,23 @@ current, or skip chosen), `1` nobody borrows it, `2` a gate refused, `10` at lea
 borrower was left alone because **its copy diverged** (`copy fingerprint mismatch`) — report it
 to the person and let them resolve it; never force the overwrite.
 
-Exit codes for `--check-composed`, which is offline (it reads the originals from this project):
+Exit codes for `--check-composed`, which is offline (it reads the originals from this project).
+It prints one `recorded=<edition> current=<edition> <status>` line per source to **stdout**;
+the failure summary `[write-graph] STALE <graph>: …` goes to **stderr**.
 
 | Code | Meaning |
 |---|---|
-| `0` | every composed copy is current — recorded edition equals the original's `v.kb_version` and the copy's facts still match its fingerprint |
-| `1` | the graph composes nothing, so there is nothing to compare |
-| `10` | at least one copy is not current (`stale`, `diverged`, `missing-copy`, `missing-original`); the recorded and current editions are printed, and a `[write-graph] STALE` line goes to stderr |
+| `0` | every composed copy is current — recorded edition equals the original's `v.kb_version` and the copy's facts still match its fingerprint (stdout ends with `[write-graph] OK <graph> composed sources current`) |
+| `1` | the graph composes nothing, so there is nothing to compare (`[write-graph] <graph> composes nothing` on stdout) |
+| `10` | at least one copy is not current (`stale`, `diverged`, `missing-copy`, `missing-original`); its per-source line is on stdout and a `[write-graph] STALE` line goes to stderr |
 | `2` | a real error — no graph at the path, or the schema gate refused |
 
 `10` is the repo's established stale code (`provenance.py --check-stale`, and `--propagate`'s
 divergence report); do not treat it as a crash.
+
+Composition is declared at write time: `--create … --composed-with <slug,slug>` or
+`--update … --composed-with <slug,slug>`. On any other verb the flag is a usage error
+(exit `2`) rather than a silently ignored option.
 
 ## Usage
 
