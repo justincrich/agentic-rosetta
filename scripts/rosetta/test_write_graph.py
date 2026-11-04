@@ -332,6 +332,67 @@ def main() -> int:
     cc = run("--root", str(compose_root), "--check-composed", "rust")
     check("check-composed-nothing-exit1", cc.returncode == 1, f"(rc={cc.returncode})")
 
+    # ── --update honours --composed-with: composing two graphs that already exist ──────────
+    # The real use is `--update herdrdev --composed-with rust` (both graphs predate the
+    # composition). Before this, the flag was accepted and silently ignored: exit 0, normal
+    # refresh, no composition — the exact silent fallback composition exists to prevent.
+    empty_cs = tmp / "empty-cs.json"
+    empty_cs.write_text(json.dumps({"added": {}, "changed": {}, "deprecated": {}}))
+
+    mobile_before_update = mobile_path.read_text()
+    r = run("--root", str(compose_root), "--update", "mobile", "--changeset", str(empty_cs),
+            "--ledger", str(ledger), "--nrra", str(nrra), "--composed-with", "ghost")
+    check("update-composed-unknown-exit", r.returncode != 0, f"(rc={r.returncode}) {r.stdout}")
+    check("update-composed-unknown-names-check", "no fact-graph" in r.stderr, r.stderr.strip())
+    check("update-composed-unknown-wrote-nothing",
+          mobile_path.read_text() == mobile_before_update)
+
+    mobile_kb_before = graph_at("mobile")["v"]["kb_version"]
+    r = run("--root", str(compose_root), "--update", "mobile", "--changeset", str(empty_cs),
+            "--ledger", str(ledger), "--nrra", str(nrra), "--composed-with", "rust")
+    check("update-composed-ok", r.returncode == 0, r.stdout + r.stderr)
+    mg = graph_at("mobile")
+    rust_copy = (mg.get("composed") or {}).get("rust") or {}
+    copied_facts = rust_copy.get("facts") or {}
+    check("update-composed-copied-by-value",
+          ((copied_facts.get("r") or {}).get("prefer_result") or {}).get("rule") == "return Result",
+          repr(copied_facts.get("r")))
+    check("update-composed-records-edition", rust_copy.get("kb_version") == rust_kb_d,
+          repr(rust_copy.get("kb_version")))
+    check("update-composed-meta-mirrors",
+          (mg.get("_meta") or {}).get("composed_with")
+          == [{"graph": "rust", "kb_version": rust_kb_d}],
+          repr((mg.get("_meta") or {}).get("composed_with")))
+    check("update-composed-bumps-host",
+          mg["v"]["kb_version"] != mobile_kb_before, mg["v"]["kb_version"])
+    check("update-composed-own-body-untouched", "prefer_result" not in (mg.get("r") or {}),
+          repr(list(mg.get("r") or {})))
+    check("update-composed-reported",
+          "composed" in r.stdout and "rust" in r.stdout, r.stdout)
+    cu = run("--root", str(compose_root), "--check", "mobile")
+    check("update-composed-check-green", cu.returncode == 0, cu.stderr)
+    cc = run("--root", str(compose_root), "--check-composed", "mobile")
+    check("update-composed-fresh", cc.returncode == 0, cc.stdout + cc.stderr)
+
+    # an update WITHOUT the flag changes no composition — today's behaviour, still true
+    before_plain = graph_at("mobile")["composed"]
+    r = run("--root", str(compose_root), "--update", "mobile", "--changeset", str(empty_cs),
+            "--ledger", str(ledger), "--nrra", str(nrra))
+    check("update-without-composed-ok", r.returncode == 0, r.stderr)
+    check("update-without-composed-keeps-copy", graph_at("mobile")["composed"] == before_plain,
+          "composition changed on a plain update")
+
+    # the flag fails closed on every verb that cannot honour it, instead of being ignored
+    for verb in (("--check", "mobile"), ("--adopt", "mobile"), ("--backfill", "mobile"),
+                 ("--check-composed", "mobile"), ("--propagate", "rust", "--list"),
+                 ("--apply-nrra", "mobile")):
+        r = run("--root", str(compose_root), *verb, "--composed-with", "rust",
+                "--nrra", str(nrra), "--ledger", str(ledger), "--changeset", str(empty_cs))
+        check(f"composed-with-rejected-{verb[0].lstrip('-')}",
+              r.returncode == 2 and "usage" in r.stderr, f"(rc={r.returncode}) {r.stderr}")
+        check(f"composed-with-rejected-names-verbs-{verb[0].lstrip('-')}",
+              "--create" in r.stderr and "--update" in r.stderr, r.stderr)
+
     # AC-3: a declaration whose original left the project fails closed, writing nothing
     absent_root = tmp / "absent-proj"
     (absent_root / ".git").mkdir(parents=True)
