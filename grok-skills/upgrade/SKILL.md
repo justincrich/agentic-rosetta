@@ -509,6 +509,46 @@ Unlike Mode A's delta-score grades, Mode B is gated on the **shape of the change
 | Changeset empty (already current) | Report no-op; nothing to accept |
 | Research came back `BLOCKED` (no reachable source) | **Roll Back** — never apply unsourced facts |
 
+## Propagating a composed knowledge base
+
+A KB can borrow another graph's `v/w/r/a/x/t` facts **by value**: the borrower's body carries
+`composed[<slug>]` with the edition it copied, a fingerprint of the exact facts, and the facts
+themselves. `_meta.composed_with` mirrors that edition. Upgrading the original does not move
+those copies by itself — and because the copy is in the body, a hand-edited borrowed fact makes
+`write-graph.py --check` fail, so the refresh must run through the writer.
+
+After an upgrade of an original lands (`--update` / `--apply-nrra` on, say, `rust`):
+
+1. List every borrower and how far behind each copy is:
+
+   ```bash
+   python3 "$PLUGIN/scripts/rosetta/registry.py" --root "$PROJECT" borrowers <slug>
+   ```
+
+   Each line shows the copy's `recorded=` edition and the original's `current=` edition, plus
+   `fresh` / `stale` / `diverged` / `missing-copy`. Exit 1 when nobody borrows it.
+
+2. **Ask the person** — update all (the default), a named subset, or skip. Never propagate on
+   your own judgment.
+
+3. Refresh through the single writer, with the explicit confirmation argument:
+
+   ```bash
+   python3 "$PLUGIN/scripts/rosetta/write-graph.py" --root "$PROJECT" \
+       --propagate <slug> --confirm [--borrowers name-a,name-b]
+   ```
+
+   Without `--confirm`, a non-interactive run exits non-zero and writes nothing. On a terminal
+   it asks update-all / subset / skip itself, defaulting to update all.
+
+4. Verify and redistribute: `write-graph.py --check-composed <borrower>` (offline: fails when
+   a recorded edition is not the original's current one, or when a copy's own facts changed),
+   then `/rosetta:sync`.
+
+Exit codes for `--propagate`: `0` selected copies refreshed (or skip), `1` nobody borrows it,
+`2` a gate refused, `10` at least one selected borrower was left alone because **its copy
+diverged** — report it to the person and let them resolve it; never force the overwrite.
+
 ## Usage
 
 ```
@@ -525,6 +565,11 @@ Unlike Mode A's delta-score grades, Mode B is gated on the **shape of the change
 
 # Mode A — Benchmark (default): measure impact, then Mode C on remaining gaps
 /rosetta:upgrade agents/kotlin-implementer/agent.md --kb .rosetta/docs/kotlin/ --challenge universal-crud
+
+# Propagation after an upgrade of a composed original (asks the person; --confirm is required)
+python3 scripts/rosetta/registry.py --root . borrowers rust
+python3 scripts/rosetta/write-graph.py --root . --propagate rust --confirm
+python3 scripts/rosetta/write-graph.py --root . --check-composed herdrdev
 ```
 
 Run from the consumer project that owns `agents/`, or pass `--root` / `$ROSETTA_PROJECT`. The LLM discovers agent and KB paths from that project. `--topics` selects Expand; `--url` without `--topics` selects Refresh; neither selects Benchmark.
