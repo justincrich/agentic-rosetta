@@ -12,6 +12,8 @@ them, so the next run does not have to re-diagnose.
 | 3 | `engine` `bun test`: 3 of 81 fail (`real Grok ACP worker lifecycle`, ~13 s each). They spawn a real ACP child; environmental. Red before any cleaning work. | `engine/tests/worker.integration.test.ts` |
 | 4 | `pipeline.schema.json` is generated, committed, and read by nobody. `zod-json-schema.ts`'s own comment claims it exists "so write-graph.py can validate without a second hand-maintained copy". It does not, and the schema does not model the fact-graph. | `engine/src/zod-json-schema.ts` |
 | 5 | `assets/rosetta_config.py` ships 220 lines of `selftest()` inside the artifact copied to 14 locations. | `assets/rosetta_config.py` |
+| 6 | `sanitize_url` returns early for any IP literal, so `http://127.0.0.1/x` and other private addresses are accepted as "fetchable" URLs. Hostname checks (`localhost`, `::1`) do run, so the two paths disagree. | `scripts/rosetta/locators.py` |
+| 7 | `sanitize_url` strips trailing `)` as punctuation, so a URL whose path genuinely ends in a paren (`.../a(b)`) is silently truncated to `.../a(b`. | `scripts/rosetta/locators.py` |
 
 ## Fixed in the 2026-11-04 run
 
