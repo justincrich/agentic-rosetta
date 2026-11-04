@@ -31,7 +31,10 @@ mkdir -p "$ROOT/scripts/kb-delivery" "$ROOT/agents/cloudflare-workers-implemente
 cp "$HERE/generate_excerpt.py" "$ROOT/scripts/kb-delivery/"
 cp "$HERE/embed-graph.sh" "$ROOT/scripts/kb-delivery/"
 mkdir -p "$ROOT/scripts/rosetta"
-cp "$PLUGIN_ROOT/scripts/rosetta/registry.py" "$PLUGIN_ROOT/scripts/rosetta/version_label.py" "$ROOT/scripts/rosetta/"
+# Copy EVERY rosetta module, not a hand-listed subset: the writers import each other, so a
+# new module (naming.py, resolve.py, …) that the list forgot makes the fixture fail with
+# "No module named X" and looks like a regression in the code under test.
+cp "$PLUGIN_ROOT/scripts/rosetta/"*.py "$ROOT/scripts/rosetta/"
 chmod +x "$ROOT/scripts/kb-delivery/embed-graph.sh"
 cp "$GRAPH_FIXTURE" "$ROOT/.rosetta/docs/cloudflare-workers/fact-graph.json"
 

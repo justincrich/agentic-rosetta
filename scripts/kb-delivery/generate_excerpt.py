@@ -14,7 +14,7 @@ facts that matter most land at the top of context (mitigating lost-in-the-middle
 Graphs resolve in this order (see :func:`resolve_graph`):
   1. agent-local  ``agents/{name}/kb/fact-graph.json``   (morph-cloud)
   2. repo-shared  ``.rosetta/docs/{domain}/fact-graph.json``  (cloudflare-workers, flyio, …)
-  3. shared via   ``SHARED_DOMAIN_MAP``  (cloudflare-rust → cloudflare-workers graph)
+  3. shared via   ``naming.SHARED_GRAPHS``  (cloudflare-rust → cloudflare-workers graph)
 
 kb_version is ``<version> @ <pinned_date> sha:<8>`` — a content hash so graph drift is detectable.
 
@@ -43,33 +43,21 @@ from pathlib import Path
 _ROSETTA = Path(__file__).resolve().parent.parent / "rosetta"
 if str(_ROSETTA) not in sys.path:
     sys.path.insert(0, str(_ROSETTA))
+from naming import (  # noqa: E402
+    LEGACY_DOCS_DOMAIN_BY_PREFIX,
+    ROLES,
+    SHARED_GRAPHS,
+    legacy_docs_domain,
+    split_agent_name,
+)
+from resolve import project_root  # noqa: E402
 from version_label import format_kb_version  # noqa: E402
 
 
-def discover_repo_root(explicit: str | Path | None = None) -> Path:
-    """Resolve the target project. Never hardcodes ~/Projects/brain.
-
-    Order: explicit --root → $ROSETTA_PROJECT → a script-parent that already
-    has agents/ (isolated fixture / in-tree copy) → cwd's git/.rosetta ancestor
-    → cwd. The plugin repo itself has no agents/, so a run from the plugin
-    falls through to the caller's project.
-    """
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    env = os.environ.get("ROSETTA_PROJECT")
-    if env:
-        return Path(env).expanduser().resolve()
-    script_project = Path(__file__).resolve().parents[2]
-    if (script_project / "agents").is_dir():
-        return script_project
-    start = Path.cwd().resolve()
-    cur = start
-    while True:
-        if (cur / ".git").exists() or (cur / ".rosetta").is_dir():
-            return cur
-        if cur.parent == cur:
-            return start
-        cur = cur.parent
+# Delegating alias: the 5-tier precedence lives in scripts/rosetta/resolve.py. Kept under
+# the old name because callers and the extraction tests reach it as
+# ``generate_excerpt.discover_repo_root``.
+discover_repo_root = project_root
 
 
 def set_repo_root(path: str | Path) -> Path:
@@ -80,26 +68,16 @@ def set_repo_root(path: str | Path) -> Path:
 
 REPO_ROOT = discover_repo_root()
 DEFAULT_DOMAIN = "cloudflare-workers"
-ROLES = ("planner", "implementer", "reviewer")
 
-# Domains whose agents share another domain's graph file (no graph of their own).
-SHARED_DOMAIN_MAP = {"cloudflare-rust": "cloudflare-workers"}
+# Domains whose agents share another domain's graph file now live in naming.SHARED_GRAPHS;
+# the local alias keeps this module's older call sites readable.
+SHARED_DOMAIN_MAP = SHARED_GRAPHS
 
 # Agent-name prefix → docs-domain slug for graphs that live under ``docs/<domain>/`` (NOT
 # ``.rosetta/docs/``). The agent name and the docs dir differ for several domains
 # (hetzner-* → hetzner-cloud, aisdk-* → ai-sdk, spacetimedb-* → spacetime-db). Longest-
 # prefix match, so "mastra" covers both mastra-implementer and mastra-evals-implementer.
-DOCSDOMAIN_BY_PREFIX = {
-    "hetzner": "hetzner-cloud",
-    "mastra": "mastra",
-    "rust": "rust",
-    "kotlin": "kotlin",
-    "swift": "swift",
-    "spacetimedb": "spacetime-db",
-    "electron": "electron",
-    "aisdk": "ai-sdk",
-    "cmux": "cmux",
-}
+DOCSDOMAIN_BY_PREFIX = LEGACY_DOCS_DOMAIN_BY_PREFIX
 
 # Human technology label per docs-domain (these graphs have no _meta.technology, so the render
 # title would otherwise be an ugly title-cased slug like "Ai Sdk"/"Spacetime Db").
@@ -128,26 +106,13 @@ def fact_graph_path(domain: str) -> Path:
 
 
 def _docs_domain_for(stem: str) -> str | None:
-    """Map an agent name stem (name minus role) to a ``docs/<domain>`` slug via longest-prefix
-    match. Returns None if no docs/ graph is known for this stem."""
-    parts = stem.split("-")
-    for i in range(len(parts), 0, -1):
-        prefix = "-".join(parts[:i])
-        if prefix in DOCSDOMAIN_BY_PREFIX:
-            return DOCSDOMAIN_BY_PREFIX[prefix]
-    return None
+    """Delegating alias: the legacy docs/ prefix table lives in ``naming``."""
+    return legacy_docs_domain(stem)
 
 
 def _split_name_role(agent_name: str) -> tuple[str, str]:
-    """``cloudflare-workers-implementer`` → (``cloudflare-workers``, ``implementer``).
-
-    The role is the trailing hyphen-token when it is a known role; otherwise the whole name is the
-    domain and the role is unknown (caller picks a default)."""
-    if "-" in agent_name:
-        head, _, tail = agent_name.rpartition("-")
-        if tail in ROLES:
-            return head, tail
-    return agent_name, "implementer"
+    """Delegating alias. The renderer treats a role-less agent as an ``implementer``."""
+    return split_agent_name(agent_name, default_role="implementer")
 
 
 def resolve_graph(agent_name_or_path: str) -> tuple[Path, str, str]:
