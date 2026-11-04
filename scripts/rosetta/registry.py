@@ -33,32 +33,9 @@ import os
 import sys
 from pathlib import Path
 
+from naming import slug_for_agent, slug_from_graph_path, split_agent_name
+from resolve import project_root as discover_repo_root
 from version_label import format_kb_version
-
-def discover_repo_root(explicit: str | Path | None = None) -> Path:
-    """Resolve the target project. Never hardcodes ~/Projects/brain.
-
-    Order: explicit --root / set_repo_root → $ROSETTA_PROJECT → a script-parent
-    that already has agents/ (isolated fixture / in-tree copy) → cwd's git/.rosetta
-    ancestor → cwd. The plugin repo itself has no agents/, so a run from the
-    plugin falls through to the caller's project.
-    """
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    env = os.environ.get("ROSETTA_PROJECT")
-    if env:
-        return Path(env).expanduser().resolve()
-    script_project = Path(__file__).resolve().parents[2]
-    if (script_project / "agents").is_dir():
-        return script_project
-    start = Path.cwd().resolve()
-    cur = start
-    while True:
-        if (cur / ".git").exists() or (cur / ".rosetta").is_dir():
-            return cur
-        if cur.parent == cur:
-            return start
-        cur = cur.parent
 
 
 def set_repo_root(path: str | Path) -> Path:
@@ -74,28 +51,12 @@ REPO_ROOT = discover_repo_root()
 REGISTRY_PATH = REPO_ROOT / ".rosetta" / "registry.json"
 AGENTS_DIR = REPO_ROOT / "agents"
 REGISTRY_VERSION = 1
-ROLES = ("planner", "implementer", "reviewer")
 
 # Dirs that never hold a canonical fact-graph.json — pruned during the walk.
 EXCLUDE_DIR_NAMES = {
     ".git", ".worktrees", ".cmux", ".kb-run-sprint", "node_modules",
     "__pycache__", ".history", "tmp", "research", "sandbox", ".cursor",
 }
-
-# Agent-name prefix → graph slug, ONLY when the agent stem and the graph slug are spelled
-# differently (hyphen mismatches). Direct stem==slug matches (flyio, modal, rust, kotlin,
-# swift, electron, openhands, tauri, morph-cloud, cmux) and prefix-of-stem matches
-# (mastra-evals→mastra, cmux-specialist→cmux) are handled by the longest-slug-prefix fallback
-# in _slug_for_agent — they need no entry here.
-AGENT_PREFIX_TO_SLUG = {
-    "hetzner": "hetzner-cloud",
-    "aisdk": "ai-sdk",
-    "spacetimedb": "spacetime-db",
-}
-
-# Agents whose stem maps to a DIFFERENT graph they share (no graph of their own).
-SHARED_GRAPHS = {"cloudflare-rust": "cloudflare-workers"}
-
 
 # --------------------------------------------------------------------------- scan
 
@@ -112,57 +73,19 @@ def _iter_fact_graphs():
                     yield p, slug
 
 
-def _slug_for_graph(path: Path) -> str | None:
-    """Derive the graph slug from a fact-graph.json path.
-
-    Recognizes the three layouts (pre- and post-consolidation):
-      .rosetta/docs/<slug>/fact-graph.json  → slug
-      docs/<slug>/fact-graph.json           → slug
-      agents/<name>/kb/fact-graph.json      → stem of <name> (morph-cloud-*)
-    """
-    rel = path.relative_to(REPO_ROOT)
-    parts = rel.parts
-    if len(parts) >= 3 and parts[0] == ".rosetta" and parts[1] == "docs":
-        return parts[2]
-    if len(parts) >= 2 and parts[0] == "docs":
-        return parts[1]
-    if len(parts) >= 3 and parts[0] == "agents" and parts[-2] == "kb":
-        return _split_name_role(parts[1])[0]
-    return None
-
-
 def _split_name_role(name: str) -> tuple[str, str]:
-    """``cloudflare-workers-implementer`` → (``cloudflare-workers``, ``implementer``)."""
-    if "-" in name:
-        head, _, tail = name.rpartition("-")
-        if tail in ROLES:
-            return head, tail
-    return name, "specialist"
+    """Delegating alias. Registry classifies a role-less agent as a ``specialist``."""
+    return split_agent_name(name, default_role="specialist")
+
+
+def _slug_for_graph(path: Path) -> str | None:
+    """Delegating alias: the three graph layouts are described in ``naming``."""
+    return slug_from_graph_path(path, REPO_ROOT)
 
 
 def _slug_for_agent(name: str, known_slugs: set[str] | None = None) -> str | None:
-    """Map an agent name to the graph slug it consumes.
-
-    Order: shared-graph override → spelling-remap (hetzner→hetzner-cloud) → longest prefix of
-    the stem that is itself a known slug (mastra-evals→mastra, cmux-specialist→cmux,
-    flyio→flyio). ``known_slugs`` is required for the last fallback; without it, only the
-    shared/remap cases resolve."""
-    stem, _ = _split_name_role(name)
-    if stem in SHARED_GRAPHS:
-        return SHARED_GRAPHS[stem]
-    parts = stem.split("-")
-    # spelling remap (longest prefix first)
-    for i in range(len(parts), 0, -1):
-        prefix = "-".join(parts[:i])
-        if prefix in AGENT_PREFIX_TO_SLUG:
-            return AGENT_PREFIX_TO_SLUG[prefix]
-    # direct: longest prefix of the stem that is a known graph slug
-    if known_slugs:
-        for i in range(len(parts), 0, -1):
-            cand = "-".join(parts[:i])
-            if cand in known_slugs:
-                return cand
-    return stem
+    """Delegating alias. ``known_slugs`` enables the longest-known-prefix fallback."""
+    return slug_for_agent(name, known_slugs, default_role="specialist")
 
 
 def _kb_version(path: Path) -> str:

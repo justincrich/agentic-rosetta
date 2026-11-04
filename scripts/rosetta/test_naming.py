@@ -111,10 +111,11 @@ def main() -> int:
         set(N.AGENT_PREFIX_TO_SLUG) <= set(N.LEGACY_DOCS_DOMAIN_BY_PREFIX),
         True,
     )
+    # The one map that WAS genuinely shared now has one identity, not two agreeing copies.
     check(
-        "shared-graph map was genuinely identical",
-        set(R.SHARED_GRAPHS.items()) == set(G.SHARED_DOMAIN_MAP.items()),
-        True,
+        "shared-graph map has one home",
+        N.SHARED_GRAPHS,
+        {"cloudflare-rust": "cloudflare-workers"},
     )
 
     # ── graph layout → slug ────────────────────────────────────────
