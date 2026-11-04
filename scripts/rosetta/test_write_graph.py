@@ -393,6 +393,186 @@ def main() -> int:
         check(f"composed-with-rejected-names-verbs-{verb[0].lstrip('-')}",
               "--create" in r.stderr and "--update" in r.stderr, r.stderr)
 
+    # ── --compose: compose into an EXISTING graph with no census ledger ───────────────────
+    # Composing Rust into an already-researched host is maintenance, not research. --create
+    # and --update both demand a closed census ledger, so manufacturing one just to compose
+    # would be a fake research artifact. --compose has no ledger and never creates a graph.
+    cv_root = tmp / "compose-verb-proj"
+    (cv_root / ".git").mkdir(parents=True)
+    cvdocs = cv_root / ".rosetta" / "docs"
+
+    def cv_graph(tech: str) -> dict:
+        return json.loads((cvdocs / tech / "fact-graph.json").read_text())
+
+    r = run("--root", str(cv_root), "--create", "rust", "--nrra", str(nrra),
+            "--ledger", str(ledger))
+    check("cv-rust-create", r.returncode == 0, r.stderr)
+    r = run("--root", str(cv_root), "--update", "rust", "--changeset", str(rust_step1),
+            "--ledger", str(ledger), "--nrra", str(nrra))
+    check("cv-rust-step1", r.returncode == 0, r.stderr)
+    rust_cv_kb = cv_graph("rust")["v"]["kb_version"]
+    rust_cv_path = cvdocs / "rust" / "fact-graph.json"
+    rust_cv_bytes = rust_cv_path.read_text()
+
+    r = run("--root", str(cv_root), "--create", "herdrdev", "--nrra", str(nrra),
+            "--ledger", str(ledger))
+    check("cv-host-create", r.returncode == 0, r.stderr)
+    host_path = cvdocs / "herdrdev" / "fact-graph.json"
+    host_kb_before = cv_graph("herdrdev")["v"]["kb_version"]
+    # A real KB directory carries a README; the writer updates its KB line in place.
+    (host_path.parent / "README.md").write_text(
+        "# herdrdev\n\n- **KB version**: 1.0.0 · **upstream**: undetermined\n")
+
+    # the verb under test: no --ledger, no --changeset, no --nrra
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust")
+    check("compose-ok", r.returncode == 0, r.stdout + r.stderr)
+    hg = cv_graph("herdrdev")
+    check("compose-copied-by-value",
+          ((hg.get("composed") or {}).get("rust", {}).get("facts", {})
+           .get("r", {}).get("unwrap_in_library_code", {}).get("rule")) == "no unwrap",
+          repr(hg.get("composed")))
+    check("compose-records-edition",
+          (hg.get("composed") or {}).get("rust", {}).get("kb_version") == rust_cv_kb,
+          repr((hg.get("composed") or {}).get("rust")))
+    check("compose-meta-mirrors-body",
+          (hg.get("_meta") or {}).get("composed_with")
+          == [{"graph": "rust", "kb_version": rust_cv_kb}],
+          repr((hg.get("_meta") or {}).get("composed_with")))
+    check("compose-bumps-host", hg["v"]["kb_version"] != host_kb_before, hg["v"]["kb_version"])
+    check("compose-own-body-untouched", "unwrap_in_library_code" not in (hg.get("r") or {}),
+          repr(list(hg.get("r") or {})))
+    check("compose-does-not-touch-source", rust_cv_path.read_text() == rust_cv_bytes)
+    c = run("--root", str(cv_root), "--check", "herdrdev")
+    check("compose-check-green", c.returncode == 0, c.stderr)
+    check("compose-keeps-research-stamp",
+          bool((hg.get("_meta") or {}).get("assimilation", {}).get("run_id")),
+          repr((hg.get("_meta") or {}).get("assimilation")))
+    check("compose-provenance-written", (host_path.parent / "provenance.json").is_file())
+    prov_cv = json.loads((host_path.parent / "provenance.json").read_text())
+    check("compose-provenance-status", prov_cv.get("status") == "composed",
+          str(prov_cv.get("status")))
+    check("compose-provenance-kb", prov_cv.get("kb_version") == hg["v"]["kb_version"],
+          str(prov_cv.get("kb_version")))
+    readme_cv = (host_path.parent / "README.md").read_text()
+    check("compose-readme-kb-line", f"KB version**: {hg['v']['kb_version']}" in readme_cv,
+          readme_cv)
+    cc = run("--root", str(cv_root), "--check-composed", "herdrdev")
+    check("compose-fresh-after", cc.returncode == 0, cc.stdout + cc.stderr)
+
+    # idempotent: a host already current at that edition is a no-op, byte for byte
+    compose_current = host_path.read_text()
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust")
+    check("compose-fresh-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("compose-fresh-skips",
+          f"SKIP herdrdev: already current at {rust_cv_kb}" in r.stdout, r.stdout)
+    check("compose-fresh-wrote-nothing", host_path.read_text() == compose_current)
+
+    # --force is the deliberate way past that no-op guard
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust", "--force")
+    check("compose-force-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("compose-force-rewrote", host_path.read_text() != compose_current)
+    check("compose-force-check-green",
+          run("--root", str(cv_root), "--check", "herdrdev").returncode == 0)
+
+    # several sources in one run: the current one is skipped, the new one is copied
+    r = run("--root", str(cv_root), "--create", "kotlin", "--nrra", str(nrra),
+            "--ledger", str(ledger))
+    check("cv-kotlin-create", r.returncode == 0, r.stderr)
+    kotlin_cv_kb = cv_graph("kotlin")["v"]["kb_version"]
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust,kotlin")
+    check("compose-multi-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("compose-multi-skips-fresh",
+          f"SKIP herdrdev: already current at {rust_cv_kb}" in r.stdout, r.stdout)
+    mg_cv = cv_graph("herdrdev")
+    check("compose-multi-copied-second",
+          (mg_cv.get("composed") or {}).get("kotlin", {}).get("kb_version") == kotlin_cv_kb,
+          repr(sorted((mg_cv.get("composed") or {}))))
+    check("compose-multi-meta-mirrors-both",
+          sorted(e["graph"] for e in (mg_cv.get("_meta") or {}).get("composed_with") or [])
+          == ["kotlin", "rust"],
+          repr((mg_cv.get("_meta") or {}).get("composed_with")))
+
+    # --compose never creates a graph: no host ⇒ exit 2, naming the path
+    r = run("--root", str(cv_root), "--compose", "no-such-host", "--from", "rust")
+    check("compose-host-missing-exit2", r.returncode == 2, f"(rc={r.returncode}) {r.stderr}")
+    check("compose-host-missing-names-path", "no graph at" in r.stderr, r.stderr)
+    check("compose-never-creates", not (cvdocs / "no-such-host").exists())
+
+    # an unknown source dies naming the slug and the path it looked for
+    before_unknown = host_path.read_text()
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "ghost")
+    check("compose-unknown-exit2", r.returncode == 2, f"(rc={r.returncode})")
+    check("compose-unknown-names-slug", "ghost" in r.stderr, r.stderr)
+    check("compose-unknown-names-path", "no fact-graph" in r.stderr, r.stderr)
+    check("compose-unknown-wrote-nothing", host_path.read_text() == before_unknown)
+
+    # a diverged copy is refused without --force: exit 10, name the slug, write nothing
+    hand_cv = json.loads(host_path.read_text())
+    if (hand_cv.get("composed") or {}).get("rust"):
+        hand_cv["composed"]["rust"]["facts"]["r"]["unwrap_in_library_code"]["rule"] = "hand edited"
+    host_path.write_text(json.dumps(hand_cv, indent=2) + "\n")
+    diverged_bytes = host_path.read_text()
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust")
+    check("compose-diverged-exit10", r.returncode == 10, f"(rc={r.returncode}) {r.stdout}")
+    check("compose-diverged-fingerprint",
+          "copy fingerprint mismatch" in r.stderr, r.stderr)
+    check("compose-diverged-names-slug", "rust" in r.stderr, r.stderr)
+    check("compose-diverged-wrote-nothing", host_path.read_text() == diverged_bytes)
+    # --force is the deliberate overwrite, and it restores the copy the original holds
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust", "--force")
+    check("compose-force-over-diverged-exit0", r.returncode == 0, r.stdout + r.stderr)
+    fg_cv = cv_graph("herdrdev")
+    check("compose-force-restored-copy",
+          ((fg_cv.get("composed") or {}).get("rust", {}).get("facts", {})
+           .get("r", {}).get("unwrap_in_library_code", {}).get("rule")) == "no unwrap",
+          repr((fg_cv.get("composed") or {}).get("rust")))
+    check("compose-force-diverged-check-green",
+          run("--root", str(cv_root), "--check", "herdrdev").returncode == 0)
+
+    # --compose takes no census inputs and no other verb's flags
+    for extra in (("--ledger", str(ledger)), ("--changeset", str(empty_cs)),
+                  ("--nrra", str(nrra)), ("--out", str(tmp / "nope.json"))):
+        r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust", *extra)
+        check(f"compose-rejects-{extra[0].lstrip('-')}",
+              r.returncode == 2 and "usage" in r.stderr, f"(rc={r.returncode}) {r.stderr}")
+    # --from is not a flag of any other verb
+    r = run("--root", str(cv_root), "--check", "herdrdev", "--from", "rust")
+    check("from-without-compose-exit2",
+          r.returncode == 2 and "usage" in r.stderr, f"(rc={r.returncode}) {r.stderr}")
+    # --compose cannot ride along with another verb
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust",
+            "--check", "herdrdev")
+    check("compose-plus-other-verb-exit2",
+          r.returncode == 2 and "usage" in r.stderr, f"(rc={r.returncode}) {r.stderr}")
+    # and --composed-with stays restricted to --create / --update
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust",
+            "--composed-with", "rust")
+    check("compose-rejects-composed-with",
+          r.returncode == 2 and "--create" in r.stderr and "--update" in r.stderr,
+          f"(rc={r.returncode}) {r.stderr}")
+
+    # a legacy host (no _meta.assimilation) composes, and --check keeps its WARN path
+    legacy_host = cvdocs / "legacyhost"
+    legacy_host.mkdir(parents=True)
+    (legacy_host / "fact-graph.json").write_text(json.dumps({
+        "v": {"pkg": "legacyhost", "kb_version": "1.0.0"},
+        "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+    }))
+    r = run("--root", str(cv_root), "--compose", "legacyhost", "--from", "rust")
+    check("compose-legacy-host-ok", r.returncode == 0, r.stdout + r.stderr)
+    lg_cv = cv_graph("legacyhost")
+    check("compose-legacy-copied",
+          "unwrap_in_library_code" in (
+              (lg_cv.get("composed") or {}).get("rust", {}).get("facts", {}).get("r") or {}),
+          repr(lg_cv.get("composed")))
+    check("compose-legacy-no-invented-stamp",
+          not (lg_cv.get("_meta") or {}).get("assimilation"),
+          repr(lg_cv.get("_meta")))
+    c = run("--root", str(cv_root), "--check", "legacyhost")
+    check("compose-legacy-check-warns-not-fails",
+          c.returncode == 0 and "legacy" in (c.stdout + c.stderr).lower(),
+          f"(rc={c.returncode}) {c.stdout}{c.stderr}")
+
     # AC-3: a declaration whose original left the project fails closed, writing nothing
     absent_root = tmp / "absent-proj"
     (absent_root / ".git").mkdir(parents=True)
@@ -934,7 +1114,9 @@ def main() -> int:
         return 1
     print("ok — write-graph.py create/apply-nrra/update/check + open/mismatch/forged rejected + "
           "composition copied by value, listed (--propagate --list), confirm-gated, "
-          "fingerprint-guarded, fresh copies skipped, --check-composed exits 10 when stale")
+          "fingerprint-guarded, fresh copies skipped, --check-composed exits 10 when stale + "
+          "--compose into an existing graph with no ledger, diverged copy refused (10), "
+          "--force the deliberate overwrite")
     return 0
 
 
