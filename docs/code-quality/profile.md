@@ -36,6 +36,21 @@ Dependencies point one way: `kb-delivery` → `rosetta`; `rosetta` never imports
 | Wire shapes crossing TS↔Python | `engine/src/contract.ts` | change the Zod source first |
 | A constant two modules both need | the module that owns the decision | never re-typed in a second table |
 
+## `scripts/rosetta/` module map
+
+| Module | Owns | Pure? |
+|---|---|---|
+| `resolve.py` | Which project a run is about (5-tier precedence) | reads env + filesystem |
+| `naming.py` | Agent name → (stem, role), agent → graph slug, graph path → slug, `ROLES` | yes |
+| `versions.py` | Semver parse/increment, the `kb_version` bump rule | yes |
+| `locators.py` | What counts as a URL, where it points, the one TLD table | yes |
+| `factgraph.py` | The fact-graph shape: pydantic model + the write gate | yes |
+| `jsonfile.py` | Atomic JSON/text write, strict read, canonical digest | disk |
+| `provenance.py` | **Facade** over versions/locators/jsonfile; pins, staleness, companion files | disk + network |
+| `registry.py` | Exhaustive graph index and consumer mapping | disk |
+| `roots.py` | Where the KB goes (deliberately does NOT walk up — see `resolve.py`) | env + subprocess |
+| `write-graph.py` | **Entry point**: the only writer of `fact-graph.json` | — |
+
 ## Conventions the code already holds (keep them)
 
 1. **Stdlib-only for anything that ships into a harness.** `assets/rosetta_config.py` is copied as a

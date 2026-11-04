@@ -15,6 +15,8 @@ them, so the next run does not have to re-diagnose.
 | 6 | `sanitize_url` returns early for any IP literal, so `http://127.0.0.1/x` and other private addresses are accepted as "fetchable" URLs. Hostname checks (`localhost`, `::1`) do run, so the two paths disagree. | `scripts/rosetta/locators.py` |
 | 7 | `sanitize_url` strips trailing `)` as punctuation, so a URL whose path genuinely ends in a paren (`.../a(b)`) is silently truncated to `.../a(b`. | `scripts/rosetta/locators.py` |
 | 8 | The graph gate coerces a section given as an empty list (`"w": []`) to `{}` instead of rejecting it, because `graph.get("w") or {}` treats `[]` as falsy. A non-empty list is rejected correctly. Preserved during extraction; tightening it is a behaviour change. | `scripts/rosetta/factgraph.py` |
+| 9 | Nothing reads `pipeline.schema.json`. It now has proper `$defs` (830 lines, 11 definitions) but is still a generated artifact with no consumer, while `write-graph.py` validates with its own gate. | `scripts/rosetta/schema/pipeline.schema.json` |
+| 10 | `write-graph._DOCS_DIR` is module-level mutable state set by `main()`, so six verbs depend on a global instead of a parameter. | `scripts/rosetta/write-graph.py` |
 
 ## Fixed in the 2026-11-04 run
 
@@ -29,8 +31,12 @@ them, so the next run does not have to re-diagnose.
 - The fact-graph shape was asserted three ways (58 hand-written checks, ad-hoc `.get()` chains,
   silent `except Exception`). Now one typed model.
 - `registry.scan()` parsed each `fact-graph.json` five times.
-- Module-level mutable root state (`REPO_ROOT`/`REGISTRY_PATH`/`AGENTS_DIR`,
-  `write-graph._DOCS_DIR`).
+- `registry`'s three independently-rebound module globals (`REPO_ROOT`, `REGISTRY_PATH`,
+  `AGENTS_DIR`) became one frozen `Paths` object with a `repo_root()` accessor.
+  `write-graph._DOCS_DIR` is still a global — see problem 10.
+- `test-embed-graph.sh` hand-listed which `scripts/rosetta` modules to copy into its fixture, so
+  adding a module made the suite fail with `No module named naming` — a fixture bug that reads as
+  a regression in the code under test. It now copies every `.py`.
 
 ## Not a problem, though it looks like one
 

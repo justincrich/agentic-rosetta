@@ -1,6 +1,7 @@
 # Cleaning roadmap — agentic-rosetta
 
-Last run: 2026-11-04 (`repo`, direction "organize the plugin") — in progress.
+Last run: 2026-11-04 (`repo`, direction "organize the plugin") — **complete**.
+Next run: start at item 2.
 Direction in force: module organization, DRY, typed definitions.
 Blast radius chosen: `repo`.
 
@@ -9,52 +10,59 @@ structure-only; a behaviour change it uncovers becomes a `known-problems` line, 
 
 ## Ranked work list
 
-### 1. One home for each shared decision — **in progress (2026-11-04 run)**
-Seven duplicated decisions (repo root, agent stem/role, agent→slug, graph layout, semver,
-canonical-JSON/atomic-write, TLD set) lived in two or three modules each, and two had **diverged**
-in behaviour. Fixed first because every later split depends on it.
+### 1. One home for each shared decision — **DONE 2026-11-04**
+Seven duplicated decisions collapsed into `scripts/rosetta/{resolve,naming,jsonfile,versions,
+locators}.py`, plus `factgraph.py` for the graph shape. Two of them had already diverged in
+behaviour (agent role default, agent→slug table). Each new module has a test that pins today's
+behaviour, and the branches that were deliberately permissive are pinned as permissive.
 
-### 2. Split `provenance.py` (1089 lines, 6 jobs) — **next up**
-The single largest comprehension barrier in the Python tree, and the second-hottest file. Split by
-the decision each part hides: semver → pure, NRRA parsing → pure, locators → pure, pins → network,
-stale → network, history → disk. Keep `provenance.py` as a facade so no caller changes in the same
-commit. **Cheaper now** than it was, because run 1 gave it `versions`, `locators` and `jsonfile` to
-call instead of inline.
+### 2. Split `provenance.py` (907 lines, 5 jobs) — **NEXT UP**
+Now a facade over `versions`/`locators`/`jsonfile`, which removed ~180 lines, but it still holds
+five jobs: NRRA block parsing, URL/locator *harvesting*, network pinning, staleness probing, and
+Markdown/JSON companion writing. Split by job, keep `provenance.py` as the facade. Cheaper than it
+was, because the version, locator and JSON decisions already have homes to call.
 
-### 3. Split `write-graph.py` (749 lines, 6 verbs + validator + snapshot + merge)
-Hottest file in the tree (7 changes in 6 months). `cmd_update` and `cmd_apply_nrra` repeat the same
-snapshot/merge/persist sequence; the validator now lives in `factgraph.py` after run 1. Next
-candidate: one `_persist_revision()` helper for both verbs.
+### 3. Split `write-graph.py` (690 lines, 6 verbs)
+Still the hottest file (7 changes in 6 months) and still repeats the
+snapshot → merge → bump → validate → stamp → persist sequence in `cmd_update` and
+`cmd_apply_nrra`. One `_persist_revision()` helper is the next move.
 
-### 4. `registry.py` — parse once, drop the module globals
-Landed in run 1 (U12, U13). Keep an eye on it: `scan()` is the only place a fact-graph is parsed.
+### 4. `registry.py` — parse once, drop the globals — **DONE 2026-11-04**
+One read per graph (was four, plus a fifth in `validate`); three mutable globals became one frozen
+`Paths`. Remaining: `write-graph._DOCS_DIR` is still a module global — see item 6.
 
-### 5. `pipeline.schema.json` — shrink with `$defs`
-`zod-json-schema.ts` has no `$defs` support, so `SourcePin.unitPins` is inlined four times and the
-file is 1723 generated lines whose semantic content is ~250. Run 1 teaches the converter `$defs` +
-`$ref`. Revisit whether to wire it into `write-graph.py` once the pydantic model exists on both
-sides.
+### 5. `pipeline.schema.json` — `$defs` — **DONE 2026-11-04**
+`json-schema-defs.ts` indexes each named body by canonical JSON and rewrites equal sub-objects to
+`$ref`. 1723 → 830 lines, 11 definitions, every ref resolves.
+Still open: nothing reads the artifact yet. Deciding whether to wire `write-graph.py` to it (its
+own comment claims it does) is a separate decision.
 
-### 6. Get 220 lines of test out of a shipped asset
+### 6. Thread `write-graph`'s docs override explicitly
+`_DOCS_DIR` is set by `main()` and read by `docs_dir()`, so six verbs depend on hidden state.
+Threading it through is 12 call sites across `cmd_create`/`cmd_update`/`cmd_apply_nrra`/
+`cmd_backfill`/`cmd_adopt`/`cmd_check`. Deferred from the 2026-11-04 run: the same unit also
+touches three of those verbs' bodies, and half-doing it would be worse than not starting.
+
+### 7. Get 220 lines of test out of a shipped asset
 `assets/rosetta_config.py` is 738 lines, of which `selftest()` is 220. The whole file is copied
 verbatim into 14 skill `assets/` directories and into `$ROSETTA_HOME/bin/`. Tests do not belong in
 the artifact users install. Needs `sync-assets.sh` in the same commit.
 
-### 7. Comprehension pass on `kb-delivery`
+### 8. Comprehension pass on `kb-delivery`
 `condensed_excerpt()`'s docstring claimed it is "derived from the graph, not copy-pasted, so it
-cannot drift" — it is a hardcoded Cloudflare Workers paragraph, and `DEFAULT_DOMAIN` is
-`cloudflare-workers`. The docstring is wrong; the behaviour is a recorded defect.
+cannot drift" — it is a hardcoded Cloudflare Workers paragraph. Behaviour defect recorded; the
+docstring correction is a one-line structure fix that can ride along with item 2.
 
-### 8. Module form (deferred — needs a naming migration)
+### 9. Module form (deferred — needs a naming migration)
 `write-graph.py`, `generate_excerpt.py`, `materialize-grok-skills.py` cannot be imported. Making the
 logic an importable package while keeping hyphenated entry points means updating every skill, doc
-and `assert-no-drift.sh` reference by name in one commit. Deferred until items 1–3 land, because it
-is a rename of things currently holding the logic.
+and `assert-no-drift.sh` reference by name in one commit. Now that `factgraph`/`naming`/`resolve`
+carry the logic, the remaining importable surface is smaller than it was.
 
 ## Baseline at the last run
 
-All 12 Python gates green. `bun test`: 78 pass / 3 fail (`real Grok ACP worker lifecycle`,
-environmental). `bun run typecheck` green.
+All 18 Python gates green (12 original + 6 added). `bun test`: 78 pass / 3 fail
+(`real Grok ACP worker lifecycle`, environmental, red before any change). `bun run typecheck` green.
 
 ## How a run picks up
 
