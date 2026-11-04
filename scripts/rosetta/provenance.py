@@ -29,7 +29,7 @@ sys.path.insert(0, str(HERE))
 # and these names stay because callers and documentation reach them here.
 from jsonfile import canonical_json, sha256_text, write_json
 from locators import HOST_RE as _HOST_RE, URL_RE as _URL_RE, classify_locator, sanitize_url
-from versions import bump_kb_version, looks_like_version as _looks_like_version
+from versions import looks_like_version as _looks_like_version
 
 
 def _roots():

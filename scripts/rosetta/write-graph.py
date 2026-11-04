@@ -47,6 +47,8 @@ except ImportError:
 import factgraph
 import provenance as P
 import roots as RT
+from jsonfile import body_digest, read_json, sha256_bytes, write_json
+from versions import bump_kb_version
 
 WRITER = "write-graph.py@1.1.0"
 
@@ -61,13 +63,10 @@ def _die(check: str, detail: str) -> None:
     raise GateError(check, detail)
 
 
-def sha256_bytes(raw: bytes) -> str:
-    return hashlib.sha256(raw).hexdigest()
-
-
 def load_json(path: Path) -> dict:
+    """Strict load, translated to this CLI's GateError vocabulary."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return read_json(path)
     except FileNotFoundError:
         _die("io", f"missing {path}")
     except json.JSONDecodeError as e:
@@ -182,8 +181,6 @@ def apply_derived_version(graph: dict, pins: list[dict], repo_path: Path | None)
 
 
 def stamp(graph: dict, ledger: dict) -> dict:
-    body = {k: v for k, v in graph.items() if k != "_meta"}
-    raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
     meta = dict(graph.get("_meta") or {})
     meta["assimilation"] = {
         "run_id": ledger.get("run_id"),
@@ -192,7 +189,7 @@ def stamp(graph: dict, ledger: dict) -> dict:
         "censused": ledger.get("censused"),
         "closed": ledger.get("closed"),
         "gaps": len(ledger.get("gaps") or []),
-        "graph_sha256": sha256_bytes(raw),
+        "graph_sha256": body_digest(graph),
         "writer": WRITER,
     }
     out = dict(graph)
@@ -201,15 +198,8 @@ def stamp(graph: dict, ledger: dict) -> dict:
 
 
 def graph_sha(graph: dict) -> str:
-    body = {k: v for k, v in graph.items() if k != "_meta"}
-    return sha256_bytes(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
-
-
-def atomic_write(path: Path, obj: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    """Content identity of a graph. See jsonfile.body_digest for the ascii caveat."""
+    return body_digest(graph)
 
 
 def persist_siblings(
@@ -282,7 +272,7 @@ def cmd_create(
         graph["_meta"]["composed_with"] = resolve_composed_with(root, composed_with)
     validate_graph(graph)
     graph = stamp(graph, ledger)
-    atomic_write(dest, graph)
+    write_json(dest, graph)
     persist_siblings(dest, graph, pins, fact_sources, status="created")
     print(f"[write-graph] created {dest} kb_version={graph['v']['kb_version']}")
     return 0
@@ -368,12 +358,12 @@ def cmd_update(
     apply_derived_version(current, pins, source_repo)
     old_up = (old_snapshot.get("v") or {}).get("version")
     new_up = (current.get("v") or {}).get("version")
-    new_kb = P.bump_kb_version(kb, old_snapshot, current, old_up, new_up)
+    new_kb = bump_kb_version(kb, old_snapshot, current, old_up, new_up)
     current.setdefault("v", {})["kb_version"] = new_kb
     current["v"]["supersedes"] = kb
     validate_graph(current)
     current = stamp(current, ledger)
-    atomic_write(dest, current)
+    write_json(dest, current)
     persist_siblings(dest, current, pins, fact_sources, status="updated")
     print(f"[write-graph] updated {dest} {kb} → {new_kb} (snapshot {snap.name})")
     return 0
@@ -449,12 +439,12 @@ def cmd_apply_nrra(
 
     old_up = (old_snapshot.get("v") or {}).get("version")
     new_up = (current.get("v") or {}).get("version")
-    new_kb = P.bump_kb_version(kb, old_snapshot, current, old_up, new_up)
+    new_kb = bump_kb_version(kb, old_snapshot, current, old_up, new_up)
     current.setdefault("v", {})["kb_version"] = new_kb
     current["v"]["supersedes"] = kb
     validate_graph(current)
     current = stamp(current, ledger)
-    atomic_write(dest, current)
+    write_json(dest, current)
     persist_siblings(dest, current, pins, fact_sources, status="updated")
     for line in pin_reports:
         print(f"[write-graph] pin move {line}")
@@ -540,7 +530,7 @@ def cmd_backfill(tech: str, root: Path, overlay: dict | None = None) -> int:
             validate_graph(graph)
         except GateError as exc:
             print(f"write-graph: WARN backfill schema ({tech}): {exc}", file=sys.stderr)
-        atomic_write(dest, graph)
+        write_json(dest, graph)
     planned = P.plan_backfill(
         dest.parent, graph, root, seeds=P.load_seeds(), overlay=overlay,
     )
@@ -582,7 +572,7 @@ def cmd_adopt(tech: str, root: Path) -> int:
     except GateError as e:
         # Legacy graphs may predate current section checks; still stamp recoverables.
         print(f"write-graph: WARN adopt schema ({tech}): {e}", file=sys.stderr)
-    atomic_write(dest, graph)
+    write_json(dest, graph)
     pins = [{
         "kind": "legacy",
         "status": "legacy-unknown",
@@ -605,9 +595,7 @@ def cmd_check(tech: str, root: Path) -> int:
     if not assim:
         print(f"write-graph: WARN {dest} legacy — unverified (no _meta.assimilation stamp)")
         return 0
-    body = {k: v for k, v in graph.items() if k != "_meta"}
-    raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    got = sha256_bytes(raw)
+    got = body_digest(graph)
     want = assim.get("graph_sha256")
     if got != want:
         _die("stamp", f"graph_sha256 mismatch (file was hand-edited?) got={got} want={want}")
