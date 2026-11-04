@@ -118,8 +118,9 @@ def main() -> int:
             "junk-entry",
         ]
         cw_file.write_text(json.dumps(g))
-        check("composed-with-mirror", R._composed_with(cw_file) == ["mastra"],
-              repr(R._composed_with(cw_file)))
+        cw_parsed, _raw = R._read_graph(cw_file)
+        check("composed-with-mirror", R._composed_with(cw_parsed) == ["mastra"],
+              repr(R._composed_with(cw_parsed)))
         scan_cw = {s: gg["composed_with"] for s, gg in R.scan()["graphs"].items()}
         check("composed-with-in-scan", scan_cw.get("rust") == ["mastra"],
               repr(scan_cw.get("rust")))

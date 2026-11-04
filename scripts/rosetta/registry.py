@@ -88,56 +88,85 @@ def _slug_for_agent(name: str, known_slugs: set[str] | None = None) -> str | Non
     return slug_for_agent(name, known_slugs, default_role="specialist")
 
 
-def _kb_version(path: Path) -> str:
-    """Stable version label — shared with generate_excerpt via version_label.py."""
+#: Failures that mean "this file is not readable as a graph" rather than "this is a bug".
+#: Narrower than ``except Exception`` on purpose: a genuine bug should surface instead of
+#: being folded into the "unknown" label, which is how a malformed graph became
+#: indistinguishable from a missing one.
+_UNREADABLE = (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError)
+
+
+def _read_graph(path: Path) -> tuple[dict | None, bytes | None]:
+    """Read and parse a fact-graph ONCE. ``(None, None)`` when it cannot be read.
+
+    Every field scan needs is derived from this single result. The previous shape parsed
+    the same file four times per scan (kb_version, composed_with, provenance fields,
+    technology) and each parse had its own error policy.
+    """
     try:
         raw = path.read_bytes()
         graph = json.loads(raw)
-    except Exception:
+    except _UNREADABLE:
+        return None, None
+    return (graph, raw) if isinstance(graph, dict) else (None, None)
+
+
+def _kb_version(graph: dict | None, raw: bytes | None) -> str:
+    """Stable version label — shared with generate_excerpt via version_label.py."""
+    if graph is None or raw is None:
         return "unknown"
     return format_kb_version(graph, raw)
 
 
-def _composed_with(path: Path) -> list[str]:
+def _composed_with(graph: dict | None) -> list[str]:
     """Graph slugs this graph declares as compositional sources (``_meta.composed_with``)."""
-    try:
-        meta = json.loads(path.read_bytes()).get("_meta") or {}
-        cw = meta.get("composed_with") or []
-        return sorted({str(e["graph"]) for e in cw if isinstance(e, dict) and e.get("graph")})
-    except Exception:
+    if graph is None:
         return []
+    meta = graph.get("_meta") or {}
+    if not isinstance(meta, dict):
+        return []
+    entries = meta.get("composed_with") or []
+    return sorted({str(e["graph"]) for e in entries if isinstance(e, dict) and e.get("graph")})
 
 
-def _provenance_fields(path: Path) -> tuple[object, object]:
+def _provenance_fields(graph: dict | None, path: Path) -> tuple[object, object]:
     """upstream_version + corpus_sha256 from the graph / sibling provenance.json."""
-    upstream = None
+    upstream = (graph.get("v") or {}).get("version") if graph else None
     corpus = None
-    try:
-        graph = json.loads(path.read_bytes())
-        upstream = (graph.get("v") or {}).get("version")
-    except Exception:
-        pass
     prov_path = path.parent / "provenance.json"
     if prov_path.is_file():
         try:
             prov = json.loads(prov_path.read_text(encoding="utf-8"))
+        except _UNREADABLE:
+            prov = None
+        if isinstance(prov, dict):
             if upstream is None:
                 upstream = prov.get("upstream_version")
             corpus = prov.get("corpus_sha256")
-        except Exception:
-            pass
     return upstream, corpus
 
 
-def _technology(path: Path) -> str:
-    try:
-        graph = json.loads(path.read_bytes())
-    except Exception:
+def _technology(graph: dict | None, path: Path) -> str:
+    if graph is None:
         return ""
-    return (
-        graph.get("_meta", {}).get("technology")
-        or _slug_for_graph(path).replace("-", " ").title()
-    )
+    meta = graph.get("_meta") or {}
+    if isinstance(meta, dict) and meta.get("technology"):
+        return str(meta["technology"])
+    return (_slug_for_graph(path) or "").replace("-", " ").title()
+
+
+def _graph_record(path: Path, rel: str) -> dict:
+    """Everything the registry records about one graph, from one parse."""
+    graph, raw = _read_graph(path)
+    upstream, corpus = _provenance_fields(graph, path)
+    return {
+        "path": rel,
+        "technology": _technology(graph, path),
+        "kb_version": _kb_version(graph, raw),
+        "upstream_version": upstream,
+        "corpus_sha256": corpus,
+        "composed_with": _composed_with(graph),
+        "shared_from": None,
+    }
 
 
 def scan() -> dict:
@@ -159,16 +188,7 @@ def scan() -> dict:
     for path, slug in _iter_fact_graphs():
         rel = str(path.relative_to(REPO_ROOT))
         if slug not in graphs:
-            upstream, corpus = _provenance_fields(path)
-            graphs[slug] = {
-                "path": rel,
-                "technology": _technology(path),
-                "kb_version": _kb_version(path),
-                "upstream_version": upstream,
-                "corpus_sha256": corpus,
-                "composed_with": _composed_with(path),
-                "shared_from": None,
-            }
+            graphs[slug] = _graph_record(path, rel)
         else:
             # duplicate path for the same slug (mirrored copies) — keep first, note the dup
             graphs[slug].setdefault("duplicate_paths", []).append(rel)
@@ -298,7 +318,7 @@ def validate() -> dict:
         if not p.is_file():
             continue
         stored = g.get("kb_version")
-        recomputed = _kb_version(p)
+        recomputed = _kb_version(*_read_graph(p))
         if stored and stored != recomputed:
             errors.append(
                 f"kb_version drift {slug}: stored={stored!r} recomputed={recomputed!r}"
