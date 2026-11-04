@@ -570,6 +570,55 @@ Composition is declared at write time: `--create … --composed-with <slug,slug>
 `--update … --composed-with <slug,slug>`. On any other verb the flag is a usage error
 (exit `2`) rather than a silently ignored option.
 
+## Composing into an existing graph (`--compose`)
+
+`--composed-with` answers *"start this KB already borrowing X"* and `--update` answers *"a
+research run also took more of X"* — both are inputs to a run that has a closed census ledger
+behind it. Composing Rust into a host that was researched long ago is neither: nothing is
+being researched. Manufacturing a census ledger to satisfy that gate would be a fake research
+artifact, so the writer has a third verb that composes by value with **no ledger**:
+
+```bash
+python3 "$PLUGIN/scripts/rosetta/write-graph.py" --root "$PROJECT" \
+    --compose <host> --from <slug>[,<slug>...] [--force]
+```
+
+Which verb, when:
+
+| Situation | Verb |
+|---|---|
+| New KB that must start out composing X (`--create` has a ledger) | `--create … --composed-with X` |
+| A research run / refresh that also takes more of X (ledger in hand) | `--update … --composed-with X` |
+| An **existing** host borrows X for the first time — no research, no ledger | `--compose <host> --from X` |
+| X moved and every borrower must catch up (asks the person) | `--propagate X --confirm` |
+
+Behaviour, in order — each rule fails closed:
+
+1. **The host must exist.** No `fact-graph.json` at the resolved path ⇒ exit `2`, naming the
+   path. `--compose` never creates a graph; use `--create` for that.
+2. **Every source resolves in this project.** An unknown slug ⇒ exit `2`, naming the slug and
+   the path it looked for.
+3. **A diverged copy is refused.** If the host's copy of a source no longer matches its
+   recorded fingerprint (a local edit), exit `10` on `copy fingerprint mismatch`, naming the
+   slug, and **write nothing** — the check runs over every source before any write, so a host
+   is never left half-composed. `--force` is the deliberate overwrite.
+4. **Already current is a no-op.** A host carrying a current copy of the same edition prints
+   `SKIP <host>: already current at <edition>`, exits `0`, and writes nothing. `--force`
+   overrides.
+5. **The write is a normal write.** The copy goes in through the same
+   `compose_by_value` + `sync_composed_with` pair everything else uses, the host edition is
+   bumped from the section diff, `_meta.assimilation` keeps its research fields with a fresh
+   `graph_sha256` (so `--check` stays green), and `provenance.json` / the README KB line are
+   regenerated from the host's own pins. A legacy host with no `_meta.assimilation` stays
+   unstamped, so `--check` keeps its WARN path instead of a compose inventing a stamp.
+6. **The source graph is read, never written.**
+
+Exit codes: `0` composed (or already current, or the skip was chosen), `2` a gate refused (no
+host, unknown source, usage), `10` a copy was left alone because it diverged and `--force` was
+not given. `--compose` takes none of the other verbs' inputs: `--ledger`, `--changeset`,
+`--nrra`, `--out`, `--source-repo`, `--composed-with` with `--compose` are all usage errors
+(exit `2`), and `--from` without `--compose` is too.
+
 ## Usage
 
 ```
@@ -592,6 +641,11 @@ python3 scripts/rosetta/registry.py --root . borrowers rust
 python3 scripts/rosetta/write-graph.py --root . --propagate rust --list
 python3 scripts/rosetta/write-graph.py --root . --propagate rust --confirm
 python3 scripts/rosetta/write-graph.py --root . --check-composed herdrdev
+
+# Composing into an existing graph — no census ledger, never creates a graph
+python3 scripts/rosetta/write-graph.py --root . --compose herdrdev --from rust
+python3 scripts/rosetta/write-graph.py --root . --compose herdrdev --from rust,kotlin
+python3 scripts/rosetta/write-graph.py --root . --compose herdrdev --from rust --force
 ```
 
 Run from the consumer project that owns `agents/`, or pass `--root` / `$ROSETTA_PROJECT`. The LLM discovers agent and KB paths from that project. `--topics` selects Expand; `--url` without `--topics` selects Refresh; neither selects Benchmark.

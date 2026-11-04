@@ -7,6 +7,7 @@
   write-graph.py --check  <tech> [--root DIR]
   write-graph.py --check-composed <tech> [--root DIR]
   write-graph.py --propagate <graph> [--list] [--borrowers a,b] [--force] --confirm [--root DIR]
+  write-graph.py --compose <host-tech> --from <slug>[,<slug>...] [--force] [--root DIR]
   write-graph.py --adopt  <tech> [--root DIR]
   write-graph.py --backfill [TECH] [--all] [--root DIR] [--sources FILE]
 
@@ -34,6 +35,12 @@ input to ``--create`` and ``--update`` only (composing two graphs that already e
 them; it asks update-all / a named subset / skip and refuses to write without ``--confirm``
 when stdin is not a terminal. ``--list`` prints the table and exits without prompting or
 writing; a borrower already current is skipped unless ``--force``.
+--compose copies named originals into an ALREADY EXISTING host graph, with no census ledger:
+composing one KB into another that already exists is maintenance, not research, and
+manufacturing a ledger to satisfy the create/update gate would be a fake research artifact.
+It never creates a graph, refuses a diverged copy without ``--force`` (exit 10, writes
+nothing), and skips a host already current at the same edition unless ``--force``. Source
+graphs are read, never written.
 --check-composed reports each copy's recorded vs current edition and exits 10 when any is
 not current (0 current, 1 composes nothing, 2 a real error).
 """
@@ -71,7 +78,7 @@ from versions import (
     declared_composed_slugs,
 )
 
-WRITER = "write-graph.py@1.2.0"
+WRITER = "write-graph.py@1.3.0"
 
 
 class GateError(SystemExit):
@@ -238,6 +245,19 @@ def restamp(graph: dict) -> dict:
     out = dict(graph)
     out["_meta"] = meta
     return out
+
+
+def restamp_composed(graph: dict) -> dict:
+    """Re-stamp a graph whose body changed by composition, inventing no census data.
+
+    A stamped graph keeps every research field (``run_id``, ``waves``, ``censused``) and gets
+    a fresh digest, so ``--check`` stays green. A legacy graph with no
+    ``_meta.assimilation`` is left unstamped on purpose: ``--check``'s WARN path is how that
+    graph is reported, and a compose must not manufacture a stamp it cannot back.
+    """
+    if not ((graph.get("_meta") or {}).get("assimilation")):
+        return graph
+    return restamp(graph)
 
 
 def persist_siblings(
@@ -853,6 +873,76 @@ def cmd_propagate(
     return rc
 
 
+def cmd_compose(tech: str, sources: list[str], root: Path, force: bool = False) -> int:
+    """Compose named originals into an existing host graph. No census ledger, no new graph.
+
+    Composing Rust into an already-researched host is a maintenance action: both graphs
+    exist, nothing is being researched. ``--create`` / ``--update`` gate on a closed census
+    ledger, and fabricating one just to copy facts by value would be a fake research
+    artifact — so this verb takes none. It reuses the ONE copy path
+    (``resolve_composed_with`` → ``compose_by_value`` → ``sync_composed_with``) that
+    ``--create``, ``--update`` and ``--propagate`` already use.
+
+    Exit 0 composed or already current, 2 a gate refused (no host, unknown source, usage),
+    10 a copy's recorded fingerprint no longer matches its facts and ``--force`` was absent.
+
+    Divergence is checked for EVERY source before anything is written: a compose is one
+    atomic write to one host, so a partially copied host is a state no later run repairs.
+    """
+    dest = graph_path(root, tech)
+    if not dest.is_file():
+        _die("compose", f"no graph at {dest}")
+    current = load_json(dest)
+    resolved = resolve_composed_with(root, sources)
+
+    if not force:
+        diverged = [
+            slug for slug, original in resolved
+            if composed_freshness(current, original, slug)["status"] == COMPOSED_DIVERGED
+        ]
+        if diverged:
+            for slug in diverged:
+                print(
+                    f"[write-graph] SKIP {tech} <- {slug}: copy fingerprint mismatch — its "
+                    f"recorded copy diverged from its own facts (a local edit changed the "
+                    f"copy); refusing to overwrite (pass --force)", file=sys.stderr,
+                )
+            print(f"[write-graph] refused {tech}: copy fingerprint mismatch "
+                  f"({', '.join(diverged)}); wrote nothing", file=sys.stderr)
+            return EXIT_COMPOSED_STALE
+
+    pending: list[tuple[str, dict]] = []
+    for slug, original in resolved:
+        report = composed_freshness(current, original, slug)
+        if report["status"] == COMPOSED_FRESH and not force:
+            # Same no-op churn guard as --propagate: an unchanged project must not bump.
+            print(f"[write-graph] SKIP {tech}: already current at "
+                  f"{report['recorded_kb_version'] or '-'}")
+            continue
+        pending.append((slug, original))
+    if not pending:
+        return 0
+
+    old_snapshot = json.loads(json.dumps(current))
+    old_kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
+    old_up = (old_snapshot.get("v") or {}).get("version")
+    for slug, original in pending:
+        current = factgraph.compose_by_value(current, original, slug)
+        print(f"[write-graph] composed {tech} <- {slug} kb_version={kb_edition(original)}")
+    current = factgraph.sync_composed_with(current)
+    # Composition is a content change, so it moves the host edition by the same rule every
+    # other write uses — never a judgment call.
+    new_up = (current.get("v") or {}).get("version")
+    new_kb = bump_kb_version(old_kb, old_snapshot, current, old_up, new_up)
+    current.setdefault("v", {})["kb_version"] = new_kb
+    current["v"]["supersedes"] = old_kb
+    validate_graph(current)
+    current = restamp_composed(current)
+    write_json(dest, current)
+    persist_after_compose(dest, current, status="composed")
+    print(f"[write-graph] composed {dest} {old_kb} -> {new_kb}")
+    return 0
+
 
 #: Verbs in the order ``main()`` dispatches them, with the name used in messages. One place
 #: names the verb that will run, so a flag guard cannot drift from the dispatch it guards.
@@ -860,6 +950,7 @@ _VERB_ORDER = (
     ("create", "--create"),
     ("apply_nrra", "--apply-nrra"),
     ("update", "--update"),
+    ("compose", "--compose"),
     ("adopt", "--adopt"),
     ("propagate", "--propagate"),
     ("check_composed", "--check-composed"),
@@ -893,6 +984,11 @@ def main(argv: list[str]) -> int:
                         "originals' current ones (offline)")
     p.add_argument("--propagate", metavar="GRAPH",
                    help="re-copy a graph's facts into every borrower that declares it")
+    p.add_argument("--compose", metavar="HOST",
+                   help="compose --from sources into an existing graph by value; no census "
+                        "ledger, never creates a graph, no-op when already current")
+    p.add_argument("--from", dest="from_graphs", metavar="SLUGS",
+                   help="comma-separated source graphs for --compose")
     p.add_argument("--borrowers", metavar="SLUGS",
                    help="comma-separated borrower subset for --propagate (default: all)")
     p.add_argument("--list", action="store_true",
@@ -900,7 +996,8 @@ def main(argv: list[str]) -> int:
                         "never prompt and never write")
     p.add_argument("--force", action="store_true",
                    help="with --propagate: also rewrite a borrower already current at the "
-                        "original's edition (default: skip it)")
+                        "original's edition (default: skip it); with --compose: also "
+                        "overwrite a copy that is current or diverged")
     p.add_argument("--confirm", action="store_true",
                    help="explicit consent for --propagate; required when stdin is not a terminal")
     p.add_argument("--adopt", metavar="TECH")
@@ -932,6 +1029,34 @@ def main(argv: list[str]) -> int:
 
     try:
         composed = split_slugs(args.composed_with)
+        sources = split_slugs(args.from_graphs)
+        # --from belongs to --compose and nothing else. Accepting it anywhere would look like
+        # a composition that never happened.
+        if args.compose is None and args.from_graphs is not None:
+            _die("usage", "--from is an input to --compose only; "
+                         f"{active_verb(args) or 'no verb'} cannot take sources")
+        if args.compose is not None:
+            # One write path per invocation. Two verbs at once used to mean "whichever the
+            # dispatch table hits first wins", which is not something a caller can rely on.
+            others = [flag for attr, flag in _VERB_ORDER
+                      if flag != "--compose" and getattr(args, attr) is not None]
+            if others:
+                _die("usage", f"--compose cannot be combined with {', '.join(others)}")
+            # --compose composes by value from --from; it takes no research or edit input.
+            foreign = [
+                flag for attr, flag in (
+                    ("nrra", "--nrra"), ("changeset", "--changeset"), ("ledger", "--ledger"),
+                    ("out", "--out"), ("source_repo", "--source-repo"),
+                    ("sources", "--sources"), ("borrowers", "--borrowers"),
+                    ("all", "--all"), ("confirm", "--confirm"), ("list", "--list"),
+                )
+                if getattr(args, attr) not in (None, False)
+            ]
+            if foreign:
+                _die("usage", f"--compose takes no {', '.join(foreign)}; it composes by "
+                              f"value from --from only")
+            if not sources:
+                _die("usage", "--compose needs --from <slug>[,<slug>...]")
         # --composed-with is an input to a WRITE that composes. On a verb that cannot honour
         # it the flag used to be accepted and ignored: exit 0, a normal run, no composition
         # change — the exact silent fallback composition exists to prevent. Reject it instead.
@@ -939,6 +1064,8 @@ def main(argv: list[str]) -> int:
             _die("usage",
                  f"--composed-with applies to --create and --update only; "
                  f"{active_verb(args) or 'no verb'} cannot compose")
+        if args.compose is not None:
+            return cmd_compose(args.compose, sources, root, force=args.force)
         if args.create:
             if not args.nrra or not args.ledger:
                 _die("usage", "--create needs --nrra and --ledger")
