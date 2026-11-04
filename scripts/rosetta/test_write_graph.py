@@ -126,6 +126,262 @@ def main() -> int:
     check("composed-with-unknown-dies", rcb.returncode != 0 and "no fact-graph" in rcb.stderr,
           rcb.stderr.strip())
 
+    # ── composition: copy by value, reverse query, confirm-gated propagation ──────────────
+    def run_no_tty(*args: str) -> subprocess.CompletedProcess[str]:
+        """A genuinely non-interactive run: stdin is /dev/null, so isatty() is False."""
+        return subprocess.run(
+            [sys.executable, str(WG), *args],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+
+    compose_root = tmp / "compose-proj"
+    (compose_root / ".git").mkdir(parents=True)
+    cdocs = compose_root / ".rosetta" / "docs"
+
+    def graph_at(tech: str) -> dict:
+        return json.loads((cdocs / tech / "fact-graph.json").read_text())
+
+    def kb_of(tech: str) -> str:
+        return graph_at(tech)["v"]["kb_version"]
+
+    # the original, one real fact at a time, all through the writer
+    r = run("--root", str(compose_root), "--create", "rust", "--nrra", str(nrra),
+            "--ledger", str(ledger))
+    check("compose-rust-create", r.returncode == 0, r.stderr)
+    rust_step1 = tmp / "rust-step1.json"
+    rust_step1.write_text(json.dumps({
+        "added": {"r": {"unwrap_in_library_code": {"verdict": "REJECT", "rule": "no unwrap"}}},
+        "changed": {}, "deprecated": {},
+    }))
+    r = run("--root", str(compose_root), "--update", "rust", "--changeset", str(rust_step1),
+            "--ledger", str(ledger), "--nrra", str(nrra))
+    check("compose-rust-step1", r.returncode == 0, r.stderr)
+    rust_kb_a = kb_of("rust")
+
+    for borrower_tech in ("herdrdev", "mobile"):
+        r = run("--root", str(compose_root), "--create", borrower_tech, "--nrra", str(nrra),
+                "--ledger", str(ledger), "--composed-with", "rust")
+        check(f"compose-{borrower_tech}-create", r.returncode == 0, r.stderr)
+
+    herdrdev_path = cdocs / "herdrdev" / "fact-graph.json"
+    mobile_path = cdocs / "mobile" / "fact-graph.json"
+    hg = graph_at("herdrdev")
+    check("compose-body-copies-rule",
+          hg["composed"]["rust"]["facts"]["r"]["unwrap_in_library_code"]["rule"] == "no unwrap",
+          repr(hg.get("composed")))
+    check("compose-body-records-edition", hg["composed"]["rust"]["kb_version"] == rust_kb_a,
+          repr(hg["composed"]["rust"].get("kb_version")))
+    check("compose-meta-mirrors-body",
+          hg["_meta"]["composed_with"] == [{"graph": "rust", "kb_version": rust_kb_a}],
+          repr(hg["_meta"].get("composed_with")))
+    check("compose-borrower-own-body-unchanged",
+          "unwrap_in_library_code" not in (hg.get("r") or {})
+          and hg["v"]["kb_version"] == "1.0.0", repr(list(hg.get("r") or {})))
+
+    # AC-1: after the original moves, one command lists every borrower with both editions
+    rust_step2 = tmp / "rust-step2.json"
+    rust_step2.write_text(json.dumps({
+        "added": {"r": {"use_question_mark": {"verdict": "r", "rule": "propagate with ?"}}},
+        "changed": {}, "deprecated": {},
+    }))
+    r = run("--root", str(compose_root), "--update", "rust", "--changeset", str(rust_step2),
+            "--ledger", str(ledger), "--nrra", str(nrra))
+    check("compose-rust-step2", r.returncode == 0, r.stderr)
+    rust_kb_b = kb_of("rust")
+    before_listing = herdrdev_path.read_text()
+
+    # AC-5: non-interactive, no --confirm → refuse, write nothing, but still list borrowers
+    r = run_no_tty("--root", str(compose_root), "--propagate", "rust")
+    check("propagate-refuses-without-confirm", r.returncode != 0, f"(rc={r.returncode})")
+    check("propagate-names-confirm-check",
+          "confirmation required" in r.stderr, r.stderr)
+    check("propagate-lists-borrowers",
+          "herdrdev" in r.stdout and "mobile" in r.stdout, r.stdout)
+    check("propagate-lists-recorded-and-current",
+          f"recorded={rust_kb_a}" in r.stdout and f"current={rust_kb_b}" in r.stdout,
+          r.stdout)
+    check("propagate-refused-wrote-nothing", herdrdev_path.read_text() == before_listing)
+
+    # AC-1: a named subset moves only that borrower
+    r = run("--root", str(compose_root), "--propagate", "rust", "--confirm",
+            "--borrowers", "mobile")
+    check("propagate-subset-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("propagate-subset-moved-mobile", "use_question_mark" in graph_at("mobile")["composed"]["rust"]["facts"]["r"],
+          repr(list(graph_at("mobile")["composed"]["rust"]["facts"]["r"])))
+    check("propagate-subset-left-herdrdev",
+          herdrdev_path.read_text() == before_listing)
+
+    # AC-1: the default is update ALL — every stale borrower moves, and one already current
+    # is reported as current rather than churned.
+    r = run("--root", str(compose_root), "--propagate", "rust", "--confirm")
+    check("propagate-all-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("propagate-all-names-every-borrower",
+          f"— 2 borrower(s)" in r.stdout
+          and "propagated rust -> herdrdev" in r.stdout
+          and "SKIP mobile: already current at" in r.stdout,
+          r.stdout)
+    hg = graph_at("herdrdev")
+    check("propagate-all-copied-new-rule",
+          "use_question_mark" in hg["composed"]["rust"]["facts"]["r"],
+          repr(list(hg["composed"]["rust"]["facts"]["r"])))
+    check("propagate-all-meta-edition",
+          hg["_meta"]["composed_with"] == [{"graph": "rust", "kb_version": rust_kb_b}],
+          repr(hg["_meta"].get("composed_with")))
+    check("propagate-all-bumped-host-edition", hg["v"]["kb_version"] != "1.0.0", repr(hg["v"]))
+
+    # AC-1's named action: `--propagate <slug> --list` is side-effect free — no prompt, no write
+    before_list = herdrdev_path.read_text()
+    mobile_before_list = mobile_path.read_text()
+    r = run_no_tty("--root", str(compose_root), "--propagate", "rust", "--list")
+    check("propagate-list-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("propagate-list-shows-borrowers",
+          "herdrdev" in r.stdout and "mobile" in r.stdout, r.stdout)
+    check("propagate-list-shows-both-editions",
+          f"recorded={rust_kb_b}" in r.stdout and f"current={rust_kb_b}" in r.stdout, r.stdout)
+    check("propagate-list-does-not-prompt", "Update all" not in r.stdout, r.stdout)
+    check("propagate-list-wrote-nothing",
+          herdrdev_path.read_text() == before_list
+          and mobile_path.read_text() == mobile_before_list)
+
+    # no-op churn guard: re-propagating a project that is already current skips and does not bump
+    hg_before = graph_at("herdrdev")["v"]["kb_version"]
+    r = run("--root", str(compose_root), "--propagate", "rust", "--confirm")
+    check("propagate-fresh-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("propagate-fresh-skips",
+          "SKIP herdrdev: already current at" in r.stdout
+          and "SKIP mobile: already current at" in r.stdout, r.stdout)
+    check("propagate-fresh-no-bump",
+          graph_at("herdrdev")["v"]["kb_version"] == hg_before
+          and graph_at("mobile")["v"]["kb_version"] == hg_before,
+          f"{hg_before} -> {graph_at('herdrdev')['v']['kb_version']}")
+    check("propagate-fresh-wrote-nothing", herdrdev_path.read_text() == before_list)
+
+    # --force gives a deliberate path past the guard
+    r = run("--root", str(compose_root), "--propagate", "rust", "--confirm", "--force",
+            "--borrowers", "mobile")
+    check("propagate-force-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("propagate-force-rewrote",
+          "propagated rust -> mobile" in r.stdout
+          and graph_at("mobile")["v"]["kb_version"] != hg_before,
+          f"{r.stdout} / {graph_at('mobile')['v']['kb_version']}")
+
+    # AC-6: the refresh ran through the writer, so the stamp is current; a hand edit is not
+    c = run("--root", str(compose_root), "--check", "herdrdev")
+    check("propagate-check-green", c.returncode == 0, c.stderr)
+    # AC-8: the composed-version check answers staleness offline
+    cc = run("--root", str(compose_root), "--check-composed", "herdrdev")
+    check("check-composed-green", cc.returncode == 0, cc.stdout + cc.stderr)
+
+    hand = json.loads(herdrdev_path.read_text())
+    hand["composed"]["rust"]["facts"]["r"]["use_question_mark"]["rule"] = "hand edited"
+    herdrdev_path.write_text(json.dumps(hand, indent=2) + "\n")
+    c = run("--root", str(compose_root), "--check", "herdrdev")
+    check("hand-edit-fails-check", c.returncode != 0, f"(rc={c.returncode})")
+    check("hand-edit-names-stamp", "stamp" in c.stderr, c.stderr)
+
+    # AC-4: a refresh whose recorded fingerprint no longer matches stops and reports THAT
+    hand_bytes = herdrdev_path.read_text()
+    rust_step3 = tmp / "rust-step3.json"
+    rust_step3.write_text(json.dumps({
+        "added": {"r": {"no_unsafe_without_approval": {"verdict": "REJECT", "rule": "no unsafe"}}},
+        "changed": {}, "deprecated": {},
+    }))
+    r = run("--root", str(compose_root), "--update", "rust", "--changeset", str(rust_step3),
+            "--ledger", str(ledger), "--nrra", str(nrra))
+    check("compose-rust-step3", r.returncode == 0, r.stderr)
+    rust_kb_c = kb_of("rust")
+    r = run("--root", str(compose_root), "--propagate", "rust", "--confirm")
+    check("propagate-diverged-exit10", r.returncode == 10, f"(rc={r.returncode}) {r.stdout}")
+    check("propagate-diverged-reported", "diverged" in (r.stdout + r.stderr), r.stdout + r.stderr)
+    check("propagate-diverged-fingerprint-wording",
+          "copy fingerprint mismatch" in r.stderr, r.stderr)
+    check("propagate-diverged-does-not-name-the-fact",
+          "use_question_mark" not in (r.stdout + r.stderr), r.stdout + r.stderr)
+    check("propagate-diverged-wrote-nothing", herdrdev_path.read_text() == hand_bytes)
+    check("propagate-per-borrower-outcome",
+          "propagated rust -> mobile" in r.stdout
+          and graph_at("mobile")["composed"]["rust"]["kb_version"] == rust_kb_c,
+          r.stdout)
+
+    # AC-8: a fresh copy that is merely behind fails the composed-version check as stale
+    rust_step4 = tmp / "rust-step4.json"
+    rust_step4.write_text(json.dumps({
+        "added": {"r": {"prefer_result": {"verdict": "r", "rule": "return Result"}}},
+        "changed": {}, "deprecated": {},
+    }))
+    r = run("--root", str(compose_root), "--update", "rust", "--changeset", str(rust_step4),
+            "--ledger", str(ledger), "--nrra", str(nrra))
+    check("compose-rust-step4", r.returncode == 0, r.stderr)
+    rust_kb_d = kb_of("rust")
+    cc = run("--root", str(compose_root), "--check-composed", "mobile")
+    check("check-composed-stale-exit10", cc.returncode == 10, f"(rc={cc.returncode})")
+    check("check-composed-reports-recorded-and-current",
+          f"recorded={rust_kb_c}" in cc.stdout and f"current={rust_kb_d}" in cc.stdout,
+          cc.stdout)
+    check("check-composed-reports-stale", "stale" in (cc.stdout + cc.stderr), cc.stdout + cc.stderr)
+    check("check-composed-stale-line", "[write-graph] STALE" in cc.stderr, cc.stderr)
+
+    # the same code covers a diverged copy (not current, and not a schema error)
+    cc = run("--root", str(compose_root), "--check-composed", "herdrdev")
+    check("check-composed-diverged-exit10", cc.returncode == 10, f"(rc={cc.returncode})")
+    check("check-composed-diverged-status", "diverged" in cc.stdout, cc.stdout)
+
+    # a real error is not the stale code: no graph at all → 2; nothing composed → 1
+    cc = run("--root", str(compose_root), "--check-composed", "no-such-graph")
+    check("check-composed-missing-graph-exit2", cc.returncode == 2, f"(rc={cc.returncode})")
+    cc = run("--root", str(compose_root), "--check-composed", "rust")
+    check("check-composed-nothing-exit1", cc.returncode == 1, f"(rc={cc.returncode})")
+
+    # AC-3: a declaration whose original left the project fails closed, writing nothing
+    absent_root = tmp / "absent-proj"
+    (absent_root / ".git").mkdir(parents=True)
+    adocs = absent_root / ".rosetta" / "docs"
+    r = run("--root", str(absent_root), "--create", "rust", "--nrra", str(nrra),
+            "--ledger", str(ledger))
+    check("absent-rust-create", r.returncode == 0, r.stderr)
+    r = run("--root", str(absent_root), "--create", "orphan", "--nrra", str(nrra),
+            "--ledger", str(ledger), "--composed-with", "rust")
+    check("absent-orphan-create", r.returncode == 0, r.stderr)
+    orphan_path = adocs / "orphan" / "fact-graph.json"
+    orphan_before = orphan_path.read_text()
+    (adocs / "rust" / "fact-graph.json").unlink()
+
+    orphan_cs = tmp / "orphan-cs.json"
+    orphan_cs.write_text(json.dumps({
+        "added": {"r": {"orphan-rule": {"verdict": "r", "rule": "a rule"}}},
+        "changed": {}, "deprecated": {},
+    }))
+    r = run("--root", str(absent_root), "--update", "orphan", "--changeset", str(orphan_cs),
+            "--ledger", str(ledger), "--nrra", str(nrra))
+    check("absent-original-rejected", r.returncode != 0, f"(rc={r.returncode})")
+    check("absent-original-names-check", "composed-with" in r.stderr, r.stderr)
+    check("absent-original-names-the-graph", "rust" in r.stderr, r.stderr)
+    check("absent-original-wrote-nothing", orphan_path.read_text() == orphan_before)
+    cc = run("--root", str(absent_root), "--check-composed", "orphan")
+    check("absent-original-check-composed-exit10", cc.returncode == 10, f"(rc={cc.returncode})")
+    check("absent-original-check-names-missing", "missing-original" in (cc.stdout + cc.stderr),
+          cc.stdout + cc.stderr)
+
+    # the selection rule itself: default all, a subset, skip, and an unknown name dies
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("wg_selection_under_test", WG)
+    W = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(W)
+    names = ["herdrdev", "mobile"]
+    check("selection-default-is-all", W.parse_borrower_selection("", names) == names, "default")
+    check("selection-all", W.parse_borrower_selection("all", names) == names, "all")
+    check("selection-named-subset",
+          W.parse_borrower_selection("mobile", names) == ["mobile"], "subset")
+    check("selection-skip", W.parse_borrower_selection("skip", names) == [], "skip")
+    unknown_died = False
+    try:
+        W.parse_borrower_selection("nope", names)
+    except SystemExit:
+        unknown_died = True
+    check("selection-unknown-name-dies", unknown_died, True)
+
     # open ledger rejected
     open_l = dict(CLOSED, censused=2, rows=CLOSED["rows"] + [{
         "id": "t02", "territory": "x", "class": "reference",
@@ -615,7 +871,9 @@ def main() -> int:
         for f in failures:
             print("FAIL:", f, file=sys.stderr)
         return 1
-    print("ok — write-graph.py create/apply-nrra/update/check + open/mismatch/forged rejected")
+    print("ok — write-graph.py create/apply-nrra/update/check + open/mismatch/forged rejected + "
+          "composition copied by value, listed (--propagate --list), confirm-gated, "
+          "fingerprint-guarded, fresh copies skipped, --check-composed exits 10 when stale")
     return 0
 
 

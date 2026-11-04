@@ -52,6 +52,11 @@ from naming import (  # noqa: E402
 )
 from resolve import project_root  # noqa: E402
 from version_label import format_kb_version  # noqa: E402
+from versions import (  # noqa: E402
+    COMPOSED_KEY,
+    composed_entries,
+    declared_composed_slugs,
+)
 
 
 # Delegating alias: the 5-tier precedence lives in scripts/rosetta/resolve.py. Kept under
@@ -362,7 +367,72 @@ def full_excerpt(graph: dict, domain: str, role: str) -> str:
     lines.append("## All API signatures (reference)")
     for name, sig in a.items():
         lines.append(f"- `{name}`: {sig}")
+    lines.extend(composed_excerpt(graph, role))
     return "\n".join(lines) + "\n"
+
+
+def composed_excerpt(graph: dict, role: str) -> list[str]:
+    """Render borrowed facts BY VALUE under the source's own banner.
+
+    Never merged into the host's sections: a copied ``r`` key must not overwrite a host rule
+    of the same name, and a reader has to be able to see which codebase a fact came from.
+    """
+    lines: list[str] = []
+    for slug, entry in composed_entries(graph).items():
+        facts = entry.get("facts") if isinstance(entry, dict) else None
+        if not isinstance(facts, dict):
+            continue
+        edition = entry.get("kb_version") or "unknown"
+        lines.append("")
+        lines.append("---")
+        lines.append(f"## [composed: {slug}] borrowed facts — {slug} edition {edition}")
+        lines.append("")
+        # Only the six fact sections, so the borrowed render cannot recurse into its own
+        # composition (facts carry no _meta, hence no declaration).
+        borrowed = {section: facts.get(section) or {} for section in ("v", "w", "r", "a", "x", "t")}
+        lines.append(full_excerpt(borrowed, f"composed:{slug}", role).rstrip())
+    return lines
+
+
+def _original_graph_path(slug: str) -> Path:
+    """Where this project keeps a graph's own file (modern layout, then legacy)."""
+    remapped = SHARED_DOMAIN_MAP.get(slug, slug)
+    for candidate in (
+        REPO_ROOT / ".rosetta" / "docs" / remapped / "fact-graph.json",
+        REPO_ROOT / "docs" / remapped / "fact-graph.json",
+        REPO_ROOT / "agents" / slug / "kb" / "fact-graph.json",
+    ):
+        if candidate.is_file():
+            return candidate
+    return REPO_ROOT / ".rosetta" / "docs" / remapped / "fact-graph.json"
+
+
+def assert_composed_complete(graph: dict, slug: str) -> None:
+    """Fail closed when a declaration has no copy, or its original is not in this project.
+
+    A declaration that renders as nothing IS the silent partial render this feature exists
+    to remove, so it is an error, not a warning, and there is no single-graph fallback."""
+    declared = declared_composed_slugs(graph)
+    if not declared:
+        return
+    copied = set(composed_entries(graph))
+    missing_copy = [source for source in declared if source not in copied]
+    if missing_copy:
+        raise ValueError(
+            f"composed-copy-missing: {slug} declares {missing_copy} but its body carries no "
+            f"copy under {COMPOSED_KEY!r}"
+        )
+    missing_original = [
+        source for source in declared if not _original_graph_path(source).is_file()
+    ]
+    if missing_original:
+        details = "; ".join(
+            f"{source} -> {_original_graph_path(source)}" for source in missing_original
+        )
+        raise ValueError(
+            f"composed-original-missing: {slug} declares {details} but no such fact-graph "
+            f"exists in this project"
+        )
 
 
 def render_embed(graph: dict, raw_bytes: bytes, domain: str, role: str, path: Path | None = None) -> str:
@@ -531,6 +601,15 @@ def main(argv: list[str]) -> int:
     except json.JSONDecodeError as e:
         sys.stderr.write(f"generate_excerpt: invalid JSON in {path}: {e}\n")
         return 2
+
+    # Fail closed on a graph that declares a composition it cannot show (AC-3). No graph is
+    # rendered past this point, and there is no silent single-graph fallback.
+    for graph, _raw, slug in items:
+        try:
+            assert_composed_complete(graph, slug)
+        except ValueError as e:
+            sys.stderr.write(f"generate_excerpt: {e}\n")
+            return 2
 
     version = _composite_version(items)
     if args.print_version:

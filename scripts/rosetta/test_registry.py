@@ -159,6 +159,62 @@ def main() -> int:
                   p.resolve() == p.resolve() and str(p).startswith(str(R.repo_root())),
                   f"({p})")
 
+        # ── borrow-by-value reverse query ───────────────────────────
+        # Build the borrower with the REAL shape writer (factgraph), not a hand-rolled dict,
+        # so the query is exercised against the container the writer actually produces.
+        import factgraph as FG  # noqa: E402
+        import version_label as VL  # noqa: E402
+        import versions as V  # noqa: E402
+
+        rust_graph = json.loads(
+            (root / ".rosetta" / "docs" / "rust" / "fact-graph.json").read_text())
+        rust_edition = VL.kb_edition(rust_graph)
+        borrower_doc = {
+            "v": {"pkg": "herdrdev", "kb_version": "1.0.0", "pinned_date": "2026-11-04"},
+            "w": {}, "r": {}, "a": {}, "x": {}, "t": {},
+            "_meta": {"technology": "Herdr"},
+        }
+        borrowed = FG.sync_composed_with(FG.compose_by_value(borrower_doc, rust_graph, "rust"))
+        borrower_dir = root / ".rosetta" / "docs" / "herdrdev"
+        borrower_dir.mkdir(parents=True, exist_ok=True)
+        borrower_path = borrower_dir / "fact-graph.json"
+        borrower_path.write_text(json.dumps(borrowed))
+
+        found = R.find_borrowers("rust")
+        names = [b["graph"] for b in found["borrowers"]]
+        check("borrowers-found", names == ["herdrdev"], repr(names))
+        check("borrowers-recorded-edition",
+              found["borrowers"][0]["recorded_kb_version"] == rust_edition,
+              repr(found["borrowers"]))
+        check("borrowers-current-edition",
+              found["borrowers"][0]["current_kb_version"] == rust_edition,
+              repr(found["borrowers"]))
+        check("borrowers-fresh", found["borrowers"][0]["status"] == V.COMPOSED_FRESH,
+              repr(found["borrowers"]))
+        check("borrowers-original-edition", found["kb_version"] == rust_edition,
+              repr(found["kb_version"]))
+
+        cli_bw = subprocess.run(
+            [sys.executable, str(HERE / "registry.py"), "--root", str(root),
+             "borrowers", "rust"],
+            capture_output=True, text=True)
+        check("cli-borrowers-exit0", cli_bw.returncode == 0, cli_bw.stderr)
+        check("cli-borrowers-lists-borrower", "herdrdev" in cli_bw.stdout, cli_bw.stdout)
+        check("cli-borrowers-shows-both-editions",
+              "recorded=" in cli_bw.stdout and "current=" in cli_bw.stdout, cli_bw.stdout)
+        cli_none = subprocess.run(
+            [sys.executable, str(HERE / "registry.py"), "--root", str(root),
+             "borrowers", "mastra"],
+            capture_output=True, text=True)
+        check("cli-borrowers-none-exit1", cli_none.returncode == 1,
+              f"(rc={cli_none.returncode} {cli_none.stdout})")
+
+        # The registry index keeps mirroring the DECLARATION (no new index shape).
+        rescanned = R.scan()
+        check("borrower-declared-in-scan",
+              rescanned["graphs"].get("herdrdev", {}).get("composed_with") == ["rust"],
+              repr(rescanned["graphs"].get("herdrdev")))
+
         # Optional live-fleet floor (the original brain-shaped check).
         live = os.environ.get("ROSETTA_LIVE_ROOT")
         if live and (Path(live) / ".rosetta" / "docs" / "cloudflare-workers" / "fact-graph.json").is_file():
@@ -180,7 +236,8 @@ def main() -> int:
         for f in failures:
             print("FAIL:", f, file=sys.stderr)
         return 1
-    print("ok — registry scanner + mapping + validate on a real fixture project")
+    print("ok — registry scanner + mapping + validate on a real fixture project + "
+          "borrow-by-value reverse query (find_borrowers + borrowers CLI)")
     return 0
 
 
