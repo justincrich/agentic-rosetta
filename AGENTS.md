@@ -185,3 +185,6 @@ Do not treat any one of them as secretly authoritative until they are aligned.
 | [`grok-skills/AGENTS.md`](grok-skills/AGENTS.md) | Tempted to edit the Grok pack |
 | [`CONFIG.md`](CONFIG.md) | Storage roots, `doctor`, precedence |
 | [`WHY.md`](WHY.md) | Why two layers / three registers |
+| [`docs/code-quality/profile.md`](docs/code-quality/profile.md) | Deciding where new code goes, or which module owns a decision |
+| [`docs/code-quality/roadmap.md`](docs/code-quality/roadmap.md) | Planning cleanup work; the ranked list and what is next |
+| [`docs/code-quality/known-problems.md`](docs/code-quality/known-problems.md) | Something looks broken — check whether it is already recorded |
