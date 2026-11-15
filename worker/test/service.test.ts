@@ -4,34 +4,51 @@
  * Every behavioural assertion here runs against the REAL Worker in workerd:
  * the suite spawns `wrangler dev --local` and drives it over HTTP, including
  * with the official `@modelcontextprotocol/client` 2.4.0 SDK. Nothing is
- * mocked: the token check, the asset reads and the MCP handler are the ones
- * that ship.
+ * mocked: the token check, the R2 reads and the MCP handler are the ones that
+ * ship.
  *
- * The suite stages a minimal snapshot into `worker/content/` when the publisher
- * has not staged one, writes the token into `worker/.dev.vars`, and removes
- * both again when it created them.
+ * The store is R2, so the suite fills LOCAL R2 with the publisher's own upload
+ * path (`wrangler r2 object put --local` against one shared `--persist-to`
+ * directory), then reads every byte back through the Worker. It stages a
+ * minimal snapshot by default and removes both the stage and the local store
+ * again when it created them.
  */
 import { afterAll, describe, expect, it, setDefaultTimeout } from 'bun:test';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import worker from '../src/index';
 
 // A cold `wrangler dev` bundles the Worker before it serves the first request;
-// 5s (the bun default) is not enough on a machine with an empty cache.
-setDefaultTimeout(120_000);
+// 5s (the bun default) is not enough on a machine with an empty cache. The real
+// snapshot upload writes 674 R2 objects through the CLI, so the suite also
+// needs room for that.
+setDefaultTimeout(600_000);
 
 const WORKER_DIR = join(import.meta.dir, '..');
 const REPO_ROOT = join(WORKER_DIR, '..');
-const CONTENT_DIR = join(WORKER_DIR, 'content');
 const DEV_VARS_PATH = join(WORKER_DIR, '.dev.vars');
 const WRANGLER_BIN = join(WORKER_DIR, 'node_modules', '.bin', 'wrangler');
 const PUBLISH_SCRIPT = join(REPO_ROOT, 'scripts', 'kb-delivery', 'publish_snapshot.py');
 const START_TIMEOUT_MS = 90_000;
+
+/**
+ * The R2 bucket the Worker binds (`wrangler.jsonc`). Local storage is keyed by
+ * bucket name, so the publisher and the dev server must name the same one.
+ */
+const R2_BUCKET = 'rosetta-kb-mcp-snapshots';
+
+/**
+ * The publish stage and the local R2 storage the dev server reads. Both live
+ * outside the repo: the stage is an artifact of the publish, the store is
+ * runtime state, and neither belongs in the worktree.
+ */
+const STAGE_DIR = mkdtempSync(join(tmpdir(), 'rosetta-r2-stage-'));
+const PERSIST_DIR = mkdtempSync(join(tmpdir(), 'rosetta-r2-state-'));
 
 /**
  * The real consumer checkout the publisher stages from. AC-12 is about the
@@ -46,8 +63,11 @@ const TOKEN_THIRD = 'svc01-unconfigured-9a6b47d2';
 const CLIENT_ID = 'static-token';
 const MCP_SCOPE = 'mcp:read';
 
+/** Whatever `.dev.vars` held before the suite rewrote it, so the run leaves it as it found it. */
+const ORIGINAL_DEV_VARS: string | null = existsSync(DEV_VARS_PATH) ? readFileSync(DEV_VARS_PATH, 'utf8') : null;
+
 // ---------------------------------------------------------------------------
-// Fixture staging: a minimal published snapshot.
+// Fixture staging: a minimal published snapshot, uploaded to local R2.
 // ---------------------------------------------------------------------------
 
 const FIXTURE_AGENTS = [
@@ -57,60 +77,92 @@ const FIXTURE_AGENTS = [
 
 const FIXTURE_KB = { slug: 'demo', kb_version: '1.0.0', graph: { version: '1.0.0', api: { run: 'x()' }, gotchas: { note: 'y' } } };
 
-let stagedContent = false;
-
 /**
- * Stage the real published snapshot for AC-12 by running the publisher against
- * the real consumer checkout. It reuses a snapshot a developer already staged;
- * otherwise it replaces whatever this suite staged (the two-agent fixture) with
- * the real one, and removes it again in `afterAll`.
+ * Which snapshot the local store holds: the two-agent fixture until AC-12
+ * publishes the real one. A later dev-server start must never restage the
+ * fixture over the real snapshot the pointer already names.
  */
-function stageRealSnapshot(): void {
-  const manifestPath = join(CONTENT_DIR, 'manifest.json');
-  if (existsSync(manifestPath)) {
-    const staged = JSON.parse(readFileSync(manifestPath, 'utf8')) as { agents?: unknown[]; kbs?: unknown[] };
-    if ((staged.agents?.length ?? 0) > FIXTURE_AGENTS.length && (staged.kbs?.length ?? 0) >= 1) return;
-  }
-  if (!existsSync(join(PUBLISH_ROOT, 'scripts', 'agentshare.py'))) {
-    throw new Error(
-      `AC-12 needs the real consumer checkout: ${PUBLISH_ROOT} has no scripts/agentshare.py. ` +
-        'Set ROSETTA_PUBLISH_ROOT to a checkout with scripts/agentshare.py.',
-    );
-  }
-  rmSync(CONTENT_DIR, { recursive: true, force: true });
-  const publish = spawnSync('python3', [PUBLISH_SCRIPT, '--root', PUBLISH_ROOT, '--stage', CONTENT_DIR], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-    env: { ...process.env, HOME: process.env.HOME ?? homedir() },
-  });
-  console.log(`$ python3 ${PUBLISH_SCRIPT} --root ${PUBLISH_ROOT} --stage ${CONTENT_DIR}`);
-  console.log(`${publish.stdout ?? ''}${publish.stderr ?? ''}`);
-  if (publish.status !== 0) {
-    throw new Error(`publish_snapshot.py exited ${publish.status}; AC-12 needs a real published snapshot.\n${publish.stdout}${publish.stderr}`);
-  }
-  stagedContent = true;
+let stageState: 'none' | 'fixture' | 'real' = 'none';
+
+/** Every staged payload file, keyed by stage-relative POSIX path (the snapshot's own layout). */
+function payloadFiles(): Record<string, string> {
+  const found: Record<string, string> = {};
+  const walk = (relative: string) => {
+    const absolute = join(STAGE_DIR, relative);
+    if (!existsSync(absolute)) return;
+    for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+      const child = `${relative}/${entry.name}`;
+      if (entry.isDirectory()) walk(child);
+      else found[child] = join(STAGE_DIR, child);
+    }
+  };
+  for (const base of ['targets', 'kb', 'docs']) walk(base);
+  return found;
 }
 
-const ORIGINAL_DEV_VARS: string | null = existsSync(DEV_VARS_PATH) ? readFileSync(DEV_VARS_PATH, 'utf8') : null;
+/** `files.json`: the inventory the publisher writes and the store resolves paths through. */
+function writeInventory(snapshotId: string): void {
+  const files: Record<string, { sha256: string; bytes: number }> = {};
+  for (const [relative, absolute] of Object.entries(payloadFiles())) {
+    const body = readFileSync(absolute);
+    files[relative] = { sha256: createHash('sha256').update(body).digest('hex'), bytes: body.length };
+  }
+  writeFileSync(join(STAGE_DIR, 'files.json'), `${JSON.stringify({ schema: 1, snapshot_id: snapshotId, files }, null, 1)}\n`);
+}
 
+/**
+ * Run the publisher's upload path against local R2. This is the same
+ * `wrangler r2 object put` transport the deployed publish uses; only the
+ * target differs (`--local --persist-to`), so the suite exercises the real
+ * layout (blobs, snapshot metadata, pointer last) rather than a test-only copy.
+ */
+function uploadToLocalR2(...extra: string[]): void {
+  const args = [
+    PUBLISH_SCRIPT,
+    '--stage',
+    STAGE_DIR,
+    '--r2-bucket',
+    R2_BUCKET,
+    '--r2-local',
+    '--persist-to',
+    PERSIST_DIR,
+    '--wrangler',
+    WRANGLER_BIN,
+    '--upload-only',
+    ...extra,
+  ];
+  const upload = spawnSync('python3', args, { cwd: REPO_ROOT, encoding: 'utf8' });
+  console.log(`$ python3 ${args.join(' ')}`);
+  console.log(`${upload.stdout ?? ''}${upload.stderr ?? ''}`);
+  if (upload.status !== 0) {
+    throw new Error(`the R2 upload exited ${upload.status}; the local store was not seeded.\n${upload.stdout}${upload.stderr}`);
+  }
+}
+
+/** Stage the two-agent fixture and publish it to local R2. */
 function stageSnapshot(): void {
-  if (existsSync(join(CONTENT_DIR, 'manifest.json'))) return;
-  stagedContent = true;
+  if (stageState !== 'none') return;
+  rmSync(STAGE_DIR, { recursive: true, force: true });
+  mkdirSync(STAGE_DIR, { recursive: true });
   for (const agent of FIXTURE_AGENTS) {
-    const dir = join(CONTENT_DIR, 'targets', 'claude', agent.name);
+    const dir = join(STAGE_DIR, 'targets', 'claude', agent.name);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'agent.md'), agent.body);
   }
-  const kbDir = join(CONTENT_DIR, 'kb', FIXTURE_KB.slug);
+  const kbDir = join(STAGE_DIR, 'kb', FIXTURE_KB.slug);
   mkdirSync(kbDir, { recursive: true });
-  const graphText = JSON.stringify(FIXTURE_KB.graph);
-  writeFileSync(join(kbDir, 'fact-graph.json'), graphText);
+  writeFileSync(join(kbDir, 'fact-graph.json'), JSON.stringify(FIXTURE_KB.graph));
+  const snapshotId = 'svc01fixture0';
+  writeInventory(snapshotId);
+  const inventory = JSON.parse(readFileSync(join(STAGE_DIR, 'files.json'), 'utf8')) as {
+    files: Record<string, { sha256: string; bytes: number }>;
+  };
   writeFileSync(
-    join(CONTENT_DIR, 'manifest.json'),
+    join(STAGE_DIR, 'manifest.json'),
     `${JSON.stringify(
       {
         schema: 1,
-        snapshot_id: 'svc01fixture0',
+        snapshot_id: snapshotId,
         published_at: '2026-11-15T00:00:00.000Z',
         consumer_ref: null,
         plugin_version: '0.4.6',
@@ -119,17 +171,76 @@ function stageSnapshot(): void {
           name: agent.name,
           description: agent.description,
           model: agent.model,
-          bytes: agent.body.length,
+          bytes: inventory.files[`targets/claude/${agent.name}/agent.md`].bytes,
           path: `targets/claude/${agent.name}/agent.md`,
           target: 'claude',
         })),
-        kbs: [{ slug: FIXTURE_KB.slug, kb_version: FIXTURE_KB.kb_version, bytes: graphText.length, path: `kb/${FIXTURE_KB.slug}/fact-graph.json` }],
+        kbs: [
+          {
+            slug: FIXTURE_KB.slug,
+            kb_version: FIXTURE_KB.kb_version,
+            bytes: inventory.files[`kb/${FIXTURE_KB.slug}/fact-graph.json`].bytes,
+            path: `kb/${FIXTURE_KB.slug}/fact-graph.json`,
+          },
+        ],
         excluded: {},
       },
       null,
       2,
     )}\n`,
   );
+  uploadToLocalR2();
+  stageState = 'fixture';
+}
+
+/**
+ * Stage the real published snapshot for AC-12 by running the publisher against
+ * the real consumer checkout, uploading straight into local R2. The pointer
+ * moves to the new snapshot the same way a deployed publish moves it.
+ */
+function stageRealSnapshot(): void {
+  if (stageState === 'real') return;
+  const manifestPath = join(STAGE_DIR, 'manifest.json');
+  if (existsSync(manifestPath)) {
+    const staged = JSON.parse(readFileSync(manifestPath, 'utf8')) as { agents?: unknown[]; kbs?: unknown[] };
+    if ((staged.agents?.length ?? 0) > FIXTURE_AGENTS.length && (staged.kbs?.length ?? 0) >= 1) {
+      stageState = 'real';
+      return;
+    }
+  }
+  if (!existsSync(join(PUBLISH_ROOT, 'scripts', 'agentshare.py'))) {
+    throw new Error(
+      `AC-12 needs the real consumer checkout: ${PUBLISH_ROOT} has no scripts/agentshare.py. ` +
+        'Set ROSETTA_PUBLISH_ROOT to a checkout with scripts/agentshare.py.',
+    );
+  }
+  const args = [
+    PUBLISH_SCRIPT,
+    '--root',
+    PUBLISH_ROOT,
+    '--targets',
+    'claude,codex',
+    '--stage',
+    STAGE_DIR,
+    '--r2-bucket',
+    R2_BUCKET,
+    '--r2-local',
+    '--persist-to',
+    PERSIST_DIR,
+    '--wrangler',
+    WRANGLER_BIN,
+  ];
+  const publish = spawnSync('python3', args, {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, HOME: process.env.HOME ?? homedir() },
+  });
+  console.log(`$ python3 ${args.join(' ')}`);
+  console.log(`${publish.stdout ?? ''}${publish.stderr ?? ''}`);
+  if (publish.status !== 0) {
+    throw new Error(`publish_snapshot.py exited ${publish.status}; AC-12 needs a real published snapshot.\n${publish.stdout}${publish.stderr}`);
+  }
+  stageState = 'real';
 }
 
 // ---------------------------------------------------------------------------
@@ -171,11 +282,15 @@ async function startDevWorker(vars: Record<string, string>): Promise<DevWorker> 
   stageSnapshot();
   writeDevVars(vars);
   const port = await freePort();
-  const child: ChildProcess = spawn(WRANGLER_BIN, ['dev', '--local', '--ip', '127.0.0.1', '--port', String(port)], {
-    cwd: WORKER_DIR,
-    env: { ...process.env, CI: '1', NO_COLOR: '1', FORCE_COLOR: '0', WRANGLER_SEND_METRICS: 'false' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const child: ChildProcess = spawn(
+    WRANGLER_BIN,
+    ['dev', '--local', '--persist-to', PERSIST_DIR, '--ip', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: WORKER_DIR,
+      env: { ...process.env, CI: '1', NO_COLOR: '1', FORCE_COLOR: '0', WRANGLER_SEND_METRICS: 'false' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
   const chunks: string[] = [];
   const collect = (data: Buffer) => {
     chunks.push(data.toString('utf8'));
@@ -199,7 +314,9 @@ async function startDevWorker(vars: Record<string, string>): Promise<DevWorker> 
     child.kill('SIGKILL');
     throw new Error(`wrangler dev was not ready within ${START_TIMEOUT_MS}ms.\n${log()}`);
   }
-  console.log(`[service] ${WRANGLER_BIN} dev --local --ip 127.0.0.1 --port ${port} :: Ready on http://127.0.0.1:${port}`);
+  console.log(
+    `[service] ${WRANGLER_BIN} dev --local --persist-to ${PERSIST_DIR} --ip 127.0.0.1 --port ${port} :: Ready on http://127.0.0.1:${port}`,
+  );
 
   return {
     url: `http://127.0.0.1:${port}`,
@@ -257,7 +374,8 @@ afterAll(async () => {
   }
   if (ORIGINAL_DEV_VARS !== null) writeFileSync(DEV_VARS_PATH, ORIGINAL_DEV_VARS);
   else if (existsSync(DEV_VARS_PATH)) rmSync(DEV_VARS_PATH);
-  if (stagedContent) rmSync(CONTENT_DIR, { recursive: true, force: true });
+  rmSync(STAGE_DIR, { recursive: true, force: true });
+  rmSync(PERSIST_DIR, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -321,12 +439,14 @@ const INDEX_SRC = () => source('src/index.ts');
 const TOOLS_SRC = () => source('src/tools.ts');
 const WRANGLER_CONFIG = () => source('wrangler.jsonc');
 
-/** The manifest the running Worker is actually serving. */
+/** The manifest the running Worker is actually serving (the stage the pointer names). */
 function currentManifest(): {
+  snapshot_id?: string;
   agents: Array<{ name: string; path: string }>;
   kbs: Array<{ slug: string; bytes?: number; path: string }>;
 } {
-  return JSON.parse(readFileSync(join(CONTENT_DIR, 'manifest.json'), 'utf8')) as {
+  return JSON.parse(readFileSync(join(STAGE_DIR, 'manifest.json'), 'utf8')) as {
+    snapshot_id?: string;
     agents: Array<{ name: string; path: string }>;
     kbs: Array<{ slug: string; bytes?: number; path: string }>;
   };
@@ -407,7 +527,8 @@ describe('SERVICE-01 read-only MCP Worker', () => {
     expect(index).toContain("route: '/mcp'");
     expect(index).toContain("legacy: 'stateless'");
     expect(index).toContain('corsOptions: false');
-    expect(index).toContain('createMcpHandler(createRosettaServer(env)');
+    expect(index).toContain('createMcpHandler(createRosettaServer(');
+    expect(index).toContain('createSnapshotStore(env.SNAPSHOT)');
     const handlerCall = index.indexOf('createMcpHandler(');
     const fetchEntry = index.indexOf('async fetch(');
     expect(fetchEntry).toBeGreaterThan(-1);
@@ -667,8 +788,108 @@ describe('SERVICE-01 read-only MCP Worker', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Snapshot assets are never edge-cached, so a rollback or publish is visible
-  // on the next request instead of after a cache TTL.
+  // AC-23 — the contract above, served from the R2 store.
+  // -------------------------------------------------------------------------
+
+  it('AC-23 serves the same contract from the R2 store: pointer-addressed reads, route, 405, 403, 401, bearer authInfo, no Durable Object', async () => {
+    const dev = await devWorkerWith('current-only');
+
+    // The read path is R2 behind current.json, and the Worker bundle carries no
+    // snapshot: the store binding is the only content source.
+    const config = WRANGLER_CONFIG();
+    expect(config).toContain('"r2_buckets"');
+    expect(config).toContain('"binding": "SNAPSHOT"');
+    expect(config).toContain(`"bucket_name": "${R2_BUCKET}"`);
+    expect(config).not.toContain('"assets"');
+    expect(config).not.toContain('durable_objects');
+    expect(config).not.toContain('migrations');
+    const index = INDEX_SRC();
+    expect(index).toContain('createSnapshotStore(env.SNAPSHOT)');
+    const store = source('src/store.ts');
+    expect(store).toContain("POINTER_KEY = 'current.json'");
+    expect(store).toContain('BLOB_PREFIX');
+
+    // 401 without a token, on the MCP route and on a snapshot path alike.
+    expect((await postMcp(dev.url, {}, initializeBody())).status).toBe(401);
+    expect((await fetch(`${dev.url}/manifest.json`)).status).toBe(401);
+
+    // 200 with the bearer: the manifest served is the one the pointer names,
+    // and the payload bytes are the published bytes.
+    const manifestResponse = await fetch(`${dev.url}/manifest.json`, { headers: bearer(TOKEN_CURRENT) });
+    expect(manifestResponse.status).toBe(200);
+    const served = (await manifestResponse.json()) as { snapshot_id?: string; agents: Array<{ name: string; path: string }> };
+    const staged = currentManifest();
+    expect(served.snapshot_id).toBe(staged.snapshot_id);
+    expect(served.agents.map((agent) => agent.name)).toEqual(staged.agents.map((agent) => agent.name));
+
+    // A change on the publish disk does not change what the Worker serves: the
+    // bytes come from the content-addressed blob the pointer's snapshot names.
+    const agentPath = staged.agents[0].path;
+    const published = readFileSync(join(STAGE_DIR, agentPath), 'utf8');
+    writeFileSync(join(STAGE_DIR, agentPath), 'TAMPERED — this is not the published snapshot\n');
+    try {
+      const payload = await fetch(`${dev.url}/files/${agentPath}`, { headers: bearer(TOKEN_CURRENT) });
+      expect(payload.status).toBe(200);
+      expect(await payload.text()).toBe(published);
+    } finally {
+      writeFileSync(join(STAGE_DIR, agentPath), published);
+    }
+
+    // The route option is real, and the handler still lives on /mcp only.
+    expect((await postMcp(dev.url, bearer(TOKEN_CURRENT), initializeBody())).status).toBe(200);
+    const offRoute = await fetch(`${dev.url}/mcp/other`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: ACCEPT_BOTH, ...bearer(TOKEN_CURRENT) },
+      body: JSON.stringify(initializeBody()),
+    });
+    expect(offRoute.status).toBe(404);
+
+    // No session surface: GET and DELETE are 405 and never issue a session id.
+    const get = await fetch(`${dev.url}/mcp`, { method: 'GET', headers: { Accept: 'text/event-stream', ...bearer(TOKEN_CURRENT) } });
+    expect(get.status).toBe(405);
+    expect(get.headers.get('mcp-session-id')).toBeNull();
+    const del = await fetch(`${dev.url}/mcp`, { method: 'DELETE', headers: bearer(TOKEN_CURRENT) });
+    expect(del.status).toBe(405);
+    expect(del.headers.get('mcp-session-id')).toBeNull();
+
+    // Origin allowlist, unchanged by the store move.
+    const foreign = await postMcp(dev.url, { ...bearer(TOKEN_CURRENT), Origin: 'https://evil.example' }, initializeBody());
+    expect(foreign.status).toBe(403);
+    const localhost = await postMcp(dev.url, { ...bearer(TOKEN_CURRENT), Origin: 'http://localhost:3000' }, initializeBody());
+    expect(localhost.status).toBe(200);
+
+    // The SDK still sees the four read-only tools, answered from R2.
+    const names = await toolNames(dev.url, TOKEN_CURRENT);
+    expect(names.sort()).toEqual(['get_agent', 'get_kb', 'list_agents', 'list_kbs']);
+    await withSdkClient(dev.url, TOKEN_CURRENT, async (client) => {
+      const fetched = await client.callTool({ name: 'get_agent', arguments: { name: staged.agents[0].name } });
+      expect(fetched.isError ?? false).toBe(false);
+      const payload = JSON.parse((fetched.content[0] as { text: string }).text) as { name: string; content: string; path: string; sha256: string };
+      expect(payload.name).toBe(staged.agents[0].name);
+      expect(payload.path).toBe(agentPath);
+      expect(Buffer.byteLength(payload.content, 'utf8')).toBeGreaterThan(0);
+      expect(createHash('sha256').update(readFileSync(join(STAGE_DIR, agentPath))).digest('hex')).toBe(payload.sha256);
+    });
+
+    // The handler receives the verified principal, exactly as before.
+    expect((await callTool(dev.url, TOKEN_CURRENT, 'list_agents', {})).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const log = dev.log();
+    const callLine = log
+      .split('\n')
+      .filter((line) => line.includes('mcp.tool_call') && line.includes('"list_agents"'))
+      .pop();
+    expect(callLine).toBeDefined();
+    const parsed = JSON.parse(callLine as string) as { clientId: string; scopes: string[]; tokenSlot: string };
+    expect(parsed.clientId).toBe(CLIENT_ID);
+    expect(parsed.scopes).toEqual([MCP_SCOPE]);
+    expect(parsed.tokenSlot).toBe('current');
+    expect(log).not.toContain(TOKEN_CURRENT);
+  });
+
+  // -------------------------------------------------------------------------
+  // Snapshot assets are never edge-cached, so a publish is visible on the next
+  // request instead of after a cache TTL.
   // -------------------------------------------------------------------------
 
   it('serves snapshot assets with Cache-Control: no-store', async () => {
@@ -693,13 +914,13 @@ describe('SERVICE-01 read-only MCP Worker', () => {
     stageRealSnapshot();
     const dev = await restartDevWorker('current-only');
 
-    const manifest = JSON.parse(readFileSync(join(CONTENT_DIR, 'manifest.json'), 'utf8')) as {
+    const manifest = JSON.parse(readFileSync(join(STAGE_DIR, 'manifest.json'), 'utf8')) as {
       snapshot_id: string;
       agents: Array<{ name: string; bytes: number; path: string }>;
       kbs: Array<{ slug: string; bytes: number; path: string }>;
     };
     const inventory = (
-      JSON.parse(readFileSync(join(CONTENT_DIR, 'files.json'), 'utf8')) as {
+      JSON.parse(readFileSync(join(STAGE_DIR, 'files.json'), 'utf8')) as {
         files: Record<string, { sha256: string; bytes: number }>;
       }
     ).files;

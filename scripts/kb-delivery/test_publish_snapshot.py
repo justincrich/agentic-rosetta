@@ -28,12 +28,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parents[1]
 PUBLISHER = HERE / "publish_snapshot.py"
+WRANGLER = PLUGIN / "worker" / "node_modules" / ".bin" / "wrangler"
 PAYLOAD_DIRS = ("targets", "kb", "docs")
 METADATA_FILES = ("manifest.json", "files.json", "scan-result.json")
+R2_BUCKET = "rosetta-kb-mcp-snapshots"
 EXPECTED_AGENTS = 293
 EXPECTED_KBS = 65
 EXPECTED_EXCLUDED = {"*.bak": 6, "*.log": 3, ".history/": 3}
 SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PATTERNS = ["sk-", "ghp_", "AKIA", "BEGIN PRIVATE KEY"]
 OTHER_TARGETS = ("opencode", "grok", "droid", "rogueone")
 
@@ -122,6 +125,153 @@ class PublishSnapshotTests(unittest.TestCase):
         extract = subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, capture_output=True)
         self.assertEqual(extract.returncode, 0, f"tar failed: {extract.stderr.decode()}")
         return dest
+
+    def wrangler(self, *args: str, expect: int = 0) -> subprocess.CompletedProcess:
+        """Run wrangler against local R2 storage; the transport the publisher uses."""
+        self.assertTrue(WRANGLER.is_file(), f"the Worker's wrangler install is missing at {WRANGLER}")
+        proc = subprocess.run(
+            [str(WRANGLER), "r2", "object", *args], capture_output=True, text=True, cwd=str(WRANGLER.parents[1])
+        )
+        self.assertEqual(proc.returncode, expect, f"command=wrangler r2 object {' '.join(args)}\n{proc.stdout}\n{proc.stderr}")
+        return proc
+
+    def r2_get(self, persist: Path, key: str) -> bytes:
+        """Read one object back out of local R2 through the CLI."""
+        out = self.tmp / f"read-{key.replace('/', '-')}"
+        self.wrangler(
+            "get",
+            f"{R2_BUCKET}/{key}",
+            "--file",
+            str(out),
+            "--local",
+            "--persist-to",
+            str(persist),
+        )
+        return out.read_bytes()
+
+    def publish_to_local_r2(
+        self, stage: Path, persist: Path, *, targets: str = "claude", env: dict | None = None, expect: int = 0
+    ) -> subprocess.CompletedProcess:
+        """Run the publisher's real R2 path against local storage."""
+        argv = [
+            sys.executable,
+            str(PUBLISHER),
+            "--root",
+            str(self.root),
+            "--targets",
+            targets,
+            "--stage",
+            str(stage),
+            "--r2-bucket",
+            R2_BUCKET,
+            "--r2-local",
+            "--persist-to",
+            str(persist),
+            "--wrangler",
+            str(WRANGLER),
+        ]
+        proc = subprocess.run(argv, capture_output=True, text=True, env=env)
+        if expect is not None:
+            self.assertEqual(
+                proc.returncode,
+                expect,
+                msg=f"command={argv}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
+            )
+        return proc
+
+    @staticmethod
+    def grep_tree(root: Path, needles: tuple[str, ...]) -> list[str]:
+        """Every file under ``root`` whose bytes carry one of ``needles``."""
+        hits: list[str] = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            body = path.read_bytes()
+            if any(needle.encode() in body for needle in needles):
+                hits.append(path.relative_to(root).as_posix())
+        return hits
+
+    @staticmethod
+    def grep_tracked_repo(needles: tuple[str, ...]) -> list[str]:
+        """Every git-tracked file in the plugin checkout whose bytes carry a needle."""
+        listing = subprocess.run(["git", "-C", str(PLUGIN), "ls-files", "-z"], capture_output=True)
+        hits: list[str] = []
+        for raw in listing.stdout.split(b"\0"):
+            if not raw:
+                continue
+            relative = raw.decode("utf-8", "replace")
+            path = PLUGIN / relative
+            if not path.is_file():
+                continue
+            body = path.read_bytes()
+            if any(needle.encode() in body for needle in needles):
+                hits.append(relative)
+        return hits
+
+    # ── AC-4 ───────────────────────────────────────────────────────────
+
+    def test_ac4_r2_s3_keys_stay_in_the_environment(self) -> None:
+        """Exported R2 S3 keys reach no tracked file, no staged file and no publish log line."""
+        # Derived, not typed in: a literal would collide with the "no key in a
+        # tracked file" assertion below, and the value a test writes down is
+        # exactly the kind of value that leaks into a repo.
+        key_id = "ac4keyid" + hashlib.sha256(b"ac4-test-key-id").hexdigest()[:24]
+        secret = "ac4secret" + hashlib.sha256(b"ac4-test-secret").hexdigest()[:32]
+        needles = (key_id, secret)
+        stage = self.tmp / "stage"
+        persist = self.tmp / "state"
+
+        # The operator exports R2 S3 keys; the publish still uploads for real
+        # (wrangler carries its own OAuth credential, so the keys are never
+        # needed, logged, staged or handed to a child process).
+        env = {**os.environ, "R2_ACCESS_KEY_ID": key_id, "R2_SECRET_ACCESS_KEY": secret}
+        proc = self.publish_to_local_r2(stage, persist, env=env)
+        log = proc.stdout + proc.stderr
+
+        # A publish really happened: the pointer, the snapshot metadata and a
+        # payload blob all read back out of R2, and the pointer was written last.
+        manifest = read_json(stage / "manifest.json")
+        pointer = json.loads(self.r2_get(persist, "current.json"))
+        self.assertEqual(pointer["snapshot_id"], manifest["snapshot_id"])
+        self.assertEqual(pointer["files"], len(payload_files(stage)))
+        self.assertRegex(pointer["manifest_sha256"], SHA256_RE)
+        self.assertEqual(
+            self.r2_get(persist, f"snapshots/{manifest['snapshot_id']}/manifest.json").decode(),
+            (stage / "manifest.json").read_text(encoding="utf-8"),
+        )
+        agent = manifest["agents"][0]
+        sha = read_json(stage / "files.json")["files"][agent["path"]]["sha256"]
+        self.assertEqual(self.r2_get(persist, f"blobs/{sha}"), (stage / agent["path"]).read_bytes())
+        self.assertGreater(len(manifest["agents"]), 0)
+        self.assertIn("blobs", proc.stdout)
+        # The upload log's last line names the pointer, i.e. it was written last.
+        self.assertIn("current.json", proc.stdout.strip().splitlines()[-1])
+        print(f"[ac4] publish log (last 4 lines):\n" + "\n".join(proc.stdout.strip().splitlines()[-4:]))
+        print(f"[ac4] pointer read back from R2: {json.dumps(pointer, sort_keys=True)}")
+        print(f"[ac4] manifest read back from R2: {len(manifest['agents'])} agents, {len(manifest['kbs'])} kbs")
+        print(f"[ac4] blob {sha} read back: {len((stage / agent['path']).read_bytes())} bytes")
+
+        # Zero matches anywhere the value could be committed, staged or logged.
+        tracked_hits = self.grep_tracked_repo(needles)
+        stage_hits = self.grep_tree(stage, needles)
+        log_hits = [needle for needle in needles if needle in log]
+        print(f"[ac4] git ls-files matches: {tracked_hits}")
+        print(f"[ac4] staged-tree matches: {stage_hits}")
+        print(f"[ac4] publish-log matches: {log_hits}")
+        self.assertEqual(tracked_hits, [])
+        self.assertEqual(stage_hits, [])
+        self.assertEqual(log_hits, [])
+        # The upload never reads a key from a file and never lets one reach a child.
+        source = PUBLISHER.read_text(encoding="utf-8")
+        self.assertIn('R2_SECRET_ENV = ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")', source)
+        self.assertIn("env.pop(name, None)", source)
+
+        # Negative control: the same grep does find a planted copy, so the zero
+        # matches above are the gate working, not a gate that cannot see.
+        planted = self.tmp / "leak-probe"
+        (planted / "nested").mkdir(parents=True)
+        (planted / "nested" / "leak.txt").write_text(f"{key_id}\n{secret}\n", encoding="utf-8")
+        self.assertEqual(self.grep_tree(planted, needles), ["nested/leak.txt"])
 
     # ── AC-13 ──────────────────────────────────────────────────────────
 
