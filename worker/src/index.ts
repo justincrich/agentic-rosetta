@@ -8,16 +8,24 @@
  *      hands the request to the MCP handler.
  *   3. `/mcp` is served by a handler built from a server factory, one per
  *      request, in the stateless legacy lane with sessions disabled.
- *   4. Everything else is a named snapshot asset behind the same token.
+ *   4. Everything else is a named snapshot path behind the same token.
+ *
+ * Content lives in R2, addressed through one mutable pointer object (see
+ * `store.ts`): the Worker bundle carries no snapshot, so publishing a prompt
+ * writes objects and never creates a Worker version.
  *
  * The default export is an object with `fetch` on purpose: Wrangler treats a
  * callable default export as a WorkerEntrypoint class, and the handler must be
  * built inside `fetch` so its tools can close over the bindings.
  */
 import { createMcpHandler } from 'agents/mcp/server';
-import { createRosettaServer, readAsset, type Env } from './tools';
+import { createSnapshotStore, type SnapshotStore } from './store';
+import { createRosettaServer, type Env as ToolsEnv } from './tools';
 
 export type { Env } from './tools';
+
+/** Bindings the Worker itself reads: the tools' own Env plus the R2 bucket. */
+export type WorkerEnv = Omit<ToolsEnv, 'ASSETS'> & { SNAPSHOT: R2Bucket };
 
 /** Realm quoted in every authentication challenge. */
 const REALM = 'rosetta-mcp';
@@ -92,7 +100,7 @@ export function bearerToken(request: Request): string | null {
   return token.length === 0 ? null : token;
 }
 
-function configuredSlots(env: Env): ConfiguredSlot[] {
+function configuredSlots(env: Pick<ToolsEnv, 'ROSETTA_MCP_TOKEN' | 'ROSETTA_MCP_TOKEN_NEXT'>): ConfiguredSlot[] {
   const candidates: Array<{ slot: TokenSlot; value: string | undefined }> = [
     { slot: 'current', value: env.ROSETTA_MCP_TOKEN },
     { slot: 'next', value: env.ROSETTA_MCP_TOKEN_NEXT },
@@ -137,23 +145,22 @@ function assetPathFor(pathname: string): string | null {
   return null;
 }
 
-async function serveAsset(request: Request, env: Env, path: string): Promise<Response> {
+async function serveAsset(request: Request, store: SnapshotStore, path: string): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
   }
-  const response = await readAsset(env, path);
-  if (!response.ok) return notFound();
-  // Static Assets answers with a public, edge-cacheable Cache-Control. This
-  // snapshot is private (bearer-gated) and changes with every publish, so a
-  // shared cache that keeps the previous version's bytes would serve a rolled
-  // back deployment's old manifest to a device. No shared cache at all.
+  const response = await store.read(path);
+  if (response.status === 404) return notFound();
+  // The snapshot is private (bearer-gated) and changes with every publish, so
+  // a shared cache that kept the previous version's bytes would serve a rolled
+  // back snapshot to a device. No shared cache at all.
   const headers = new Headers(response.headers);
   headers.set('Cache-Control', 'no-store');
   return new Response(response.body, { status: response.status, headers });
 }
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: WorkerEnv, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // No OAuth discovery surface: unauthenticated probes get a plain 404 so no
@@ -173,9 +180,14 @@ export default {
 
     const presentedDigest = hex(await sha256(token));
     const authInfo = authInfoFor(presentedDigest);
+    const store = createSnapshotStore(env.SNAPSHOT);
 
     if (url.pathname === '/mcp') {
-      const handler = createMcpHandler(createRosettaServer(env), {
+      // `tools.ts` reads through its own `env.ASSETS.fetch` seam; the store
+      // adapter answers that seam from R2, so the tools and the asset route
+      // read the same published snapshot.
+      const toolEnv: ToolsEnv = { ...env, ASSETS: store.fetcher() as unknown as Fetcher };
+      const handler = createMcpHandler(createRosettaServer(toolEnv), {
         route: '/mcp',
         legacy: 'stateless',
         corsOptions: false,
@@ -185,7 +197,7 @@ export default {
     }
 
     const assetPath = assetPathFor(url.pathname);
-    if (assetPath !== null) return serveAsset(request, env, assetPath);
+    if (assetPath !== null) return serveAsset(request, store, assetPath);
 
     return notFound();
   },

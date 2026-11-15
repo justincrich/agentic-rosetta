@@ -9,13 +9,28 @@ WHY THIS EXISTS
   *snapshot* that a Worker can serve and a device can sync, with no consumer checkout on the
   device.
 
-WHAT IT WRITES (the stage is Wrangler's ``assets.directory``)
+WHAT IT WRITES (the stage is Wrangler's ``assets.directory`` and the upload source)
   ``manifest.json``         snapshot identity + agent/KB catalog + excluded counts
   ``files.json``            sha256 + bytes for every staged payload file (device sync reads this)
   ``scan-result.json``      the credential-shaped-string scan record for the owner
   ``targets/claude/<agent>/...``   the consumer's own Claude projection, verbatim
   ``targets/codex/<agent>.toml``   the consumer's own Codex projection, path line normalized
   ``kb/<slug>/fact-graph.json``    each graph from the consumer, byte for byte
+
+WHAT IT PUBLISHES TO R2 (``--r2-bucket``)
+  ``blobs/<sha256>``                        every payload file, content-addressed, shared by snapshots
+  ``snapshots/<snapshot_id>/files.json``    per-path sha256 inventory
+  ``snapshots/<snapshot_id>/manifest.json``
+  ``current.json``                          the pointer, written **last**
+
+WHY THE POINTER IS WRITTEN LAST
+  The Worker follows ``current.json`` into one snapshot, so the pointer flip is the swap: R2 keeps
+  a write once the put resolves, which makes the flip atomic. A reader during a publish therefore
+  sees the old snapshot complete or the new snapshot complete, never a manifest naming a blob that
+  does not exist yet. A publish writes objects and never touches the Worker, so a prompt-only
+  publish creates no Worker version. The upload shells out to ``wrangler r2 object put`` because
+  R2 has no bulk command; R2 S3 keys are never read from a file, never logged, never staged and
+  never handed to the child process (wrangler carries its own OAuth credential).
 
 WHY THE CONSUMER'S OWN PROJECTOR RUNS
   The projection rules (frontmatter, tool mapping, model policy, TOML escaping) already have
@@ -46,11 +61,14 @@ vendored-document references are a separate task's contract.
 
 Usage:
     python3 publish_snapshot.py --root <checkout> --targets claude,codex --stage worker/content
+    python3 publish_snapshot.py --root <checkout> --stage worker/content --r2-bucket <bucket> --r2-local
+    python3 publish_snapshot.py --stage worker/content --r2-bucket <bucket> --upload-only
     python3 publish_snapshot.py --stage worker/content --scan-only
 """
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import importlib.util
 import json
@@ -60,6 +78,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -82,6 +101,20 @@ KB_RELDIR = Path(".rosetta/docs")
 GENERATED_LINE = "# Generated from "
 METADATA_FILES = ("manifest.json", "files.json", "scan-result.json")
 PAYLOAD_DIRS = ("targets", "kb", "docs")
+
+# ── R2 layout (the Worker's store; see worker/src/store.ts) ────────────
+#   blobs/<sha256>                     immutable payload bytes, shared by snapshots
+#   snapshots/<snapshot_id>/files.json per-path sha256 inventory
+#   snapshots/<snapshot_id>/manifest.json
+#   current.json                       the pointer, written LAST
+R2_POINTER_KEY = "current.json"
+R2_BLOB_PREFIX = "blobs/"
+R2_SNAPSHOT_PREFIX = "snapshots/"
+R2_SCHEMA = 1
+# Credentials that must never be read from a file, logged, staged, or handed to a
+# child process: the upload shells out to wrangler, which holds its own OAuth
+# credential, so the S3 keys an operator exports are never needed here.
+R2_SECRET_ENV = ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
 
 # Credential-shaped strings. Each rule demands *key material*, not just a lookalike prefix:
 #   sk-      a provider secret needs 20+ consecutive alnum characters, so prose such as
@@ -567,6 +600,8 @@ def publish(args: argparse.Namespace) -> int:
     _log(f"files: {len(files)}")
     _log("excluded: " + json.dumps(excluded, sort_keys=False))
     _log(f"manifest: {stage / 'manifest.json'}")
+    if args.r2_bucket:
+        return upload_snapshot(args, stage)
     return 0
 
 
@@ -602,6 +637,186 @@ def scan_only(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── R2 publish ─────────────────────────────────────────────────────────
+
+
+def resolve_wrangler(explicit: str | None) -> str:
+    """The wrangler binary: the flag, then $WRANGLER_BIN, then the Worker install, then PATH."""
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        # The upload runs with cwd=worker/, so a path given here must be pinned now.
+        if candidate.exists() or os.sep in explicit:
+            return str(candidate.resolve())
+        return explicit
+    from_env = os.environ.get("WRANGLER_BIN")
+    if from_env:
+        return str(Path(from_env).expanduser().resolve())
+    installed = PLUGIN_ROOT / "worker" / "node_modules" / ".bin" / "wrangler"
+    if installed.is_file():
+        return str(installed)
+    return "wrangler"
+
+
+def upload_env() -> dict[str, str]:
+    """The child environment with the R2 S3 secrets removed.
+
+    ``wrangler`` authenticates from its own credential store, so no child process
+    needs those values. Keeping them out of every child means a subprocess
+    cannot write them into a log line, an error message or a temp file.
+    """
+    env = dict(os.environ)
+    for name in R2_SECRET_ENV:
+        env.pop(name, None)
+    return env
+
+
+class R2Uploader:
+    """One ``wrangler r2 object put`` per object: R2 has no bulk upload command."""
+
+    def __init__(self, *, bucket: str, local: bool, persist_to: Path | None, wrangler: str, jobs: int) -> None:
+        if local and persist_to is None:
+            raise PublishError("a local R2 upload needs --persist-to so the dev server reads the same storage")
+        self.bucket = bucket
+        self.local = local
+        self.persist_to = persist_to
+        self.wrangler = wrangler
+        self.jobs = max(1, int(jobs))
+        self.env = upload_env()
+        self.written = 0
+
+    def target(self) -> str:
+        return "local" if self.local else "remote"
+
+    def _argv(self, key: str, path: Path) -> list[str]:
+        argv = [self.wrangler, "r2", "object", "put", f"{self.bucket}/{key}", "--file", str(path)]
+        if self.local:
+            argv.extend(["--local", "--persist-to", str(self.persist_to)])
+        else:
+            argv.append("--remote")
+        return argv
+
+    def _put_once(self, key: str, path: Path) -> None:
+        try:
+            proc = subprocess.run(
+                self._argv(key, path),
+                cwd=str(PLUGIN_ROOT / "worker"),
+                env=self.env,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            raise PublishError(f"cannot run {self.wrangler!r} for the R2 upload: {exc}") from exc
+        if proc.returncode != 0:
+            lines = (proc.stderr or proc.stdout).strip().splitlines()
+            detail = " | ".join(lines[-3:]) if lines else "no output"
+            raise PublishError(f"r2 put {key} exited {proc.returncode}: {detail}")
+
+    def _put(self, key: str, path: Path) -> None:
+        failure: PublishError | None = None
+        for attempt in range(1, 7):
+            try:
+                self._put_once(key, path)
+                self.written += 1
+                return
+            except PublishError as exc:
+                failure = exc
+                # A local R2 store is one SQLite file, so two writers can
+                # collide (SQLITE_BUSY surface) and the CLI does not retry.
+                time.sleep(0.25 * attempt)
+        raise PublishError(str(failure))
+
+    def put_many(self, items: list[tuple[str, Path]]) -> int:
+        if not items:
+            return 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.jobs) as pool:
+            futures = [pool.submit(self._put, key, path) for key, path in items]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()  # the first failure fails the publish
+        return len(items)
+
+
+def upload_snapshot(args: argparse.Namespace, stage: Path) -> int:
+    """Upload a staged snapshot: blobs, then its metadata, then ``current.json`` last."""
+    manifest_path = stage / "manifest.json"
+    files_path = stage / "files.json"
+    for required in (manifest_path, files_path):
+        if not required.is_file():
+            raise PublishError(f"{required} is missing; publish the stage before uploading it")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        files_doc = json.loads(files_path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise PublishError(f"{stage}: manifest.json or files.json is not valid JSON ({exc})") from exc
+
+    snapshot_id = manifest.get("snapshot_id")
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise PublishError(f"{manifest_path}: no snapshot_id; rerun the publisher")
+    if files_doc.get("snapshot_id") != snapshot_id:
+        raise PublishError(
+            f"{files_path} names snapshot {files_doc.get('snapshot_id')!r} but {manifest_path} names {snapshot_id!r}; "
+            "the stage is mid-publish — rerun the publisher"
+        )
+
+    files = payload_files(stage)
+    inventory = files_doc.get("files")
+    if not isinstance(inventory, dict) or not inventory:
+        raise PublishError(f"{files_path}: no file inventory; rerun the publisher")
+    if set(files) != set(inventory):
+        missing = sorted(set(files) - set(inventory))
+        stale = sorted(set(inventory) - set(files))
+        raise PublishError(
+            f"{stage}: the stage and files.json disagree (unstaged={missing[:3]}, stale={stale[:3]}); rerun the publisher"
+        )
+    for relative, path in files.items():
+        recorded = inventory[relative].get("sha256")
+        actual = sha256_file(path)
+        if recorded != actual:
+            raise PublishError(f"{relative}: files.json records {recorded} but the staged bytes hash to {actual}")
+
+    uploader = R2Uploader(
+        bucket=args.r2_bucket,
+        local=args.r2_local,
+        persist_to=_stage_path(args.persist_to) if args.persist_to else None,
+        wrangler=resolve_wrangler(args.wrangler),
+        jobs=args.r2_jobs if args.r2_jobs else (4 if args.r2_local else 6),
+    )
+
+    # 1. every blob. Keyed by sha256, so identical files are written once and a
+    #    blob another snapshot already wrote is written again with the same bytes.
+    blobs: dict[str, Path] = {}
+    for relative, path in files.items():
+        blobs.setdefault(str(inventory[relative]["sha256"]), path)
+    written = uploader.put_many([(f"{R2_BLOB_PREFIX}{sha}", path) for sha, path in sorted(blobs.items())])
+    _log(f"r2 {args.r2_bucket} ({uploader.target()}): blobs {written} objects for {len(files)} files")
+
+    # 2. the snapshot's own metadata, which every blob above already backs.
+    uploader.put_many(
+        [
+            (f"{R2_SNAPSHOT_PREFIX}{snapshot_id}/files.json", files_path),
+            (f"{R2_SNAPSHOT_PREFIX}{snapshot_id}/manifest.json", manifest_path),
+        ]
+    )
+    _log(f"r2 {args.r2_bucket}: snapshot {snapshot_id} files.json manifest.json")
+
+    # 3. the pointer last: this single object decides which snapshot a reader sees.
+    pointer = {
+        "schema": R2_SCHEMA,
+        "snapshot_id": snapshot_id,
+        "manifest_sha256": sha256_file(manifest_path),
+        "published_at": manifest.get("published_at"),
+        "files": len(files),
+    }
+    with tempfile.TemporaryDirectory(prefix="r2-pointer-") as tmp:
+        pointer_path = Path(tmp) / R2_POINTER_KEY
+        pointer_path.write_text(json.dumps(pointer, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        uploader.put_many([(R2_POINTER_KEY, pointer_path)])
+    _log(
+        f"r2 {args.r2_bucket}: {R2_POINTER_KEY} last -> "
+        + json.dumps({key: pointer[key] for key in ("snapshot_id", "manifest_sha256", "files")})
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -627,6 +842,37 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="re-run the credential scan over an existing stage and exit (the pre-deploy gate)",
     )
+    parser.add_argument(
+        "--r2-bucket",
+        help="publish the staged snapshot to this R2 bucket (blobs, then snapshot metadata, then current.json last)",
+    )
+    parser.add_argument(
+        "--r2-local",
+        action="store_true",
+        help="upload to the local (miniflare) R2 storage used by `wrangler dev --local`; needs --persist-to",
+    )
+    parser.add_argument(
+        "--persist-to",
+        default=str(PLUGIN_ROOT / "worker" / ".wrangler" / "state"),
+        help="local R2 storage directory shared with `wrangler dev --local --persist-to` "
+        "(default worker/.wrangler/state)",
+    )
+    parser.add_argument(
+        "--r2-jobs",
+        type=int,
+        default=0,
+        help="parallel `wrangler r2 object put` processes; R2 has no bulk command "
+        "(default 4 local, 6 remote)",
+    )
+    parser.add_argument(
+        "--wrangler",
+        help="wrangler binary for the R2 upload (default $WRANGLER_BIN, then worker/node_modules/.bin/wrangler)",
+    )
+    parser.add_argument(
+        "--upload-only",
+        action="store_true",
+        help="upload the existing --stage to R2 without re-staging it (needs manifest.json, files.json and --r2-bucket)",
+    )
     return parser
 
 
@@ -634,6 +880,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.upload_only:
+            if not args.r2_bucket:
+                parser.error("--upload-only needs --r2-bucket <name>")
+            stage = _stage_path(args.stage)
+            if not stage.is_dir():
+                raise PublishError(f"--stage {stage}: not a directory; nothing to upload")
+            return upload_snapshot(args, stage)
         if args.scan_only:
             return scan_only(args)
         if not args.root:

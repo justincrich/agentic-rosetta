@@ -1,21 +1,24 @@
 {
   // Read-only MCP service over a published Rosetta snapshot.
-  // Static Assets hold the snapshot; there is no Durable Object and no session
-  // state, so the Worker has no bindings beyond ASSETS and its two secrets.
+  // The snapshot lives in R2, not in the Worker bundle: publishing a prompt
+  // writes blobs, then the snapshot metadata, then current.json last, and
+  // never creates a Worker version. There is no Durable Object and no session
+  // state, so the Worker has no binding beyond SNAPSHOT and its two secrets.
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "rosetta-kb-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-22",
   // agents/mcp uses AsyncLocalStorage for getMcpAuthContext().
   "compatibility_flags": ["nodejs_compat"],
-  "assets": {
-    // Staged by scripts/kb-delivery/publish_snapshot.py; never committed.
-    // run_worker_first keeps every request behind the bearer check, including
-    // requests for a path that is also a static asset.
-    "directory": "./content",
-    "binding": "ASSETS",
-    "run_worker_first": true
-  },
+  // Written by scripts/kb-delivery/publish_snapshot.py:
+  //   current.json, snapshots/<id>/{manifest,files}.json, blobs/<sha256>.
+  // `wrangler dev --local` uses the same bucket name against local storage.
+  "r2_buckets": [
+    {
+      "binding": "SNAPSHOT",
+      "bucket_name": "rosetta-kb-mcp-snapshots"
+    }
+  ],
   "observability": {
     // So `wrangler tail` shows one log line per tool call, with its tokenSlot.
     "enabled": true
