@@ -10,12 +10,14 @@ WHY THIS EXISTS
   device.
 
 WHAT IT WRITES (the stage is Wrangler's ``assets.directory``)
-  ``manifest.json``         snapshot identity + agent/KB catalog + excluded counts
+  ``manifest.json``         snapshot identity + agent/KB catalog + excluded counts + side effects
   ``files.json``            sha256 + bytes for every staged payload file (device sync reads this)
   ``scan-result.json``      the credential-shaped-string scan record for the owner
   ``targets/claude/<agent>/...``   the consumer's own Claude projection, verbatim
   ``targets/codex/<agent>.toml``   the consumer's own Codex projection, path line normalized
+  ``targets/<t>/<agent>.*``        the OpenCode, Grok and Droid projections (flat files)
   ``kb/<slug>/fact-graph.json``    each graph from the consumer, byte for byte
+  ``docs/brain/<path>``            every document a prompt cites, with ``--vendor-docs``
 
 WHY THE CONSUMER'S OWN PROJECTOR RUNS
   The projection rules (frontmatter, tool mapping, model policy, TOML escaping) already have
@@ -25,6 +27,23 @@ WHY THE CONSUMER'S OWN PROJECTOR RUNS
   per target with an explicit ``--target`` (never bare, which would project all six harnesses
   and their side effects), writing into a temporary ``HOME`` so nothing lands in the real
   ``~/.claude`` or ``~/.codex``.
+
+HARNESS SIDE EFFECTS ARE DECLARED, NEVER SILENT
+  Two targets do more on a device than write a file tree: the OpenCode target unpins
+  ``agent.<name>.model`` in ``opencode.json``, and the Grok target rewrites
+  ``[subagents.models]`` in ``config.toml`` and deletes its own stale profiles from the folder
+  Grok scans. Each is declared in ``manifest.json`` under ``targets.<t>.side_effects`` with a
+  ``handling`` of ``sync-applies`` (the device sync repeats it) or ``not-applied`` (the device
+  is told, in the sync summary, that it was not done and why). ``grok`` is staged into
+  ``.grok/agent-library`` — never ``.grok/agents``, the folder Grok scans.
+
+WHY DOC VENDORING IS OPT-IN
+  ``--vendor-docs`` vendors the documents prompts cite and rewrites the citations to
+  ``~/.rosetta/share/brain/…`` (see ``doc_refs.py``), which clears the dangling references a
+  brain-less device otherwise inherits. It is a flag because it changes the prompt text: a
+  plain publish stays byte-identical to the consumer's own projection, which is what the
+  parity proof pins. Vendored documents are payload files, so the credential scan covers them
+  with no extra wiring.
 
 WHY THE CODEX PATH LINE IS NORMALIZED
   agentshare stamps ``# Generated from <absolute source path>`` at the top of every Codex TOML
@@ -46,6 +65,7 @@ vendored-document references are a separate task's contract.
 
 Usage:
     python3 publish_snapshot.py --root <checkout> --targets claude,codex --stage worker/content
+    python3 publish_snapshot.py --root <checkout> --targets claude --vendor-docs --stage /tmp/stage
     python3 publish_snapshot.py --stage worker/content --scan-only
 """
 from __future__ import annotations
@@ -66,16 +86,65 @@ from types import ModuleType
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts" / "rosetta"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from version_label import kb_edition  # noqa: E402  (shared home for the kb_version label)
+import doc_refs  # noqa: E402  (sibling: doc vendoring + citation rewrite)
 
 SCHEMA = 1
 DEFAULT_STAGE = "worker/content"
 DEFAULT_TARGETS = ("claude", "codex")
-# Only the two targets whose output is a plain file tree. opencode/grok/droid have harness side
-# effects (opencode.json model unpin, ~/.grok/agents cleanup) that a file mirror cannot
-# reproduce, so they are refused rather than silently approximated.
-SUPPORTED_TARGETS = ("claude", "codex")
-TARGET_DEST = {"claude": ".claude/agents", "codex": ".codex/agents"}
+# Every target agentshare can project into a plain file tree. Each `dest` is what agentshare
+# itself uses, relative to $HOME, so a synced device lands files where its harness looks.
+# grok's dest is `agent-library`, NOT `agents`: Grok scans `~/.grok/agents/` and lists only the
+# first 64 agents it finds there, so agentshare writes to the library folder instead.
+SUPPORTED_TARGETS = ("claude", "codex", "opencode", "droid", "grok")
+TARGET_DEST = {
+    "claude": ".claude/agents",
+    "codex": ".codex/agents",
+    "opencode": ".config/opencode/agents",
+    "droid": ".factory/droids",
+    "grok": ".grok/agent-library",
+}
+TARGET_SUFFIX = {"claude": ".md", "codex": ".toml", "opencode": ".md", "droid": ".md", "grok": ".md"}
+# What a target's projector does BESIDES writing its file tree. A file snapshot cannot carry a
+# config rewrite, so each one is declared and either repeated by the device sync
+# (`sync-applies`) or reported to the device as not done (`not-applied`). Nothing here is silent.
+TARGET_SIDE_EFFECTS: dict[str, tuple[dict[str, str], ...]] = {
+    "opencode": (
+        {
+            "name": "opencode-agent-model-unpin",
+            "path": ".config/opencode/opencode.json",
+            "handling": "sync-applies",
+            "reason": (
+                "agentshare deletes agent.<name>.model for every published agent so OpenCode "
+                "subagents inherit the parent session's model; the device sync repeats exactly "
+                "that key removal on the device's own opencode.json"
+            ),
+        },
+    ),
+    "grok": (
+        {
+            "name": "grok-subagents-models-table",
+            "path": ".grok/config.toml",
+            "handling": "not-applied",
+            "reason": (
+                "agentshare rewrites the [subagents.models] table of the device's grok "
+                "config.toml; the snapshot carries agent profiles only, so the device's config "
+                "keeps its own tables (re-run agentshare locally to pin per-type models)"
+            ),
+        },
+        {
+            "name": "grok-legacy-agents-cleanup",
+            "path": ".grok/agents",
+            "handling": "not-applied",
+            "reason": (
+                "agentshare deletes its own stale profiles from the folder Grok scans "
+                "(~/.grok/agents); the sync never deletes a file it did not write, and writing "
+                "there is what the 64-agent scan limit punishes"
+            ),
+        },
+    ),
+}
 EXCLUDE_SUFFIXES = ("*.bak", "*.log")
 EXCLUDE_DIRS = (".history",)
 KB_RELDIR = Path(".rosetta/docs")
@@ -254,6 +323,29 @@ def normalize_generated_paths(codex_dir: Path, root: Path) -> int:
     return rewritten
 
 
+def _clear_immutable_flags(path: Path) -> None:
+    """Drop macOS ``uchg`` flags under ``path`` so the temp HOME can be removed.
+
+    The OpenCode target plants an immutable sentinel (``chflags uchg``) to stop other tools
+    recreating a bridge symlink over its agent folder. Reading and copying it is fine; removing
+    the temporary tree it lives in is not, so the flag is cleared on the throwaway copy.
+    """
+    if sys.platform != "darwin" or not path.exists():
+        return
+    subprocess.run(["chflags", "-R", "nouchg", str(path)], check=False, capture_output=True)
+
+
+def _side_effect_records(target: str, home: Path) -> list[dict]:
+    """The manifest's record of what this target's projector did beyond the file tree."""
+    records: list[dict] = []
+    for declared in TARGET_SIDE_EFFECTS.get(target, ()):
+        observed = (home / declared["path"]).exists()
+        record = dict(declared)
+        record["observed_in_projector_home"] = observed
+        records.append(record)
+    return records
+
+
 def stage_target(
     *,
     root: Path,
@@ -261,13 +353,17 @@ def stage_target(
     agentshare: Path,
     stage: Path,
     home: Path,
-) -> tuple[int, dict[str, int], int]:
+) -> dict:
     """Run the consumer's projector for one target and copy its tree into the stage."""
     argv = [sys.executable, str(agentshare), "--target", target]
     _log(f"agentshare: {' '.join(argv)}")
     env = dict(os.environ)
     env["HOME"] = str(home)
     env["BRAIN_ROOT"] = str(root)
+    # A projector target that honours an extra config-dir variable must still land inside the
+    # sandbox HOME: an inherited GROK_HOME would silently stage the machine's real ~/.grok.
+    for name in ("GROK_HOME", "ROGUEONE_SHARE"):
+        env.pop(name, None)
     proc = subprocess.run(argv, cwd=str(root), env=env, capture_output=True, text=True)
     if proc.returncode != 0:
         raise PublishError(
@@ -292,7 +388,12 @@ def stage_target(
         + " ".join(f"{key}={value}" for key, value in excluded.items())
         + (f" normalized_path_lines={rewritten}" if target == "codex" else "")
     )
-    return copied, excluded, rewritten
+    return {
+        "files": copied,
+        "excluded": excluded,
+        "normalized": rewritten,
+        "side_effects": _side_effect_records(target, home),
+    }
 
 
 def stage_kbs(root: Path, stage: Path) -> list[dict]:
@@ -435,11 +536,25 @@ def _parse_targets(raw: str) -> tuple[str, ...]:
     unsupported = [name for name in requested if name not in SUPPORTED_TARGETS]
     if unsupported:
         raise PublishError(
-            f"unsupported target(s) {', '.join(unsupported)}: this publisher stages only "
-            f"{', '.join(SUPPORTED_TARGETS)} because the other targets carry harness side "
-            "effects a file mirror cannot reproduce"
+            f"unsupported target(s) {', '.join(unsupported)}: this publisher stages "
+            f"{', '.join(SUPPORTED_TARGETS)}"
         )
     return requested
+
+
+def target_agent_path(name: str, target: str) -> Path:
+    """Where one agent's projection lands inside ``targets/<target>/``."""
+    if target == "claude":
+        return Path("targets") / "claude" / name / "agent.md"
+    return Path("targets") / target / f"{name}{TARGET_SUFFIX[target]}"
+
+
+def staged_agent_count(stage: Path, target: str) -> int:
+    """How many agents a staged target tree holds (claude is one directory per agent)."""
+    base = stage / "targets" / target
+    if target == "claude":
+        return sum(1 for path in base.iterdir() if (path / "agent.md").is_file())
+    return sum(1 for path in base.glob(f"*{TARGET_SUFFIX[target]}") if path.is_file())
 
 
 def _agent_catalog(
@@ -448,26 +563,35 @@ def _agent_catalog(
     targets: tuple[str, ...],
     stage: Path,
 ) -> list[dict]:
+    """One entry per agent: its prompt for every staged target, plus a primary path.
+
+    ``path`` stays the Claude prompt when Claude is published (that is the prompt the MCP
+    ``get_agent`` tool serves); ``paths`` names the prompt in each staged target so a device and
+    an operator can both find what they need.
+    """
     catalog: list[dict] = []
+    primary = "claude" if "claude" in targets else targets[0]
     for agent in sorted(agents, key=lambda item: str(item["name"])):
         name = str(agent["name"])
-        if "claude" in targets:
-            relative = Path("targets") / "claude" / name / "agent.md"
-        else:
-            relative = Path("targets") / "codex" / f"{name}.toml"
-        staged = stage / relative
-        if not staged.is_file():
-            raise PublishError(
-                f"agentshare staged no file for agent {name!r} (expected {relative.as_posix()}); "
-                "the projection and the source catalog disagree"
-            )
+        paths: dict[str, str] = {}
+        for target in targets:
+            relative = target_agent_path(name, target)
+            if not (stage / relative).is_file():
+                raise PublishError(
+                    f"agentshare staged no file for agent {name!r} (expected {relative.as_posix()}); "
+                    "the projection and the source catalog disagree"
+                )
+            paths[target] = relative.as_posix()
+        staged = stage / paths[primary]
         catalog.append(
             {
                 "name": name,
                 "description": str(agent.get("description") or "")[:300],
                 "model": str(agent.get("model") or ""),
+                "target": primary,
                 "bytes": staged.stat().st_size,
-                "path": relative.as_posix(),
+                "path": paths[primary],
+                "paths": paths,
             }
         )
     return catalog
@@ -500,24 +624,38 @@ def publish(args: argparse.Namespace) -> int:
     normalized_lines = 0
     with tempfile.TemporaryDirectory(prefix="publish-home-") as home_str:
         home = Path(home_str)
-        for target in targets:
-            copied, per_target, rewritten = stage_target(
-                root=root, target=target, agentshare=agentshare, stage=stage, home=home
-            )
-            totals[target] = {"dest": TARGET_DEST[target], "files": copied}
-            for key, value in per_target.items():
-                excluded[key] += value
-            normalized_lines += rewritten
+        try:
+            for target in targets:
+                staged = stage_target(
+                    root=root, target=target, agentshare=agentshare, stage=stage, home=home
+                )
+                totals[target] = {
+                    "dest": TARGET_DEST[target],
+                    "files": staged["files"],
+                    "side_effects": staged["side_effects"],
+                }
+                for key, value in staged["excluded"].items():
+                    excluded[key] += value
+                normalized_lines += staged["normalized"]
+        finally:
+            # The OpenCode target plants an immutable sentinel; clear the flag before the
+            # throwaway HOME is removed, or the cleanup fails with EPERM.
+            _clear_immutable_flags(home)
 
-    if "claude" in targets:
-        staged_dirs = [p for p in (stage / "targets" / "claude").iterdir() if (p / "agent.md").is_file()]
-        if len(staged_dirs) != len(source_agents):
+    for target in targets:
+        staged_agents = staged_agent_count(stage, target)
+        if staged_agents != len(source_agents):
             raise PublishError(
-                f"agentshare staged {len(staged_dirs)} claude agents but the source has "
+                f"agentshare staged {staged_agents} {target} agents but the source has "
                 f"{len(source_agents)}; refusing to publish a partial snapshot"
             )
 
     kbs = stage_kbs(root, stage)
+    vendoring = None
+    if args.vendor_docs:
+        vendoring = doc_refs.vendor_documents(
+            consumer_root=root, stage=stage, targets=targets, agents=source_agents
+        )
     files = payload_files(stage)
     if not files:
         raise PublishError(f"{stage}: nothing was staged")
@@ -557,6 +695,31 @@ def publish(args: argparse.Namespace) -> int:
         "generated": list(METADATA_FILES),
         "normalized_path_lines": normalized_lines,
     }
+    if vendoring is not None:
+        share_files = sum(1 for path in files if path.startswith(f"{doc_refs.STAGE_DIR}/"))
+        manifest["share"] = {
+            "dest": doc_refs.SHARE_DEST,
+            "prefix": f"{doc_refs.STAGE_DIR}/",
+            "files": share_files,
+        }
+        manifest["vendored_docs"] = vendoring["vendored_docs"]
+        manifest["unresolved"] = vendoring["unresolved"]
+        manifest["doc_vendoring"] = {
+            key: vendoring[key]
+            for key in (
+                "base",
+                "stage_dir",
+                "vendored_docs",
+                "vendored_files",
+                "vendored_bytes",
+                "rewritten_files",
+                "rewritten_refs",
+                "rewritten_agents",
+                "agents_scanned",
+                "citing_agents",
+            )
+        }
+        manifest["doc_vendoring"]["documents"] = vendoring["documents"]
     (stage / "manifest.json").write_text(
         json.dumps(manifest, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -565,6 +728,12 @@ def publish(args: argparse.Namespace) -> int:
     _log(f"agents: {len(manifest['agents'])}")
     _log(f"kbs: {len(manifest['kbs'])}")
     _log(f"files: {len(files)}")
+    if vendoring is not None:
+        _log(
+            f"vendored docs: {vendoring['vendored_docs']} document(s) / "
+            f"{vendoring['vendored_files']} file(s) -> {manifest['share']['dest']}; "
+            f"unresolved citations: {len(vendoring['unresolved'])}"
+        )
     _log("excluded: " + json.dumps(excluded, sort_keys=False))
     _log(f"manifest: {stage / 'manifest.json'}")
     return 0
@@ -626,6 +795,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--scan-only",
         action="store_true",
         help="re-run the credential scan over an existing stage and exit (the pre-deploy gate)",
+    )
+    parser.add_argument(
+        "--vendor-docs",
+        action="store_true",
+        help="vendor every document the prompts cite into the snapshot's docs/ tree and rewrite the "
+        "citations to ~/.rosetta/share/brain/... (changes prompt text; off by default so a plain "
+        "publish stays byte-identical to the consumer's own projection)",
     )
     return parser
 
