@@ -1,0 +1,23 @@
+{
+  // Read-only MCP service over a published Rosetta snapshot.
+  // Static Assets hold the snapshot; there is no Durable Object and no session
+  // state, so the Worker has no bindings beyond ASSETS and its two secrets.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "rosetta-kb-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-22",
+  // agents/mcp uses AsyncLocalStorage for getMcpAuthContext().
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    // Staged by scripts/kb-delivery/publish_snapshot.py; never committed.
+    // run_worker_first keeps every request behind the bearer check, including
+    // requests for a path that is also a static asset.
+    "directory": "./content",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "observability": {
+    // So `wrangler tail` shows one log line per tool call, with its tokenSlot.
+    "enabled": true
+  }
+}
