@@ -13,8 +13,10 @@
  */
 import { afterAll, describe, expect, it, setDefaultTimeout } from 'bun:test';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import worker from '../src/index';
@@ -24,10 +26,19 @@ import worker from '../src/index';
 setDefaultTimeout(120_000);
 
 const WORKER_DIR = join(import.meta.dir, '..');
+const REPO_ROOT = join(WORKER_DIR, '..');
 const CONTENT_DIR = join(WORKER_DIR, 'content');
 const DEV_VARS_PATH = join(WORKER_DIR, '.dev.vars');
 const WRANGLER_BIN = join(WORKER_DIR, 'node_modules', '.bin', 'wrangler');
+const PUBLISH_SCRIPT = join(REPO_ROOT, 'scripts', 'kb-delivery', 'publish_snapshot.py');
 const START_TIMEOUT_MS = 90_000;
+
+/**
+ * The real consumer checkout the publisher stages from. AC-12 is about the
+ * largest prompt and graph that actually ship, so it stages the snapshot with
+ * `publish_snapshot.py` rather than asserting against a hand-written fixture.
+ */
+const PUBLISH_ROOT = process.env.ROSETTA_PUBLISH_ROOT ?? join(homedir(), 'Projects', 'brain');
 
 const TOKEN_CURRENT = 'svc01-current-2f7c9a41';
 const TOKEN_NEXT = 'svc01-next-b3d05e18';
@@ -49,10 +60,37 @@ const FIXTURE_KB = { slug: 'demo', kb_version: '1.0.0', graph: { version: '1.0.0
 let stagedContent = false;
 
 /**
- * The developer's `.dev.vars`, captured before any test writes one. Read at
- * module load so a test that starts two servers (AC-8 uses a token-less one)
- * cannot snapshot its own file as if it were the developer's.
+ * Stage the real published snapshot for AC-12 by running the publisher against
+ * the real consumer checkout. It reuses a snapshot a developer already staged;
+ * otherwise it replaces whatever this suite staged (the two-agent fixture) with
+ * the real one, and removes it again in `afterAll`.
  */
+function stageRealSnapshot(): void {
+  const manifestPath = join(CONTENT_DIR, 'manifest.json');
+  if (existsSync(manifestPath)) {
+    const staged = JSON.parse(readFileSync(manifestPath, 'utf8')) as { agents?: unknown[]; kbs?: unknown[] };
+    if ((staged.agents?.length ?? 0) > FIXTURE_AGENTS.length && (staged.kbs?.length ?? 0) >= 1) return;
+  }
+  if (!existsSync(join(PUBLISH_ROOT, 'scripts', 'agentshare.py'))) {
+    throw new Error(
+      `AC-12 needs the real consumer checkout: ${PUBLISH_ROOT} has no scripts/agentshare.py. ` +
+        'Set ROSETTA_PUBLISH_ROOT to a checkout with scripts/agentshare.py.',
+    );
+  }
+  rmSync(CONTENT_DIR, { recursive: true, force: true });
+  const publish = spawnSync('python3', [PUBLISH_SCRIPT, '--root', PUBLISH_ROOT, '--stage', CONTENT_DIR], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, HOME: process.env.HOME ?? homedir() },
+  });
+  console.log(`$ python3 ${PUBLISH_SCRIPT} --root ${PUBLISH_ROOT} --stage ${CONTENT_DIR}`);
+  console.log(`${publish.stdout ?? ''}${publish.stderr ?? ''}`);
+  if (publish.status !== 0) {
+    throw new Error(`publish_snapshot.py exited ${publish.status}; AC-12 needs a real published snapshot.\n${publish.stdout}${publish.stderr}`);
+  }
+  stagedContent = true;
+}
+
 const ORIGINAL_DEV_VARS: string | null = existsSync(DEV_VARS_PATH) ? readFileSync(DEV_VARS_PATH, 'utf8') : null;
 
 function stageSnapshot(): void {
@@ -198,6 +236,18 @@ async function devWorkerWith(config: 'current-only' | 'both-slots' | 'no-token')
   const worker = await startDevWorker(vars);
   activeWorker = { key: config, worker };
   return worker;
+}
+
+/**
+ * Restart the dev server even when the requested token config already matches:
+ * the assets changed on disk, so the running server must be a new one.
+ */
+async function restartDevWorker(config: 'current-only' | 'both-slots' | 'no-token'): Promise<DevWorker> {
+  if (activeWorker !== null) {
+    await activeWorker.worker.stop();
+    activeWorker = null;
+  }
+  return await devWorkerWith(config);
 }
 
 afterAll(async () => {
@@ -598,8 +648,11 @@ describe('SERVICE-01 read-only MCP Worker', () => {
     expect(slots).toContain('next');
     for (const line of callLines) {
       expect(line.clientId).toBe(CLIENT_ID);
-      // Nothing but the slot label is logged from the auth props.
-      expect(Object.keys(line).sort()).toEqual(['clientId', 'event', 'scopes', 'tokenSlot', 'tool'].sort());
+      // Nothing but the slot label is logged from the auth props; the read
+      // counters are what the call cost, not who made it.
+      expect(Object.keys(line).sort()).toEqual(
+        ['assetReads', 'clientId', 'event', 'manifestReads', 'outcome', 'scopes', 'tokenSlot', 'tool'].sort(),
+      );
     }
     expect(log).not.toContain(TOKEN_CURRENT);
     expect(log).not.toContain(TOKEN_NEXT);
@@ -611,5 +664,150 @@ describe('SERVICE-01 read-only MCP Worker', () => {
     expect(index).toContain('authContext: { props: { tokenSlot: slot } }');
     expect(index).toContain('handler.fetch(request, { authInfo })');
     expect(TOOLS_SRC()).toContain('getMcpAuthContext()');
+  });
+
+  // -------------------------------------------------------------------------
+  // Snapshot assets are never edge-cached, so a rollback or publish is visible
+  // on the next request instead of after a cache TTL.
+  // -------------------------------------------------------------------------
+
+  it('serves snapshot assets with Cache-Control: no-store', async () => {
+    const dev = await devWorkerWith('current-only');
+
+    const manifest = await fetch(`${dev.url}/manifest.json`, { headers: bearer(TOKEN_CURRENT) });
+    expect(manifest.status).toBe(200);
+    expect(manifest.headers.get('cache-control')).toBe('no-store');
+
+    const staged = currentManifest();
+    const asset = await fetch(`${dev.url}/files/${staged.agents[0].path}`, { headers: bearer(TOKEN_CURRENT) });
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get('cache-control')).toBe('no-store');
+    expect((await asset.text()).length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // AC-12 — page the largest real prompt and graph, byte for byte.
+  // -------------------------------------------------------------------------
+
+  it('AC-12 pages the largest real prompt and graph at <= 40000 characters with byte-identical reassembly, and refuses unknown keys', async () => {
+    stageRealSnapshot();
+    const dev = await restartDevWorker('current-only');
+
+    const manifest = JSON.parse(readFileSync(join(CONTENT_DIR, 'manifest.json'), 'utf8')) as {
+      snapshot_id: string;
+      agents: Array<{ name: string; bytes: number; path: string }>;
+      kbs: Array<{ slug: string; bytes: number; path: string }>;
+    };
+    const inventory = (
+      JSON.parse(readFileSync(join(CONTENT_DIR, 'files.json'), 'utf8')) as {
+        files: Record<string, { sha256: string; bytes: number }>;
+      }
+    ).files;
+
+    // The real checkout's whole catalog, not the two-agent fixture the
+    // behavioural tests stage.
+    console.log(
+      `[service] real snapshot ${manifest.snapshot_id}: ${manifest.agents.length} agents, ${manifest.kbs.length} KBs`,
+    );
+    expect(manifest.agents.length).toBe(293);
+    expect(manifest.kbs.length).toBe(65);
+
+    const largestAgent = [...manifest.agents].sort((left, right) => right.bytes - left.bytes)[0];
+    const largestKb = [...manifest.kbs].sort((left, right) => right.bytes - left.bytes)[0];
+    console.log(`[service] largest prompt ${largestAgent.name} ${largestAgent.bytes} bytes; largest graph ${largestKb.slug} ${largestKb.bytes} bytes`);
+    expect(`${largestAgent.name}:${largestAgent.bytes}`).toBe('nextjs-reviewer:523689');
+    expect(`${largestKb.slug}:${largestKb.bytes}`).toBe('n8n:1288978');
+
+    interface PagePayload {
+      content: string;
+      offset: number;
+      next_offset: number | null;
+      page_chars: number;
+      total_chars: number;
+      sha256: string;
+      sections?: string[];
+    }
+
+    /** Follow `next_offset` to the end; fail if a page is empty, oversized or misaligned. */
+    const readPaged = async (client: Client, tool: string, base: Record<string, unknown>): Promise<PagePayload[]> => {
+      const pages: PagePayload[] = [];
+      let offset: number | null = null;
+      for (let guard = 0; guard < 1_000; guard += 1) {
+        const result = await client.callTool({ name: tool, arguments: offset === null ? base : { ...base, offset } });
+        expect(result.isError ?? false).toBe(false);
+        const payload = JSON.parse((result.content[0] as { text: string }).text) as PagePayload;
+        expect(typeof payload.content).toBe('string');
+        // Never an empty page, never more than the hard cap.
+        expect(payload.content.length).toBeGreaterThan(0);
+        expect(payload.content.length).toBeLessThanOrEqual(40_000);
+        expect(payload.page_chars).toBe(payload.content.length);
+        if (offset !== null) expect(payload.offset).toBe(offset);
+        pages.push(payload);
+        if (payload.next_offset === null) return pages;
+        expect(payload.next_offset).toBe(payload.offset + payload.content.length);
+        offset = payload.next_offset;
+      }
+      throw new Error(`${tool} paging did not terminate after 1000 pages`);
+    };
+
+    await withSdkClient(dev.url, TOKEN_CURRENT, async (client) => {
+      // --- the largest prompt ------------------------------------------------
+      const agentPages = await readPaged(client, 'get_agent', { name: largestAgent.name });
+      expect(agentPages.length).toBeGreaterThan(1);
+      expect(agentPages[0].next_offset).not.toBeNull();
+      const agentText = agentPages.map((page) => page.content).join('');
+      expect(agentText.length).toBe(agentPages[0].total_chars);
+      expect(Buffer.byteLength(agentText, 'utf8')).toBe(523_689);
+      const agentSha = createHash('sha256').update(agentText, 'utf8').digest('hex');
+      expect(agentSha).toBe(inventory[largestAgent.path].sha256);
+      for (const page of agentPages) expect(page.sha256).toBe(agentSha);
+      console.log(`[service] get_agent ${largestAgent.name}: ${agentPages.length} pages, sha256 ${agentSha}`);
+
+      // --- the largest graph -------------------------------------------------
+      const kbPages = await readPaged(client, 'get_kb', { slug: largestKb.slug });
+      expect(kbPages.length).toBeGreaterThan(1);
+      expect(kbPages[0].next_offset).not.toBeNull();
+      expect((kbPages[0].sections ?? []).length).toBeGreaterThan(0);
+      const kbText = kbPages.map((page) => page.content).join('');
+      expect(kbText.length).toBe(kbPages[0].total_chars);
+      expect(Buffer.byteLength(kbText, 'utf8')).toBe(1_288_978);
+      const kbSha = createHash('sha256').update(kbText, 'utf8').digest('hex');
+      expect(kbSha).toBe(inventory[largestKb.path].sha256);
+      for (const page of kbPages) expect(page.sha256).toBe(kbSha);
+      // The reassembled text is the stored graph, not a re-serialized copy.
+      const graph = JSON.parse(kbText) as Record<string, unknown>;
+      expect(Object.keys(graph).sort()).toEqual(kbPages[0].sections as string[]);
+      console.log(`[service] get_kb ${largestKb.slug}: ${kbPages.length} pages, sha256 ${kbSha}`);
+
+      // --- unknown keys ------------------------------------------------------
+      const unknownAgent = await client.callTool({ name: 'get_agent', arguments: { name: 'no-such-agent' } });
+      expect(unknownAgent.isError).toBe(true);
+      expect((unknownAgent.content[0] as { text: string }).text).toContain('no-such-agent');
+
+      const traversal = await client.callTool({ name: 'get_kb', arguments: { slug: '../x' } });
+      expect(traversal.isError).toBe(true);
+      expect((traversal.content[0] as { text: string }).text).toContain('../x');
+
+      const unknownSection = await client.callTool({
+        name: 'get_kb',
+        arguments: { slug: largestKb.slug, section: 'no-such-section' },
+      });
+      expect(unknownSection.isError).toBe(true);
+      expect((unknownSection.content[0] as { text: string }).text).toContain('no-such-section');
+    });
+
+    // The refusals are lookups in the manifest, not path joins: the traversal
+    // slug costs zero payload reads, and the section error costs exactly the
+    // one graph read it had to do to name the sections.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const errorCalls = dev
+      .log()
+      .split('\n')
+      .filter((line) => line.includes('mcp.tool_call') && line.includes('"outcome":"error"'))
+      .map((line) => JSON.parse(line) as { tool: string; outcome: string; assetReads: number; manifestReads: number });
+    console.log(`[service] wrangler dev error calls (workerd): ${JSON.stringify(errorCalls)}`);
+    expect(errorCalls.length).toBe(3);
+    for (const call of errorCalls) expect(call.manifestReads).toBe(1);
+    expect(errorCalls.filter((call) => call.tool === 'get_kb').map((call) => call.assetReads)).toEqual([0, 1]);
   });
 });

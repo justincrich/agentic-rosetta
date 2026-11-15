@@ -143,7 +143,13 @@ async function serveAsset(request: Request, env: Env, path: string): Promise<Res
   }
   const response = await readAsset(env, path);
   if (!response.ok) return notFound();
-  return response;
+  // Static Assets answers with a public, edge-cacheable Cache-Control. This
+  // snapshot is private (bearer-gated) and changes with every publish, so a
+  // shared cache that keeps the previous version's bytes would serve a rolled
+  // back deployment's old manifest to a device. No shared cache at all.
+  const headers = new Headers(response.headers);
+  headers.set('Cache-Control', 'no-store');
+  return new Response(response.body, { status: response.status, headers });
 }
 
 export default {
