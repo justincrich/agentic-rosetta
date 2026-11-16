@@ -14,20 +14,67 @@
       "title": "Require a per-repo Rosetta config; remove brain and technology data from the plugin",
       "dir": ".",
       "depends_on": [],
-      "status": "planned",
+      "status": "in_progress",
       "history": [
         {
           "status": "planned",
           "at": "2026-11-16T15:35:18Z",
           "by": "agent"
+        },
+        {
+          "status": "in_progress",
+          "at": "2026-11-16T15:41:32Z",
+          "by": "sprint_handoff register-implementer"
         }
       ],
       "branch": null,
       "pr": null,
       "tasks": {
         "CONFIG-01": {
-          "status": "pending",
-          "merge_sha": null
+          "status": "landed",
+          "merge_sha": "46a5ba4f4885a62233eb4fceff0119d2965e994c",
+          "attempts": [
+            {
+              "at": "2026-11-16T15:41:32.919606Z",
+              "kind": "implementer",
+              "ref": "ses_e1afb9240ffez04ToXP9O0GmC1",
+              "by": "sprint_handoff register-implementer"
+            },
+            {
+              "at": "2026-11-16T16:02:54.343802Z",
+              "kind": "review_cycle",
+              "ref": "ses_e1afb9240ffez04ToXP9O0GmC1:cycle-1",
+              "by": "sprint_handoff record-review"
+            },
+            {
+              "at": "2026-11-16T16:13:57.664527Z",
+              "kind": "review_cycle",
+              "ref": "ses_e1afb9240ffez04ToXP9O0GmC1:cycle-2",
+              "by": "sprint_handoff record-review"
+            },
+            {
+              "at": "2026-11-16T16:49:01.117518Z",
+              "kind": "implementer",
+              "ref": "ses_e1abd6e0bffeDLv4YjKHg7NQJX",
+              "by": "sprint_handoff register-implementer"
+            }
+          ],
+          "triage": [
+            {
+              "at": "2026-11-16T16:17:04.779375Z",
+              "route": "test",
+              "reason": "Triage (fresh python-reviewer) at the third attempt: product code correct in both attempts; AC-3/AC-4 checks are narrower than the AC text (oracle gaps). Planner to widen the check matrix, strengthen only. Verdict: .kb-run-sprint/imp-update-rosetta-plugin-distribute-results-1794839963/CONFIG-01/triage-1.json",
+              "by": "agent",
+              "covers": []
+            },
+            {
+              "at": "2026-11-16T16:47:08.693095Z",
+              "route": "revised",
+              "reason": "revise ask ask-config-01-refine-1 published at 3b70a8dc567da17b981c0afbd438a431b1a4cd5c",
+              "by": "sprint_handoff publish-plan",
+              "covers": []
+            }
+          ]
         },
         "READERS-01": {
           "status": "pending",

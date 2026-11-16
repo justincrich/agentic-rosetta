@@ -115,3 +115,42 @@ hardcode docs. Prove each with a real mutation run in a disposable copy before r
   `guardrails.write_allowed` and the `> Files:` line (the ask authorizes it; `grok-skills/*` is in
   the binding scope's files in scope). The re-dispatched implementer continues from b06e883 and
   916e38c on `kb-run-sprint/imp-update-rosetta-plugin-distribute-results-1794839963/CONFIG-01`.
+
+## Handoff
+
+```json
+{
+  "task": "CONFIG-01",
+  "commit_sha": "614192bee991b5da7bd1638cf61b873ab6e7d065",
+  "done": "Test-only cycle 3: the AC-4 section of scripts/rosetta/test_resolve.py now pins the full bad-config matrix the contract names instead of one representative per value kind. It builds 28 fresh `git init` temp repos and drives the real `assets/rosetta_config.py show` subprocess against each: one per missing key (docs, research, probes, agents — each asserted to exit non-zero naming that key), one per bad value kind applied to each of the four keys (absolute, ~-relative, `device`, `..`, and a symlink escape built with a real symlink whose target sits beside the repo), and one per registry-pruned docs name (tmp, research, sandbox, .history). Each case asserts non-zero exit, that stderr names <repo>/.rosetta/config.json and `paths.<key>`, and that nothing was resolved onto stdout; the matrix size itself is pinned at 28 so no dimension can be dropped silently. No product file changed. The oracle now has teeth: in a disposable copy of the candidate, default-a-missing-key (each key taken separately), validate-only-docs, prune-only-tmp, hardcode-docs, a keyless refusal message and both escape guards removed each make `python3 scripts/rosetta/test_resolve.py` exit non-zero, where the start-state verify stayed green under the first three; an AC-7 mutant that gates `plugin` on the project config kills that case too. The full local gate list (19 commands, including sync-assets --check, assert-no-drift --scripts-only, --selftest, and every scripts/rosetta and kb-delivery suite) passes on the committed candidate.",
+  "deviations": [
+    "This cycle changed only scripts/rosetta/test_resolve.py (55 insertions, 19 deletions), which is in write_allowed; the amended contract's grok-skills allowance was not needed because no resolver copy moved.",
+    "AC-4's RED is the gap itself rather than a broken product: implementer-cycle-3/red/AC-4-mutant-gap.log runs the start-state verify (HEAD 3cac346) in a disposable `git archive` copy under default-a-missing-key, validate-only-docs and prune-only-tmp, and shows it exiting 0 while the real CLI resolves a config with no `paths.docs` and with `docs: research/graphs` at exit 0.",
+    "AC-7 is a preserved-behaviour requirement (`plugin` was already exempt before this task), so no base tree produces a RED for it; green/AC-7-mutant.log shows the assertion instead fails when `plugin` is gated on the project config.",
+    "AC-1/AC-5/AC-6 keep the cycle-1 late-base RED (implementer-cycle-1/red/test_resolve-late-base.log, 50 failing cases on the pre-CONFIG-01 base) because their sections and product paths did not change this cycle; AC-3 keeps the cycle-2 mutant RED because its discriminating custom-layout case landed there. Every green receipt was re-run and re-captured this cycle on the committed candidate.",
+    "My first gate-replay run created the symlink target inside the repo, so the four symlink cases were accepted (exit=0) and the tally read 24/28; the target now sits beside the repo, which is the real escape, and the tally is 28/28. The wrong run is not kept as evidence.",
+    "The engine (bun) lane was not run: no engine file changed and no AC touches it.",
+    "Evidence lives only under the evidence root: nothing was added to the worktree and no evidence path was committed; the candidate's changed-path set is exactly scripts/rosetta/test_resolve.py."
+  ],
+  "concerns": [
+    "The AC-4 section now forks 28 `git init` subprocesses plus 28 CLI subprocesses, so `python3 scripts/rosetta/test_resolve.py` takes about 10 seconds; each further case the contract adds costs roughly 0.35s.",
+    "`same(\"ac4-matrix-case-count\", len(bad) + len(CLASSES), 28)` pins the matrix at 28; a future contract that adds a bad value kind or a pruned name must update that pin deliberately, which is the intent but is a manual step.",
+    "The `refusal` helper asserts exit != 0 rather than exit == 2, so a case would also pass if a config produced an argparse usage error; the stderr assertions (config path plus `paths.<key>`) are what actually distinguish a validation refusal.",
+    "Naming the key is a substring check, so a refusal that named `paths.docs` for the wrong reason would pass; no case distinguishes the reason beyond the message text.",
+    "AC-4's repo names include `ac4-pruned-history` for the `.history` case (the leading dot is stripped so the directory is visible); a reader mapping names back to configs must remember that."
+  ],
+  "findings": [
+    "Removing only the `..` literal check is an equivalent mutant: the resolve-outside-repo guard refuses `../graphs` by key anyway, so AC-4's `..` requirement stays satisfied. The `..` check is a second layer, not the load-bearing one; green/mutant-kills.log proves this by removing each guard separately (mutants 6 and 7) and showing both are killed.",
+    "PRUNED_DOC_SEGMENTS in assets/rosetta_config.py duplicates registry.EXCLUDE_DIR_NAMES (already noted in the cycle-2 handoff), and the new test mirrors the four names from the contract, so a registry change that starts pruning a fifth name would not fail this verify.",
+    "A symlink whose target resolves inside the repo is correctly accepted, so the symlink case must place its target outside the repo; my first gate-replay placed it inside and got exit=0 with no error, which reads exactly like a product bug but was a fixture error.",
+    "The `show --format plain` report names the deciding key (`[config: paths.docs = kb/graphs]`), so AC-3's custom-layout case can also assert provenance, not just the path.",
+    "The task file's reading_list points at cycle-1/cycle-2 verdicts under the review worktree's .kb-run-sprint/.../CONFIG-01/, not inside this worktree; they were read from the review worktree."
+  ],
+  "scope_impact": [],
+  "feedback": [
+    "AC-4's requirement and scenario now agree on 28 cases, which removed the text-versus-verify contradiction that blocked the first two cycles; the remaining friction is that the sentence enumerates the matrix in prose, so the count had to be recomputed (4 + 5x4 + 4) to be sure how the symlink kind maps.",
+    "The task's verify is a single command that runs all 28 cases plus the other six AC sections, so an AC-4 failure and an AC-3 failure are indistinguishable in the report; per-case names in the failure output (`ac4-missing-docs-names-key`) make it readable, which is worth keeping.",
+    "The '> Files:' line and guardrails.write_allowed now both allow grok-skills/*/assets/rosetta_config.py, so this cycle reported no scope defect."
+  ]
+}
+```
