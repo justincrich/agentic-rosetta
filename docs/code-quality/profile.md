@@ -80,7 +80,7 @@ Dependencies point one way: `kb-delivery` → `rosetta`; `rosetta` never imports
 | Agent name → graph slug | `scripts/rosetta/naming.py` | `registry`, `generate_excerpt` |
 | Graph path → slug (3 layouts) | `scripts/rosetta/naming.py` | `registry`, `generate_excerpt` |
 | `ROLES` | `scripts/rosetta/naming.py` | both |
-| Semver parse/inc/bump | `scripts/rosetta/versions.py` | `provenance`, `write-graph`, `factgraph`, `registry`, `generate_excerpt` |
+| Semver parse/inc/bump | `scripts/rosetta/versions.py` | `provenance`, `write-graph` |
 | Composed edition + copy fingerprint (`COMPOSED_KEY`, `fact_fingerprint`, `composed_freshness`) | `scripts/rosetta/versions.py` | `factgraph`, `registry`, `write-graph`, `generate_excerpt` |
 | Canonical JSON + atomic write | `scripts/rosetta/jsonfile.py` | `provenance`, `write-graph`, `versions` |
 | Valid TLDs | `scripts/rosetta/locators.py` | `provenance` |

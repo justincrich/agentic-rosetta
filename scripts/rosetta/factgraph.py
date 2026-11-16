@@ -38,10 +38,12 @@ COMPOSITION IS COPY-BY-VALUE
   ``composed[<slug>]``. The declaration in ``_meta.composed_with`` is not the delivery
   mechanism any more: ``_meta`` is stripped from every render, so a declaration alone
   reaches no agent. ``compose_by_value()`` takes the copy, and ``sync_composed_with()``
-  rebuilds the declaration from that copy whenever a copy exists, so no copy is ever left
-  undeclared. A declaration with NO body copy is deliberately kept, never erased:
-  ``--check-composed`` reports that state as ``missing-copy``, and ``--update`` refuses a
-  declaration whose original has left the project.
+  rebuilds the declaration from the copies alone whenever one exists, so no copy is ever
+  left undeclared. A graph with no copy at all comes back unchanged, so a declaration with
+  no body copy survives only until the first copy lands; once a copy exists, a declaration
+  for a source that was never copied is dropped — ``versions.py`` calls that state a bug,
+  not a supported one. ``--check-composed`` reports it as ``missing-copy``, and
+  ``--update`` refuses a declaration whose original has left the project.
 
   Because the container is part of the body, the write gate sees the borrowed facts and
   ``jsonfile.body_digest`` covers them — a hand-edited borrowed fact fails ``--check``.

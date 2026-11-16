@@ -122,8 +122,9 @@ def _split_name_role(agent_name: str) -> tuple[str, str]:
 def resolve_graph(agent_name_or_path: str) -> tuple[Path, str, str]:
     """Resolve the graph + domain + role for an agent name or directory.
 
-    Order: agent-local ``kb/fact-graph.json`` first, then the repo-shared graph. Raises
-    FileNotFoundError if neither exists (fail-closed)."""
+    Order: agent-local ``kb/fact-graph.json``, then the legacy ``docs/<docs-domain>/``
+    layout, then the repo-shared ``.rosetta/docs/<domain>/`` graph (whose path applies the
+    ``SHARED_GRAPHS`` remap). Raises FileNotFoundError if none exists (fail-closed)."""
     raw = Path(agent_name_or_path)
     agent_name = raw.name if raw.name else agent_name_or_path.strip("/").split("/")[-1]
     # accept a path to the agent dir or its agent.md

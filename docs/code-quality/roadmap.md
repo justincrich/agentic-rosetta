@@ -1,6 +1,7 @@
 # Cleaning roadmap — agentic-rosetta
 
-Last run: 2026-11-04 (`repo`, direction "organize the plugin") — **complete**.
+Last run: 2026-11-16 (`sprint imp-graph-composition-1793812559`, direction "none") — **complete**.
+Previous: 2026-11-04 (`repo`, direction "organize the plugin").
 Next run: start at item 2.
 Direction in force: module organization, DRY, typed definitions.
 Blast radius chosen: `repo`.
@@ -22,10 +23,14 @@ five jobs: NRRA block parsing, URL/locator *harvesting*, network pinning, stalen
 Markdown/JSON companion writing. Split by job, keep `provenance.py` as the facade. Cheaper than it
 was, because the version, locator and JSON decisions already have homes to call.
 
-### 3. Split `write-graph.py` (690 lines, 6 verbs)
-Still the hottest file (7 changes in 6 months) and still repeats the
-snapshot → merge → bump → validate → stamp → persist sequence in `cmd_update` and
-`cmd_apply_nrra`. One `_persist_revision()` helper is the next move.
+### 3. Split `write-graph.py` (1125 lines, 9 verbs) — **PART DONE 2026-11-16**
+The sequence the 2026-11-04 run named is now one helper: `_commit_revision()` holds
+bump → supersede → validate → stamp → write → persist, called by `cmd_update`,
+`cmd_apply_nrra`, `cmd_propagate` and `cmd_compose` with each verb's stempler and status
+passed explicitly; `snapshot_history()` and `read_sibling_state()` have one home too.
+Still open: `main()` is 147 lines (CLI surface + root resolution + a 37-line flag policy +
+dispatch), `cmd_update` is still 112 lines, and the tolerant fact-sources read is still
+written out in `cmd_update` and `cmd_apply_nrra`.
 
 ### 4. `registry.py` — parse once, drop the globals — **DONE 2026-11-04**
 One read per graph (was four, plus a fifth in `validate`); three mutable globals became one frozen
@@ -61,8 +66,21 @@ carry the logic, the remaining importable surface is smaller than it was.
 
 ## Baseline at the last run
 
-All 18 Python gates green (12 original + 6 added). `bun test`: 78 pass / 3 fail
-(`real Grok ACP worker lifecycle`, environmental, red before any change). `bun run typecheck` green.
+All 15 Python/bash selftests green. `bun test`: 78 pass / 3 fail (`real Grok ACP worker
+lifecycle`, environmental, red before any change). `bun run typecheck` green.
+The 2026-11-16 sprint run added 63 test lines (`test_write_graph.py`) and changed no
+expectation: the same 15 gates and the same 78/3 engine split hold after three waves, and
+the sprint's own nine-step human gate rehearsed 17/17 green on the merged trunk.
+
+## Log
+
+- **2026-11-16** `sprint imp-graph-composition-1793812559` — 4 units, 3 waves, 4 merges.
+  `SECTIONS` and `verdict_of` moved to their one home; `_commit_revision` replaced four
+  copies of the publish sequence; `persist_after_compose` deleted; five docstrings and both
+  directory prompts corrected against the code; dead `COMPOSED_PROBLEMS`, the
+  `DOCSDOMAIN_BY_PREFIX` alias and two unused imports deleted. Recorded, not fixed: 14
+  behaviour/policy items in `known-problems.md`, including two corrupt-file paths that read
+  as "empty" and are then rewritten as empty.
 
 ## How a run picks up
 
