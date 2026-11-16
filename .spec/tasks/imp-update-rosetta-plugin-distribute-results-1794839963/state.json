@@ -31,7 +31,7 @@
       "pr": null,
       "tasks": {
         "CONFIG-01": {
-          "status": "landed",
+          "status": "completed",
           "merge_sha": "46a5ba4f4885a62233eb4fceff0119d2965e994c",
           "attempts": [
             {
@@ -77,8 +77,37 @@
           ]
         },
         "READERS-01": {
-          "status": "pending",
-          "merge_sha": null
+          "status": "landed",
+          "merge_sha": "162cf8f835cd62e8d287bf71357e09cdaa5b6f4c",
+          "attempts": [
+            {
+              "at": "2026-11-16T17:15:41.060640Z",
+              "kind": "implementer",
+              "ref": "ses_e1aa4cf5affeoHzqlnA1diApZW",
+              "by": "sprint_handoff register-implementer"
+            },
+            {
+              "at": "2026-11-16T19:44:27.134210Z",
+              "kind": "review_cycle",
+              "ref": "ses_e1aa4cf5affeoHzqlnA1diApZW:cycle-2",
+              "by": "sprint_handoff record-review"
+            },
+            {
+              "at": "2026-11-16T20:13:26.920769Z",
+              "kind": "review_cycle",
+              "ref": "ses_e1aa4cf5affeoHzqlnA1diApZW:cycle-3",
+              "by": "sprint_handoff record-review"
+            }
+          ],
+          "triage": [
+            {
+              "at": "2026-11-16T19:02:36.057114Z",
+              "route": "revised",
+              "reason": "revise ask ask-readers-01-revise-1 published at 4837da30fc7dbcef822dab8cc32c8136bb9d04e9",
+              "by": "sprint_handoff publish-plan",
+              "covers": []
+            }
+          ]
         },
         "TECHFREE-01": {
           "status": "pending",
