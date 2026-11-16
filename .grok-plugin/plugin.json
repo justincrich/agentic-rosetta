@@ -1,7 +1,7 @@
 {
   "name": "rosetta",
   "description": "Rosetta KB machinery: research, bootstrap, validate, upgrade, sync. Ships the machinery, not the knowledge.",
-  "version": "0.4.6",
+  "version": "0.5.0",
   "skills": "./grok-skills",
   "author": {
     "name": "Justin Rich",

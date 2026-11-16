@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented here.
 
+## [0.5.0] — 2026-11-15
+
+### Changed
+- **This repo holds machinery only.** Every agent prompt and every knowledge base lives in the
+  consumer repository, `~/Projects/agent-content` (it owns `agents/` and
+  `.rosetta/docs|research|probes`); the same content is published to a read-only MCP service, so a
+  machine no longer needs a content checkout. `AGENTS.md`, `CONFIG.md` and `ARCHITECTURE.md` name
+  that repository instead of the retired brain checkout, and CONFIG.md gains a "Which repo holds
+  the content" section.
+- **The device storage config follows the content.** On this machine `~/.rosetta/config.json`
+  points `docs`, `research` and `probes` at `~/Projects/agent-content`; the previous file is kept
+  beside it as `config.json.bak-<timestamp>`. The plugin default is unchanged (`"project"`), and
+  no skill or writer gained a hardcoded path.
+
+### Added
+- `scripts/test_no_brain_paths.py` — an integration gate over `git ls-files`: no tracked machinery
+  file hardcodes the retired checkout (references that are an example, a prohibition or the
+  publisher's external oracle are listed with a stated reason, and a stale entry fails), no agent
+  prompt is committed here, no `fact-graph.json` sits outside `scripts/testdata/`, and AGENTS.md
+  names the consumer repository. Run `-k ac27` / `-k ac32`.
+- `scripts/rosetta/test_resolve.py -k ac31` — pins the device half: the three storage roots, the
+  backup of the previous device file, the resolver's real `show` output and CONFIG.md. Machine
+  state, so it runs only when named; the plain invocation still pins the project-root tiers.
+
 ## [0.4.6] — 2026-08-25
 
 ### Changed

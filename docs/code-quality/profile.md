@@ -66,7 +66,7 @@ Dependencies point one way: `kb-delivery` → `rosetta`; `rosetta` never imports
    mocks of the filesystem or of the writers.
 5. **One writer per artifact.** `fact-graph.json` ← `write-graph.py`. The `rosetta-kb` region ←
    `embed-graph.sh`. `grok-skills/` ← `materialize-grok-skills.py`.
-6. **`--root` / `$ROSETTA_PROJECT` always win**, and nothing hardcodes `~/Projects/brain`.
+6. **`--root` / `$ROSETTA_PROJECT` always win**, and nothing hardcodes a consumer checkout path.
 7. **Drift gates over hand-copies.** Where a file is deliberately replicated (`rosetta_config.py`
    ×14, `grok-skills/` ×7), a gate proves the copies identical.
 

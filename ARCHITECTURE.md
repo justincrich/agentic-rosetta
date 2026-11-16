@@ -141,9 +141,10 @@ matches its slug needs no table entry.
 never injected. `rosetta_config.py doctor` warns when the resolved docs root
 has no sibling `agents/` directory.
 
-A machine may still centralize `research` and `probes` (this machine’s
-`~/.rosetta/config.json` points those two at `~/Projects/brain`). That is
-opt-in configuration, not a plugin default, and it does not make brain a
+A machine may still centralize `research`, `probes` and `docs` in the consumer
+repository — this machine's `~/.rosetta/config.json` points all three at
+`~/Projects/agent-content`, which owns `agents/` and the KBs. That is opt-in
+configuration, not a plugin default, and it does not make that checkout a
 hardcoded path in the code.
 
 ## Delivery into agents

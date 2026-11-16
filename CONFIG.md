@@ -33,12 +33,16 @@ Device-wide (created by `install.sh`):
   "version": 1,
   "roots": {
     "default": "project",
-    "research": "~/Projects/brain",
-    "probes": "~/Projects/brain",
-    "docs": "project"
+    "research": "~/Projects/agent-content",
+    "probes": "~/Projects/agent-content",
+    "docs": "~/Projects/agent-content"
   }
 }
 ```
+
+Those three values belong to the machine, not to this repo. This machine's device file names
+the consumer repository (see [Which repo holds the content](#which-repo-holds-the-content));
+another machine may leave them at `"project"` and change nothing.
 
 Per-project, same shape, overrides the device file:
 
@@ -70,7 +74,7 @@ Precedence: `--concurrency` > `$ROSETTA_CONCURRENCY` > project `.rosetta/config.
 |---|---|
 | `"project"` | The repo you are in — nearest ancestor with `.git`, else with `.rosetta`, else the cwd. **Default.** |
 | `"device"` | `~/.rosetta` itself (override the location with `$ROSETTA_HOME`). No nested `.rosetta`: artifacts go to `~/.rosetta/research/…`. |
-| any path | Absolute or `~`-relative, e.g. `"~/Projects/brain"`. |
+| any path | Absolute or `~`-relative, e.g. `"~/Projects/agent-content"`. |
 
 ## Precedence
 
@@ -92,7 +96,7 @@ knowledge base reach it via `scripts/rosetta/roots.py`:
 | the skills (`research`, `docs`, `probes` paths) | resolver, always |
 | `write-graph.py` (the only writer of `fact-graph.json`) | `--root` → `$ROSETTA_PROJECT` → **resolver** → cwd |
 | `provenance.py --check-stale` | same order, so it probes the graph `write-graph.py` will update |
-| `registry.py`, `embed-graph.sh` | the **project** — they scan the repo that owns `agents/`, by design |
+| `registry.py`, `embed-graph.sh` | the **project** — they scan the repo that owns `agents/` (the consumer repository), by design |
 
 `--root` and `$ROSETTA_PROJECT` are explicit instructions and beat the config; without them the
 destination is the configured one, never "whatever directory the shell is standing in."
@@ -121,6 +125,26 @@ The resolver never fakes and never crashes:
 | Resolved root not writable | Warn, fall back to the project, **and flag the fallback** so the artifact's `storage:` field records where it actually landed rather than where it meant to go |
 | Resolver missing entirely | Skills fall back to project-local paths and say so in their report |
 
+## Which repo holds the content
+
+This repo ships machinery only. The content it produces and consumes — every agent prompt and
+every knowledge base — lives in the **consumer repository**:
+
+| What | Where |
+|---|---|
+| agent prompts | `<consumer>/agents/<name>/agent.md` |
+| knowledge bases (fact graph + concept docs) | `<consumer>/.rosetta/docs/<slug>/` |
+| research notes | `<consumer>/.rosetta/research/<slug>.md` |
+| anti-pattern probes | `<consumer>/.rosetta/probes/<slug>.md` |
+
+On this machine the consumer is `~/Projects/agent-content`, and `~/.rosetta/config.json` points
+all three storage classes there, so a skill run from any directory writes next to the agents that
+read the result. The same content is published to a read-only MCP service, which is how a machine
+that carries no content checkout receives it.
+
+A device config is machine state, not repo state. Before changing it, keep a backup of the
+previous file beside it (`config.json.bak-<timestamp>`) so the old roots stay recoverable.
+
 ## ⚠️ One real constraint on `docs`
 
 If you use the agent-embed pipeline (`registry.py` + `embed-graph.sh`, which inject a fact-graph
@@ -128,7 +152,9 @@ render into agent bodies), be careful pointing `docs` somewhere new. That pipeli
 fact-graphs by **walking the repo that owns `agents/`**. A knowledge base written outside that repo
 is invisible to it — the agents silently never receive the graph.
 
-Keep `docs` at `"project"` and run `/rosetta-bootstrap` from the repo that holds your agents.
+Point `docs` at the repo that holds your agents — `~/Projects/agent-content` on this machine, which
+is why the device file names it instead of leaving it at `"project"` — and run
+`/rosetta-bootstrap` from that repo.
 `rosetta_config.py doctor` warns when the resolved docs root has no sibling `agents/` directory,
 and `write-graph.py` now repeats that warning at write time rather than letting you discover it
 when an agent turns up without its graph.
@@ -160,14 +186,15 @@ python3 $R --selftest                                 # real-filesystem tests
 `show --format plain` prints both the resolved directory and what decided it, e.g.
 
 ```
-  research  /Users/me/Projects/brain/.rosetta/research
-            [device: roots.research = ~/Projects/brain]
-  docs      /Users/me/Projects/my-app/.rosetta/docs
-            [device: roots.docs = project]
+  research  /Users/me/Projects/agent-content/.rosetta/research
+            [device: roots.research = ~/Projects/agent-content]
+  docs      /Users/me/Projects/agent-content/.rosetta/docs
+            [device: roots.docs = ~/Projects/agent-content]
 ```
 
-Note `[device: roots.docs = project]` — the *device* config supplied the value `project`, which
-resolved to the repo you are standing in. Tier and value are different things; the output shows both.
+Note `[device: roots.docs = project]` in a config that says `"docs": "project"` — the *device*
+config supplied the value `project`, which resolved to the repo you are standing in. Tier and
+value are different things; the output shows both.
 
 ## `doctor`
 

@@ -1,22 +1,34 @@
 #!/usr/bin/env python3
-"""test_resolve.py — pins which project a run is about.
+"""test_resolve.py — pins which project a run is about, and where this device stores artifacts.
 
 ``discover_repo_root`` decided which tree gets written, and it existed twice. Every tier
 is pinned here, including the fixture rule and the "walk up to .git" behaviour that makes
 ``registry.py scan`` from a subdirectory index the repo rather than the subdirectory.
 
-Run: python3 scripts/rosetta/test_resolve.py
+The second case pins the **device** half: ``~/.rosetta/config.json`` points docs, research and
+probes at the consumer repository, so a run no longer needs a brain checkout. It asserts the
+real device file, the real backup of the previous one, the real resolver CLI, and CONFIG.md.
+It is machine state, not repo state, so it runs only when named — the plain invocation stays
+portable.
+
+Run: python3 scripts/rosetta/test_resolve.py            # the project-root tiers (portable)
+     python3 scripts/rosetta/test_resolve.py -k ac31    # this device's storage config
 """
 from __future__ import annotations
 
+import argparse
+import importlib.util
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 
 import resolve as RV  # noqa: E402
@@ -24,6 +36,9 @@ import registry as R  # noqa: E402  (transition cross-check)
 
 sys.path.insert(0, str(HERE.parent / "kb-delivery"))
 import generate_excerpt as G  # noqa: E402  (transition cross-check)
+
+#: The consumer repository that owns agents/ and every KB (CONFIG.md, AGENTS.md).
+CONSUMER_REPO = "~/Projects/agent-content"
 
 
 @contextmanager
@@ -53,7 +68,7 @@ def _cwd(path: Path):
         os.chdir(saved)
 
 
-def main() -> int:
+def _tier_failures() -> list[str]:
     failures: list[str] = []
 
     def check(name: str, got, want) -> None:
@@ -131,12 +146,114 @@ def main() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    return failures
+
+
+def _resolver():
+    """Load the canonical resolver from assets/ — the same file the device copy is checked against."""
+    path = REPO / "assets" / "rosetta_config.py"
+    spec = importlib.util.spec_from_file_location("rosetta_config_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, path
+
+
+def _ac31_failures() -> list[str]:
+    """This device's storage config: docs, research and probes are the consumer repository."""
+    failures: list[str] = []
+
+    def check(name: str, got, want) -> None:
+        if got != want:
+            failures.append(f"{name}\n     got:  {got!r}\n     want: {want!r}")
+
+    resolver, cli = _resolver()
+    home = resolver.rosetta_home()
+    cfg_path = home / "config.json"
+    print(f"  device config: {cfg_path}  (resolver.rosetta_home())")
+    if not cfg_path.is_file():
+        return [f"device config missing: {cfg_path}"]
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    roots = cfg.get("roots") or {}
+
+    consumer = Path(CONSUMER_REPO).expanduser().resolve()
+    for cls in resolver.CLASSES:
+        check(f"device roots.{cls}", roots.get(cls), CONSUMER_REPO)
+    check("the consumer repo the config names exists", consumer.is_dir(), True)
+    check("the consumer repo owns agents/", (consumer / "agents").is_dir(), True)
+    for cls in resolver.CLASSES:
+        check(f"the consumer repo holds .rosetta/{cls}/", (consumer / ".rosetta" / cls).is_dir(), True)
+
+    backups = sorted(home.glob("config.json.bak-*"))
+    check("a backup of the previous device config exists", bool(backups), True)
+    if backups:
+        newest = max(backups, key=lambda p: p.stat().st_mtime)
+        previous = json.loads(newest.read_text(encoding="utf-8"))
+        old_roots = previous.get("roots") or {}
+        print(f"  backup: {newest.name} ({newest.stat().st_size} bytes) roots={old_roots}")
+        check("the backup is a complete config", sorted(old_roots), sorted(roots))
+        moved = [cls for cls in resolver.CLASSES if old_roots.get(cls) != roots.get(cls)]
+        check("the backup holds the pre-retirement roots", bool(moved), True)
+
+    # The real resolver CLI, on the real home, from a project with no config of its own.
+    proj = Path(tempfile.mkdtemp(prefix="ac31-project-"))
+    try:
+        (proj / ".git").mkdir()  # pin the project root here, not in an ancestor
+        out = subprocess.run(
+            [sys.executable, str(cli), "show", "--format", "plain", "--project", str(proj)],
+            capture_output=True, text=True,
+        )
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+    check("resolver show exits 0", out.returncode, 0)
+    print("  resolver show --format plain:")
+    for line in out.stdout.splitlines():
+        print(f"  | {line}")
+    for cls in resolver.CLASSES:
+        want = str(consumer / ".rosetta" / cls)
+        check(f"resolver prints {cls} in the consumer repo", want in out.stdout, True)
+        check(f"resolver did not fall back for {cls}", f"root not writable" in out.stderr, False)
+
+    config_doc = (REPO / "CONFIG.md").read_text(encoding="utf-8")
+    check("CONFIG.md names the consumer repo", "agent-content" in config_doc, True)
+
+    return failures
+
+
+CASES = {
+    "resolve-tiers": _tier_failures,
+    "ac31": _ac31_failures,
+}
+
+#: Machine-state cases run only when named, so the plain invocation stays portable.
+DEVICE_CASES = ("ac31",)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-k", "--case", action="append", default=None,
+                    choices=sorted(CASES),
+                    help="run one case (repeatable); default: the portable project-root tiers")
+    args = ap.parse_args(argv)
+    selected = args.case or [name for name in CASES if name not in DEVICE_CASES]
+
+    failures: list[str] = []
+    for name in selected:
+        print(f"── {name} ──")
+        case_failures = CASES[name]()
+        if case_failures:
+            print(f"FAILED — {name}: {len(case_failures)} case(s):")
+            for f in case_failures:
+                print(f"  - {f}")
+            failures.extend(case_failures)
+
     if failures:
-        print(f"FAILED — {len(failures)} case(s):")
-        for f in failures:
-            print(f"  - {f}")
+        print(f"\nFAILED — {len(failures)} case(s) across {', '.join(selected)}")
         return 1
-    print("ok — resolve.py pins all 5 tiers and agrees with both old call sites")
+    if selected == ["resolve-tiers"]:
+        print("ok — resolve.py pins all 5 tiers and agrees with both old call sites")
+    else:
+        print(f"ok — {', '.join(selected)}")
     return 0
 
 

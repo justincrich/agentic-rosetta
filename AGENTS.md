@@ -11,10 +11,16 @@ Theory: [`WHY.md`](WHY.md).
 This repository is the **one true source** of Rosetta *machinery*: seven skills, a
 Mastra fanout engine, Python writers, and install/sync scripts.
 
-It is **not** a knowledge-base host. No language KBs, no `agents/` triad, no
-`fact-graph.json` for a real stack belong here. Those live in a **consumer**
-project (on this machine that is often `~/Projects/brain`). Brain is a consumer.
-Never `cd` there to “find the plugin.” Never hardcode `~/Projects/brain`.
+It is **not** a knowledge-base host. No language KBs, no agent prompts, no
+`fact-graph.json` for a real stack belong here. Those live in the **consumer
+repository**, `~/Projects/agent-content`: it owns `agents/` (every agent prompt a
+harness installs) and `.rosetta/docs`, `.rosetta/research`, `.rosetta/probes` (every KB
+and catalog). Content is published from there to a read-only MCP service and synced
+onto machines that carry no content checkout at all.
+
+Never `cd` into a consumer checkout to “find the plugin.” Never hardcode a consumer
+checkout path: resolve the plugin with `$ROSETTA_PLUGIN` or the walk-up rule, and the
+target project with `--root` / `$ROSETTA_PROJECT`.
 
 Install ships machinery only. It does not copy KBs and does not edit a target
 project’s `AGENTS.md`.
@@ -35,8 +41,9 @@ project’s `AGENTS.md`.
 Two audiences, two homes — do not mix them:
 
 - **Plugin engineer** (you, in this repo): change machinery. This file governs you.
-- **KB author** (usually standing in the consumer project that owns `agents/`): run
-  `/rosetta-bootstrap` and friends. Those procedures live in the skills, not here.
+- **KB author** (usually standing in the consumer repository that owns `agents/` —
+  here `~/Projects/agent-content`): run `/rosetta-bootstrap` and friends. Those
+  procedures live in the skills, not here.
 
 ## Iron writers
 
@@ -58,7 +65,7 @@ The most recent copies of these decisions had already drifted apart in behaviour
 
 ## Iron rules
 
-1. **Never hardcode `~/Projects/brain`.** Resolve the plugin with `$ROSETTA_PLUGIN`
+1. **Never hardcode a consumer checkout path.** Resolve the plugin with `$ROSETTA_PLUGIN`
    or by walking up until `engine/src/research.ts` exists. Resolve the *target
    project* with `--root` / `$ROSETTA_PROJECT`. If neither is set, scripts take
    a script-parent that already has `agents/` (test fixtures), else the nearest
@@ -89,7 +96,8 @@ The most recent copies of these decisions had already drifted apart in behaviour
    `/user:rosetta-research` and collide).
 10. **`docs` stay in the repo that owns `agents/`.** A graph written outside that
     repo is invisible to `registry.py` / `embed-graph.sh`. That is why `docs`
-    defaults to `"project"`.
+    defaults to `"project"`, and why this machine's device file names the
+    consumer repository, `~/Projects/agent-content`, explicitly.
 
 ## Storage vs tracking
 
@@ -97,9 +105,9 @@ These are not the same system.
 
 - **Storage roots** (`~/.rosetta/config.json`, optional
   `<project>/.rosetta/config.json`) decide where *new* `research` / `docs` /
-  `probes` are written. Built-in default is `"project"`. A machine may point
-  `research` or `probes` at a central repo (this machine’s device file points
-  those two at `~/Projects/brain`). That is an *opt-in*, not a plugin default.
+  `probes` are written. Built-in default is `"project"`. This machine's device
+  file points all three classes at the consumer repository,
+  `~/Projects/agent-content` — *opt-in* configuration, not a plugin default.
 - **Tracking** is `scripts/rosetta/registry.py`: an exhaustive walk of **one**
   project for `fact-graph.json`. The index is
   `<that project>/.rosetta/registry.json`. There is no machine-wide catalog.
@@ -148,7 +156,8 @@ python3 scripts/rosetta/test_write_graph.py
 python3 scripts/rosetta/test_provenance.py
 python3 scripts/rosetta/test_factgraph.py
 python3 scripts/rosetta/test_naming.py
-python3 scripts/rosetta/test_resolve.py
+python3 scripts/rosetta/test_resolve.py   # -k ac31 checks this device's storage roots
+python3 scripts/test_no_brain_paths.py    # machinery only: no retired checkout, no KB, no prompt
 python3 scripts/rosetta/test_versions.py
 python3 scripts/rosetta/test_locators.py
 python3 scripts/rosetta/test_jsonfile.py
@@ -179,11 +188,11 @@ Grok + `--scripts-only`. Touched `assets/rosetta_config.py` → `./sync-assets.s
 `CHANGELOG.md` is the narrative of what shipped. Installer-facing versions
 currently **lag** and are not a single source of truth:
 
-| File | Version on disk (as of 0.4.5 narrative) |
+| File | Version on disk (as of 0.5.0 narrative) |
 |---|---|
-| `CHANGELOG.md` | `0.4.5` |
-| `.claude-plugin/plugin.json` | `0.4.5` |
-| `.grok-plugin/plugin.json` | `0.4.5` |
+| `CHANGELOG.md` | `0.5.0` |
+| `.claude-plugin/plugin.json` | `0.5.0` |
+| `.grok-plugin/plugin.json` | `0.5.0` |
 | `.claude-plugin/marketplace.json` | `0.3.0` |
 | `engine/package.json` | `0.4.0` |
 

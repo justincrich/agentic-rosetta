@@ -4,8 +4,8 @@ You are in the **Python writers**. This tree mutates graphs, rebuilds the
 registry, embeds renders into `agent.md`, and materializes the Grok pack.
 Root contract: [`../AGENTS.md`](../AGENTS.md). Inventory: [`README.md`](README.md).
 
-Do **not** edit `grok-skills/` by hand. Do **not** add a `~/Projects/brain`
-special case to `resolve.project_root()`.
+Do **not** edit `grok-skills/` by hand. Do **not** add a hardcoded
+consumer-checkout path (or a `brain/` special case) to `resolve.project_root()`.
 
 ## What this tree owns
 
