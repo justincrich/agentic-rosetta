@@ -162,7 +162,10 @@ def check_config_contract(tmp: Path, failures: list[str]) -> None:
             + [f"+ {a}" for a in after if a not in before])
     must("ac1-tree-byte-identical", diff == [], "\n".join(diff))
 
-    # ── AC-3: the standard config names the standard layout ───────────────────
+    # ── AC-3: the configured layout decides the path ──────────────────────────
+    # The standard config first. On its own this case cannot distinguish "reads the config"
+    # from "hardcodes .rosetta/docs", so the non-standard case below is the negative control
+    # that gives the requirement its teeth.
     std = new_repo(tmp, "standard-repo")
     std_home = tmp / "standard-home"
     std_home.mkdir()
@@ -173,6 +176,31 @@ def check_config_contract(tmp: Path, failures: list[str]) -> None:
     expected = str(std / ".rosetta" / "docs" / "x" / "fact-graph.json")
     same("ac3-exit0", proc.returncode, 0)
     same("ac3-exact-path", proc.stdout.strip(), expected)
+
+    # A config that names a NON-standard layout must move every class. A resolver that
+    # hardcodes .rosetta/docs (or anyone's built-in default) fails here and only here.
+    custom = new_repo(tmp, "custom-repo")
+    custom_home = tmp / "custom-home"
+    custom_home.mkdir()
+    write_config(custom, {"version": 2, "paths": {
+        "docs": "kb/graphs", "research": "kb/research",
+        "probes": "kb/probes", "agents": "prompts"}})
+    proc = run_cli([sys.executable, str(RESOLVER), "path", "--class", "docs",
+                    "--slug", "x", "--file", "fact-graph.json"],
+                   custom, {"ROSETTA_HOME": custom_home})
+    same("ac3-custom-exit0", proc.returncode, 0)
+    same("ac3-custom-path", proc.stdout.strip(),
+         str(custom / "kb" / "graphs" / "x" / "fact-graph.json"))
+    must("ac3-custom-not-standard", str(custom / ".rosetta" / "docs") not in proc.stdout,
+         proc.stdout)
+    proc = run_cli([sys.executable, str(RESOLVER), "path", "--class", "agents", "--slug", "x"],
+                   custom, {"ROSETTA_HOME": custom_home})
+    same("ac3-custom-agents-path", proc.stdout.strip(), str(custom / "prompts" / "x"))
+    # The report must name the config key that decided it, not a built-in tier.
+    proc = run_cli([sys.executable, str(RESOLVER), "show", "--format", "plain"], custom,
+                   {"ROSETTA_HOME": custom_home})
+    must("ac3-custom-show-names-config",
+         "[config: paths.docs = kb/graphs]" in proc.stdout, proc.stdout)
 
     # ── AC-4: one real temp repo per bad value kind ──────────────────────────
     bad: list[tuple[str, dict, str]] = []
