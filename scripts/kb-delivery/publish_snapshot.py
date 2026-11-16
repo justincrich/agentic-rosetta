@@ -38,20 +38,18 @@ WHY THE POINTER IS WRITTEN LAST
   R2 has no bulk command; R2 S3 keys are never read from a file, never logged, never staged and
   never handed to the child process (wrangler carries its own OAuth credential).
 
-WHY THE CONSUMER'S OWN PROJECTOR RUNS
-  The projection rules (frontmatter, tool mapping, model policy, TOML escaping) already have
-  one home: the *consumer's* ``scripts/agentshare.py``. This script never re-implements them
-  and never hardcodes a consumer path — ``--root`` names the checkout and ``scripts/
-  agentshare.py`` inside it is required, or the run fails closed. agentshare is invoked once
-  per target with an explicit ``--target`` (never bare, which would project all six harnesses
-  and their side effects), writing into a temporary ``HOME`` so nothing lands in the real
-  ``~/.claude`` or ``~/.codex``.
+WHY THE PROJECTOR IS LOCAL, NOT THE CONSUMER'S
+  The projection rules (frontmatter, tool mapping, model policy, TOML escaping) have one home:
+  this repo's ``project_agents.py``, proven byte-for-byte against the consumer's ``scripts/
+  agentshare.py`` for all five targets (``test_project_agents.py``, AC-26). A publish therefore
+  needs nothing from the consumer but *content*: ``--root`` names a checkout holding ``agents/``
+  and ``.rosetta/docs/``, so the content repository — data only, no scripts, and no brain on the
+  machine — publishes exactly like the authoring checkout did.
 
-  Those rules now also exist here, as ``project_agents.py``, proven byte-for-byte against the
-  consumer's copy for all five targets (``test_project_agents.py``, AC-26). The publisher still
-  invokes the consumer's copy so a stage stays identical to that checkout's own projection
-  until the port takes over; it does share the port's target table, so "where this harness
-  reads its agents" has one home.
+  One target is projected at a time, with an explicit ``--target`` (never the whole fleet, so a
+  harness target cannot ride into a snapshot unseen), into a temporary ``HOME`` so nothing lands
+  in the real ``~/.claude`` or ``~/.codex``. ``--root`` is never hardcoded: it is the only place
+  content is read from.
 
 HARNESS SIDE EFFECTS ARE DECLARED, NEVER SILENT
   Two targets do more on a device than write a file tree: the OpenCode target unpins
@@ -277,7 +275,13 @@ def plugin_version() -> str:
 
 
 def load_agentshare(root: Path) -> ModuleType:
-    """Import the consumer's projector so frontmatter rules are not duplicated here."""
+    """Import a consumer's *own* projector — not needed to publish any more.
+
+    The publish path projects with this repo's ``project_agents.py`` and reads nothing but
+    content from ``--root``. This helper is kept because ``test_doc_refs.py`` (DOCREFS-01, a
+    sibling task) reads a consumer's agent catalogue through the consumer's own projection; it
+    goes away with the consumer's ``scripts/agentshare.py`` at retirement.
+    """
     path = root / "scripts" / "agentshare.py"
     if not path.is_file():
         raise PublishError(
@@ -293,6 +297,28 @@ def load_agentshare(root: Path) -> ModuleType:
     if not hasattr(module, "discover_agents"):
         raise PublishError(f"{path}: does not expose discover_agents(), so agents cannot be catalogued")
     return module
+
+
+def load_source_agents(root: Path) -> list[dict]:
+    """Every agent in the checkout, read by this repo's projector.
+
+    The consumer supplies content, never machinery: the content repository holds ``agents/``
+    and ``.rosetta/docs/`` and nothing else, so requiring a projector inside it would make a
+    brain-less publish impossible. Fail closed on a root that has no agents at all, and on one
+    whose agents project to nothing — either would publish an empty fleet.
+    """
+    agents_dir = root / "agents"
+    if not agents_dir.is_dir():
+        raise PublishError(
+            f"{root}: no agents/ directory — the publisher reads <root>/agents/<name>/agent.md "
+            "and will not guess a projection"
+        )
+    agents = project_agents.discover_agents(agents_dir)
+    if not agents:
+        raise PublishError(
+            f"{root}: agents/ holds zero agent prompts; refusing to publish an empty snapshot"
+        )
+    return agents
 
 
 # ── staging ────────────────────────────────────────────────────────────
@@ -389,37 +415,27 @@ def stage_target(
     *,
     root: Path,
     target: str,
-    agentshare: Path,
+    agents: list[dict],
     stage: Path,
     home: Path,
 ) -> dict:
-    """Run the consumer's projector for one target and copy its tree into the stage."""
-    argv = [sys.executable, str(agentshare), "--target", target]
-    _log(f"agentshare: {' '.join(argv)}")
-    env = dict(os.environ)
-    env["HOME"] = str(home)
-    env["BRAIN_ROOT"] = str(root)
-    # A projector target that honours an extra config-dir variable must still land inside the
-    # sandbox HOME: an inherited GROK_HOME would silently stage the machine's real ~/.grok.
-    for name in ("GROK_HOME", "ROGUEONE_SHARE"):
-        env.pop(name, None)
-    proc = subprocess.run(argv, cwd=str(root), env=env, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise PublishError(
-            f"agentshare --target {target} exited {proc.returncode}: "
-            f"{(proc.stderr or proc.stdout).strip().splitlines()[-1:] or 'no output'}"
-        )
+    """Project one target with this repo's projector and copy its tree into the stage."""
+    _log(f"project_agents: --root {root} --target {target} --home {home}")
+    try:
+        project_agents.project_target(agents, target, home=home)
+    except (OSError, ValueError) as exc:
+        raise PublishError(f"projecting target {target} failed: {exc}") from exc
     produced = home / TARGET_DEST[target]
     if not produced.is_dir():
         raise PublishError(
-            f"agentshare --target {target} exited 0 but wrote no tree at {TARGET_DEST[target]}; "
+            f"the projector wrote no {target} tree at {TARGET_DEST[target]}; "
             "refusing to publish a snapshot with zero agents"
         )
     dest = stage / "targets" / target
     copied, excluded = _copy_projection(produced, dest)
     if copied == 0:
         raise PublishError(
-            f"agentshare --target {target} produced zero agents; refusing to publish an empty snapshot"
+            f"the projector produced zero {target} agents; refusing to publish an empty snapshot"
         )
     rewritten = normalize_generated_paths(dest, root) if target == "codex" else 0
     _log(
@@ -617,7 +633,7 @@ def _agent_catalog(
             relative = target_agent_path(name, target)
             if not (stage / relative).is_file():
                 raise PublishError(
-                    f"agentshare staged no file for agent {name!r} (expected {relative.as_posix()}); "
+                    f"the projector staged no file for agent {name!r} (expected {relative.as_posix()}); "
                     "the projection and the source catalog disagree"
                 )
             paths[target] = relative.as_posix()
@@ -646,14 +662,8 @@ def publish(args: argparse.Namespace) -> int:
 
     _log(f"root: {root}")
     _log(f"stage: {stage}")
-    agentshare = root / "scripts" / "agentshare.py"
-    module = load_agentshare(root)
-    source_agents = module.discover_agents(root / "agents")
-    if not source_agents:
-        raise PublishError(
-            f"{root}: agentshare reports zero agents under agents/; refusing to publish an "
-            "empty snapshot"
-        )
+    _log(f"projector: {Path(project_agents.__file__).name} (this repo's port; the consumer ships no scripts)")
+    source_agents = load_source_agents(root)
     _log(f"source agents: {len(source_agents)}")
 
     reset_stage(stage)
@@ -666,7 +676,7 @@ def publish(args: argparse.Namespace) -> int:
         try:
             for target in targets:
                 staged = stage_target(
-                    root=root, target=target, agentshare=agentshare, stage=stage, home=home
+                    root=root, target=target, agents=source_agents, stage=stage, home=home
                 )
                 totals[target] = {
                     "dest": TARGET_DEST[target],
@@ -685,7 +695,7 @@ def publish(args: argparse.Namespace) -> int:
         staged_agents = staged_agent_count(stage, target)
         if staged_agents != len(source_agents):
             raise PublishError(
-                f"agentshare staged {staged_agents} {target} agents but the source has "
+                f"the projector staged {staged_agents} {target} agents but the source has "
                 f"{len(source_agents)}; refusing to publish a partial snapshot"
             )
 
@@ -999,8 +1009,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--root",
-        help="consumer checkout to publish (the folder holding scripts/agentshare.py, agents/, "
-        ".rosetta/docs/); required unless --scan-only",
+        help="consumer checkout to publish (the folder holding agents/ and .rosetta/docs/; no "
+        "scripts are needed there); required unless --scan-only",
     )
     parser.add_argument(
         "--targets",

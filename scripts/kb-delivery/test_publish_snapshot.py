@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """test_publish_snapshot.py — integration proofs for publish_snapshot.py.
 
-Every test below stages the REAL consumer checkout named by ``$ROSETTA_PUBLISH_ROOT``
-(default ``~/Projects/brain``) with that checkout's own ``scripts/agentshare.py``, and then
-inspects the staged artifacts. Nothing is mocked: the catalogue numbers asserted here (293
-agents, 65 knowledge bases, 6 ``*.bak``, 3 ``*.log``, 3 ``.history/``) are the real tree's, and
-the snapshot id is computed from real bytes.
+WHAT IS REAL HERE
+  AC-3/5/13/17 stage the REAL authoring checkout (``$ROSETTA_PUBLISH_ROOT``, default
+  ``~/Projects/brain``) and inspect the staged artifacts. Nothing is mocked: the catalogue
+  numbers asserted here (293 agents, 65 knowledge bases, 6 ``*.bak``, 3 ``*.log``,
+  3 ``.history/``) are the real tree's, and the snapshot id is computed from real bytes.
+
+  AC-25 needs no brain at all: it clones the REAL content repository
+  (``$ROSETTA_CONTENT_REPO``, default ``~/Projects/agent-content`` — data only, no scripts),
+  publishes it with a sandbox ``HOME`` while a real audit hook watches for any read under a
+  brain checkout, uploads the stage into local R2 through the publisher's own path, serves it
+  from the REAL Worker in workerd over TLS, and syncs it onto the bare ``HOME``. The result is
+  compared with the pre-move snapshot's inventory (``PRE_MOVE_SNAPSHOT_ID``), so "byte-identical"
+  is one digest over every file, not a count.
 
 Run:
     python3 scripts/kb-delivery/test_publish_snapshot.py            # every requirement
     python3 scripts/kb-delivery/test_publish_snapshot.py -k ac3     # one requirement
+    python3 scripts/kb-delivery/test_publish_snapshot.py -k ac25    # no brain, no token needed
 """
 from __future__ import annotations
 
@@ -17,7 +26,7 @@ import hashlib
 import json
 import os
 import re
-import shutil
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -28,6 +37,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parents[1]
 PUBLISHER = HERE / "publish_snapshot.py"
+SYNC = HERE / "sync_agents.py"
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import test_sync_agents as sync_suite  # noqa: E402  (the workerd-over-TLS helper both suites share)
 WRANGLER = PLUGIN / "worker" / "node_modules" / ".bin" / "wrangler"
 PAYLOAD_DIRS = ("targets", "kb", "docs")
 METADATA_FILES = ("manifest.json", "files.json", "scan-result.json")
@@ -39,6 +52,78 @@ SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PATTERNS = ["sk-", "ghp_", "AKIA", "BEGIN PRIVATE KEY"]
 OTHER_TARGETS = ("opencode", "grok", "droid", "rogueone")
+
+# ── the pre-move snapshot (AC-25's reference) ──────────────────────────
+# The last publish of the authoring checkout before the content moved out (brain HEAD 306a2efe5,
+# 2026-11-15, targets claude,codex): snapshot 4ee128bc60e4 over 694 payload files. Its inventory
+# is these constants. The digest is sha256 over sorted "<path> <sha256>\n" lines — the same
+# arithmetic the publisher uses to derive a snapshot id — so an equal digest means every one of
+# those files matches byte for byte, not merely that the counts agree.
+PRE_MOVE_SNAPSHOT_ID = "4ee128bc60e4"
+PRE_MOVE_TARGETS_DIGEST = "d0e7558f314d02f977b32a2e678e39e113b44f0e08c2544d777fa730e516775f"
+PRE_MOVE_TARGET_FILES = {"claude": 336, "codex": 293}
+PRE_MOVE_KB_DIGEST = "204631beafa0df4766f1faad3e8b713657043512f90042a18c23fae0ed53791c"
+PRE_MOVE_KB_SLUGS = (
+    "agent-intel", "ai-sdk", "assistant-ui", "astro", "betterauth", "bun",
+    "clean-code", "cloudflare-agents", "cloudflare-durable-objects-ios", "cloudflare-realtime",
+    "cloudflare-workers", "cmux", "cmux-codebase", "deepseek-harness", "docker-agent", "doppler",
+    "electron", "evals", "expo-ai-elements", "flue", "flyio", "github-agentic-workflow", "gpui",
+    "grok-build-tui", "hatchet", "herdr", "herdr-app", "herdr-core", "herdrdev", "hetzner-cloud",
+    "hubspot-crm", "jev", "kotlin", "langfuse", "livekit", "logging-best-practices", "mastra",
+    "mcp-python-sdk", "modal", "morph-cloud", "n8n", "nextjs", "nextjs-cloudflare", "openhands",
+    "pi-packages", "project-management", "quickbooks", "react-native-reusables", "restate", "rig",
+    "rust", "rust-acp", "rust-mcp", "shadcn", "shadcn-ai-elements", "simpro-api", "spacetime-db",
+    "supabase", "sweetui", "swift", "tart", "tauri", "taurpc", "techwriting", "trpc",
+)
+# The graph agentic-rosetta held the only copy of; the move added it to the content repository
+# (CONTENTMOVE-01), so a publish of today's content carries one more KB than the pre-move snapshot.
+CONTENT_KB_ADDITIONS = ("go",)
+CONTENT_REPO_ENV = "ROSETTA_CONTENT_REPO"
+
+# The publisher's own audit probe: a real `sys.addaudithook` observer on PYTHONPATH, so "no read
+# under a brain checkout" is watched rather than asserted. Nothing is stubbed — the publish runs
+# unchanged, and the hook only appends the paths it sees.
+AUDIT_PROBE_SOURCE = '''\
+import os
+import sys
+
+_watch = [part for part in os.environ.get("AC25_WATCH", "").split(",") if part]
+_log = os.environ.get("AC25_OPEN_LOG")
+if _watch and _log:
+    _prefixes = [os.path.realpath(part) for part in _watch]
+
+    def _observed(event, args):
+        if event not in ("open", "os.listdir", "os.scandir") or not args:
+            return
+        raw = args[0]
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "replace")
+        elif not isinstance(raw, str):
+            return
+        try:
+            resolved = os.path.realpath(raw)
+        except (OSError, ValueError):
+            return
+        if not any(resolved == p or resolved.startswith(p + os.sep) for p in _prefixes):
+            return
+        with open(_log, "a", encoding="utf-8") as handle:
+            handle.write(f"{event} {resolved}\\n")
+
+    sys.addaudithook(_observed)
+'''
+
+
+def content_repo() -> Path:
+    """The content repository whose fresh clone AC-25 publishes (data only, no machinery)."""
+    raw = os.environ.get(CONTENT_REPO_ENV) or (Path.home() / "Projects" / "agent-content")
+    root = Path(raw).expanduser()
+    missing = [name for name in ("agents", ".rosetta/docs") if not (root / name).is_dir()]
+    if missing:
+        raise AssertionError(
+            f"AC-25 publishes a real content repository; {root} is missing {missing}. Set "
+            f"${CONTENT_REPO_ENV} to a checkout holding agents/ and .rosetta/docs/."
+        )
+    return root
 
 
 def source_root() -> Path:
@@ -63,6 +148,25 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def digest_of(files: dict[str, str]) -> str:
+    """One digest over ``{path: sha256}``: equal digests mean every file matches byte for byte."""
+    lines = "".join(f"{path} {digest}\n" for path, digest in sorted(files.items()))
+    return hashlib.sha256(lines.encode("utf-8")).hexdigest()
+
+
+def payload_hashes(stage: Path) -> dict[str, str]:
+    """``{stage-relative path: sha256}`` for every staged payload file."""
+    found: dict[str, str] = {}
+    for name in PAYLOAD_DIRS:
+        base = stage / name
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if path.is_file():
+                found[path.relative_to(stage).as_posix()] = sha256_of(path)
+    return found
+
+
 def payload_files(stage: Path) -> dict[str, Path]:
     found: dict[str, Path] = {}
     for name in PAYLOAD_DIRS:
@@ -84,14 +188,26 @@ class PublishSnapshotTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="publish-snapshot-test-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.root = source_root()
+        self.addCleanup(sync_suite.remove_tree, self.tmp)
+        self._consumer: Path | None = None
 
     # ── helpers ────────────────────────────────────────────────────────
 
-    def run_publisher(self, *args: str, expect: int | None = None) -> subprocess.CompletedProcess:
+    def consumer(self) -> Path:
+        """The authoring checkout the brain-based requirements publish (AC-3/5/13/17).
+
+        Resolved on demand, so AC-25 — which publishes a content clone on a machine with no
+        brain at all — never touches it.
+        """
+        if self._consumer is None:
+            self._consumer = source_root()
+        return self._consumer
+
+    def run_publisher(
+        self, *args: str, expect: int | None = None, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess:
         argv = [sys.executable, str(PUBLISHER), *args]
-        proc = subprocess.run(argv, capture_output=True, text=True)
+        proc = subprocess.run(argv, capture_output=True, text=True, env=env)
         if expect is not None:
             self.assertEqual(
                 proc.returncode,
@@ -100,17 +216,65 @@ class PublishSnapshotTests(unittest.TestCase):
             )
         return proc
 
-    def publish(self, stage: Path, *extra: str, root: Path | None = None, expect: int | None = 0):
+    def publish(
+        self,
+        stage: Path,
+        *extra: str,
+        root: Path | None = None,
+        expect: int | None = 0,
+        env: dict[str, str] | None = None,
+    ):
         return self.run_publisher(
             "--root",
-            str(root or self.root),
+            str(root or self.consumer()),
             "--targets",
             "claude,codex",
             "--stage",
             str(stage),
             *extra,
             expect=expect,
+            env=env,
         )
+
+    def fresh_clone(self, dest: Path) -> Path:
+        """A real ``git clone`` of the content repository: tracked content and nothing else."""
+        source = content_repo()
+        proc = subprocess.run(
+            ["git", "clone", "--quiet", "--no-hardlinks", str(source), str(dest)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, f"git clone {source} failed: {proc.stderr}")
+        return dest
+
+    def audit_probe(self, watch: tuple[Path, ...]) -> tuple[dict[str, str], Path]:
+        """``(env, log)`` — a real audit-hook observer for every access under ``watch``."""
+        probe = self.tmp / "audit-probe"
+        probe.mkdir()
+        (probe / "sitecustomize.py").write_text(AUDIT_PROBE_SOURCE, encoding="utf-8")
+        log = self.tmp / "audit-probe.log"
+        env = {
+            "PYTHONPATH": str(probe),
+            "AC25_WATCH": ",".join(str(path) for path in watch),
+            "AC25_OPEN_LOG": str(log),
+        }
+        return env, log
+
+    def tls_certificate(self) -> tuple[Path, Path]:
+        """A throwaway certificate, so the sync talks real TLS to the real Worker."""
+        certfile = self.tmp / "cert.pem"
+        keyfile = self.tmp / "key.pem"
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                "-keyout", str(keyfile), "-out", str(certfile),
+                "-subj", "/CN=127.0.0.1",
+                "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return certfile, keyfile
 
     def scan_only(self, stage: Path, expect: int | None = None):
         return self.run_publisher("--stage", str(stage), "--scan-only", expect=expect)
@@ -119,7 +283,7 @@ class PublishSnapshotTests(unittest.TestCase):
         """Extract a real checkout of the consumer's HEAD commit at ``dest``."""
         dest.mkdir(parents=True, exist_ok=True)
         archive = subprocess.run(
-            ["git", "-C", str(self.root), "archive", "HEAD"], capture_output=True
+            ["git", "-C", str(self.consumer()), "archive", "HEAD"], capture_output=True
         )
         self.assertEqual(archive.returncode, 0, f"git archive failed: {archive.stderr.decode()}")
         extract = subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, capture_output=True)
@@ -157,7 +321,7 @@ class PublishSnapshotTests(unittest.TestCase):
             sys.executable,
             str(PUBLISHER),
             "--root",
-            str(self.root),
+            str(self.consumer()),
             "--targets",
             targets,
             "--stage",
@@ -307,20 +471,20 @@ class PublishSnapshotTests(unittest.TestCase):
         self.assertIn(f"snapshot_id: {manifest['snapshot_id']}", second.stdout)
         self.assertEqual((stage / "files.json").read_bytes(), first_files_json)
 
-        # Fail closed when the consumer has no scripts/agentshare.py: name the missing file.
-        fixture = PLUGIN / "scripts" / "testdata" / "kb-project"
-        self.assertTrue((fixture / "agents").is_dir(), "the committed consumer fixture is missing")
-        bad = self.publish(self.tmp / "stage-bad", root=fixture, expect=1)
-        self.assertIn("scripts/agentshare.py", bad.stderr)
+        # Fail closed when the root holds no agents to project: name the missing tree.
+        # (CONTENTPUB-01 moved projection into this repo, so a consumer no longer needs
+        # scripts/agentshare.py for a publish to succeed; what it must have is content.)
+        bare = self.tmp / "no-content-consumer"
+        bare.mkdir()
+        bad = self.publish(self.tmp / "stage-bad", root=bare, expect=1)
+        self.assertIn("no agents/ directory", bad.stderr)
         self.assertFalse((self.tmp / "stage-bad" / "manifest.json").exists())
 
-        # Fail closed when agentshare reports zero agents: name the reason.
+        # Fail closed when agents/ holds no agent prompts: name the reason.
         empty = self.tmp / "empty-consumer"
-        (empty / "scripts").mkdir(parents=True)
-        shutil.copy2(self.root / "scripts" / "agentshare.py", empty / "scripts" / "agentshare.py")
-        (empty / "agents").mkdir()
+        (empty / "agents").mkdir(parents=True)
         zero = self.publish(self.tmp / "stage-zero", root=empty, expect=1)
-        self.assertIn("zero agents", zero.stderr)
+        self.assertIn("zero agent prompts", zero.stderr)
         self.assertFalse((self.tmp / "stage-zero" / "manifest.json").exists())
 
         # The publisher never hardcodes the consumer location.
@@ -339,7 +503,7 @@ class PublishSnapshotTests(unittest.TestCase):
         first = self.publish(stage_one, root=one)
         second = self.publish(stage_two, root=two)
 
-        # agentshare is always invoked with an explicit --target, and only for requested targets.
+        # One target is projected at a time, with an explicit --target, and only the requested ones.
         for proc in (first, second):
             self.assertIn("--target claude", proc.stdout)
             self.assertIn("--target codex", proc.stdout)
@@ -451,6 +615,154 @@ class PublishSnapshotTests(unittest.TestCase):
         self.assertIn("credential scan:", proc.stdout)
         self.assertIn(f"{len(PATTERNS)} patterns", proc.stdout)
         self.assertTrue((stage / "scan-result.json").stat().st_size > 0)
+
+    # ── AC-25 ──────────────────────────────────────────────────────────
+
+    def test_ac25_a_content_clone_publishes_and_syncs_like_the_pre_move_snapshot(self) -> None:
+        """A fresh content clone, no brain on disk: publish → serve → sync → the pre-move bytes.
+
+        The pre-move snapshot (``PRE_MOVE_SNAPSHOT_ID``) is the reference: this run must reach the
+        same ``targets/`` bytes from a checkout that holds no machinery at all, with a sandbox
+        ``HOME`` that contains no brain, and the device must then hold those exact bytes after a
+        real sync through the real Worker in workerd.
+        """
+        clone = self.fresh_clone(self.tmp / "content-clone")
+
+        # The clone is content and nothing else: no projector inside it, nothing untracked.
+        self.assertFalse(
+            (clone / "scripts" / "agentshare.py").exists(),
+            "the content repository must not carry the projector; the publisher carries it",
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(clone), "status", "--porcelain"], capture_output=True, text=True
+            ).stdout.strip(),
+            "",
+            "the clone carries untracked files, so it is not the fresh clone the AC describes",
+        )
+        self.assertEqual(
+            len([path for path in (clone / "agents").iterdir() if path.is_dir()]), EXPECTED_AGENTS
+        )
+        clone_ref = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "--short", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+
+        home = self.tmp / "bare-home"
+        home.mkdir()
+        stage = self.tmp / "stage"
+
+        # Watch the publisher's own file accesses through a real audit hook, and give it a HOME
+        # that holds no checkout: the content clone is the only input it is given.
+        brain = Path(os.path.expanduser("~")) / "Projects" / "brain"
+        canary_dir = self.tmp / "watch-probe"
+        canary_dir.mkdir()
+        canary = canary_dir / "canary.txt"
+        canary.write_text("the observer is live\n", encoding="utf-8")
+        probe_env, probe_log = self.audit_probe((brain, clone, canary_dir))
+        env = {**os.environ, "HOME": str(home), **probe_env}
+
+        proc = self.publish(stage, root=clone, env=env)
+        log = proc.stdout + proc.stderr
+        self.assertIn("--target claude", proc.stdout)
+        self.assertIn("project_agents", proc.stdout)
+        self.assertEqual(
+            sorted(path.name for path in home.iterdir()), [], "the publish wrote into the device HOME"
+        )
+
+        # 0 reads under a brain checkout. The observer's own control comes first: an access the
+        # publish never made is recorded, so silence about `brain` means "not read".
+        subprocess.run(
+            [sys.executable, "-c", f"open({str(canary)!r}, encoding='utf-8').read()"],
+            env=env, check=True, capture_output=True,
+        )
+        observed = probe_log.read_text(encoding="utf-8").splitlines() if probe_log.exists() else []
+        brain_root = str(brain.resolve())
+        brain_reads = [line for line in observed if brain_root in line]
+        clone_reads = [line for line in observed if str(clone.resolve()) in line]
+        print(f"[ac25] audit hook: {len(observed)} access(es), {len(clone_reads)} under the clone, "
+              f"{len(brain_reads)} under {brain}")
+        self.assertIn(f"open {canary.resolve()}", observed, "the audit hook observed nothing at all")
+        self.assertEqual(brain_reads, [], "the publish read a brain checkout")
+        self.assertGreaterEqual(len(clone_reads), EXPECTED_AGENTS, "the audit hook saw no agent reads")
+        self.assertNotIn(str(brain), log, "the publish log names a brain checkout")
+
+        manifest = read_json(stage / "manifest.json")
+        self.assertRegex(manifest["snapshot_id"], SNAPSHOT_ID_RE)
+        self.assertEqual(manifest["consumer_ref"], clone_ref)
+        self.assertEqual(len(manifest["agents"]), EXPECTED_AGENTS)
+
+        staged = payload_hashes(stage)
+        targets = {path: digest for path, digest in staged.items() if path.startswith("targets/")}
+        counts = {
+            target: sum(1 for path in targets if path.startswith(f"targets/{target}/"))
+            for target in PRE_MOVE_TARGET_FILES
+        }
+        self.assertEqual(counts, PRE_MOVE_TARGET_FILES)
+        self.assertEqual(digest_of(targets), PRE_MOVE_TARGETS_DIGEST, "target bytes differ from the pre-move snapshot")
+        self.assertEqual(sum(1 for path in targets if path.endswith("/agent.md")), EXPECTED_AGENTS)
+
+        # Every knowledge graph the pre-move snapshot carried is byte-identical here; the content
+        # repository adds only the graph agentic-rosetta held the only copy of.
+        kbs = {path: digest for path, digest in staged.items() if path.startswith("kb/")}
+        pre_move_kbs = {path: digest for path, digest in kbs.items() if path.split("/")[1] in PRE_MOVE_KB_SLUGS}
+        self.assertEqual(len(pre_move_kbs), len(PRE_MOVE_KB_SLUGS))
+        self.assertEqual(digest_of(pre_move_kbs), PRE_MOVE_KB_DIGEST, "a pre-move graph's bytes changed")
+        self.assertEqual(sorted({path.split("/")[1] for path in kbs} - set(PRE_MOVE_KB_SLUGS)), list(CONTENT_KB_ADDITIONS))
+        self.assertEqual(len(manifest["kbs"]), len(PRE_MOVE_KB_SLUGS) + len(CONTENT_KB_ADDITIONS))
+        print(
+            f"[ac25] published from {clone} ({clone_ref}): {len(manifest['agents'])} agents, "
+            f"{len(manifest['kbs'])} KBs, snapshot {manifest['snapshot_id']}"
+        )
+        print(f"[ac25] targets digest {digest_of(targets)} == pre-move {PRE_MOVE_TARGETS_DIGEST}")
+
+        # Serve that stage from the real Worker in workerd (over TLS, from the local R2 store the
+        # publisher's own upload filled) and sync it onto the bare HOME.
+        token = "ac25-" + secrets.token_hex(16)
+        certfile, keyfile = self.tls_certificate()
+        with sync_suite.workerd_snapshot(stage, token, certfile, keyfile) as url:
+            sync_env = {key: value for key, value in os.environ.items() if key != "ROSETTA_MCP_URL"}
+            sync_env.update(
+                {"HOME": str(home), "ROSETTA_MCP_TOKEN": token, "SSL_CERT_FILE": str(certfile)}
+            )
+            argv = [sys.executable, str(SYNC), "--url", url, "--targets", "claude,codex"]
+            print(f"$ {' '.join(argv)}")
+            synced = subprocess.run(
+                argv, capture_output=True, text=True, env=sync_env, cwd=str(PLUGIN),
+                timeout=sync_suite.SYNC_TIMEOUT,
+            )
+            print(synced.stdout, end="")
+            print(synced.stderr, end="")
+            self.assertEqual(
+                synced.returncode, 0,
+                f"sync exited {synced.returncode}:\n{synced.stdout}\n{synced.stderr}",
+            )
+
+        device = {}
+        for target in PRE_MOVE_TARGET_FILES:
+            for relative, digest in sync_suite.tree_hashes(home / sync_suite.TARGET_DEST[target]).items():
+                device[f"targets/{target}/{relative}"] = digest
+        self.assertEqual(device, targets, "the device holds different bytes than the snapshot published")
+        self.assertEqual(digest_of(device), PRE_MOVE_TARGETS_DIGEST, "the device differs from the pre-move snapshot")
+        self.assertEqual(len(list((home / ".claude" / "agents").glob("*/agent.md"))), EXPECTED_AGENTS)
+        self.assertEqual(len(list((home / ".codex" / "agents").glob("*.toml"))), EXPECTED_AGENTS)
+        print(f"[ac25] device {home}: {len(device)} file(s), digest {digest_of(device)}")
+
+        # Negative control: one edited prompt moves both the digest and the device comparison, so
+        # the equality above is a comparison that can fail, not one that cannot see.
+        victim = sorted(path for path in (clone / "agents").iterdir() if path.is_dir())[0] / "agent.md"
+        victim.write_text(
+            victim.read_text(encoding="utf-8") + "\n<!-- ac25 mutation probe -->\n", encoding="utf-8"
+        )
+        mutant_stage = self.tmp / "stage-mutant"
+        self.publish(mutant_stage, root=clone, env=env)
+        mutant = {path: digest for path, digest in payload_hashes(mutant_stage).items() if path.startswith("targets/")}
+        self.assertNotEqual(digest_of(mutant), PRE_MOVE_TARGETS_DIGEST)
+        differing = sorted(path for path in set(targets) | set(mutant) if targets.get(path) != mutant.get(path))
+        self.assertEqual(
+            differing,
+            sorted([f"targets/claude/{victim.parent.name}/agent.md", f"targets/codex/{victim.parent.name}.toml"]),
+        )
+        print(f"[ac25] mutation control: editing {victim.parent.name}/agent.md differs in {differing}")
 
 
 if __name__ == "__main__":
