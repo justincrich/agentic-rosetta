@@ -6,6 +6,10 @@ The point of this file is the DIVERGENCE: ``registry`` said ``"specialist"`` and
 Both readings are now explicit arguments, and every case below proves the extracted
 module reproduces BOTH old answers rather than picking one.
 
+It also pins WHERE the name rules come from: an alias table is an argument the project
+supplies (``agent_aliases``), so the module carries no product list and the same agent name
+resolves differently with and without that data.
+
 Run: python3 scripts/rosetta/test_naming.py
 """
 from __future__ import annotations
@@ -23,6 +27,10 @@ import registry as R  # noqa: E402  (transition cross-check)
 sys.path.insert(0, str(HERE.parent / "kb-delivery"))
 import generate_excerpt as G  # noqa: E402  (transition cross-check)
 
+#: A project's declared alias table: an agent that consumes a sibling's graph, and one whose
+#: name shares no prefix with the graph it consumes. Data, exactly as a config would carry it.
+ALIASES = {"widget-kit": "widget-platform", "widgetkit": "widget-cloud"}
+
 
 def main() -> int:
     failures: list[str] = []
@@ -34,13 +42,13 @@ def main() -> int:
     # ── split_agent_name: the two old answers, both preserved ──────
     cases = [
         # (input, stem, role-when-known)
-        ("cloudflare-workers-implementer", "cloudflare-workers", "implementer"),
-        ("rust-planner", "rust", "planner"),
-        ("mastra-evals-reviewer", "mastra-evals", "reviewer"),
-        ("hetzner-reviewer", "hetzner", "reviewer"),
-        ("cloudflare-workers", "cloudflare-workers", None),
-        ("cmux-specialist", "cmux-specialist", None),
-        ("aisdk", "aisdk", None),
+        ("widget-platform-implementer", "widget-platform", "implementer"),
+        ("core-lib-planner", "core-lib", "planner"),
+        ("widget-platform-evals-reviewer", "widget-platform-evals", "reviewer"),
+        ("toy-vm-reviewer", "toy-vm", "reviewer"),
+        ("widget-platform", "widget-platform", None),
+        ("plain-agent", "plain-agent", None),
+        ("widgetkit", "widgetkit", None),
     ]
     for name, want_stem, want_role in cases:
         specialist = (want_stem, want_role if want_role else "specialist")
@@ -66,57 +74,41 @@ def main() -> int:
         check("rejects unknown default_role", "ok", "ok")
 
     # ── slug_for_agent ─────────────────────────────────────────────
-    known = {"rust", "ai-sdk", "hetzner-cloud", "cloudflare-workers", "mastra", "cmux"}
+    known = {"core-lib", "widget-cloud", "widget-platform", "toy-vm"}
     for name, want in [
-        ("cloudflare-rust-implementer", "cloudflare-workers"),  # shared graph
-        ("hetzner-planner", "hetzner-cloud"),  # spelling remap
-        ("aisdk-reviewer", "ai-sdk"),  # spelling remap
-        ("spacetimedb-implementer", "spacetime-db"),  # spelling remap
-        ("mastra-evals-implementer", "mastra"),  # longest known prefix
-        ("cmux-specialist", "cmux"),  # longest known prefix
-        ("rust-reviewer", "rust"),  # direct
+        ("widget-kit-implementer", "widget-platform"),  # alias: consumes a sibling's graph
+        ("widgetkit-planner", "widget-cloud"),  # alias: name shares no prefix with the graph
+        ("widget-platform-evals-implementer", "widget-platform"),  # longest known prefix
+        ("widget-platform-implementer", "widget-platform"),  # direct
+        ("core-lib-reviewer", "core-lib"),  # direct
     ]:
-        check(f"slug_for_agent[{name}]", N.slug_for_agent(name, known), want)
-        check(f"slug_for_agent-provenance[{name}]", R._slug_for_agent(name, known), want)
+        check(f"slug_for_agent[{name}]", N.slug_for_agent(name, known, aliases=ALIASES), want)
+        check(f"slug_for_agent-provenance[{name}]",
+              R._slug_for_agent(name, known, ALIASES), want)
 
-    # Without known_slugs, only the shared and remap cases resolve.
+    # WITHOUT the project's table the same names resolve to their own stem and match no graph.
+    check("no-alias: mismatch stem returns itself",
+          N.slug_for_agent("widgetkit-implementer", known), "widgetkit")
+    check("no-alias: shared stem returns itself",
+          N.slug_for_agent("widget-kit-implementer", known), "widget-kit")
     check("no known_slugs: stray stem returns itself", N.slug_for_agent("zod-implementer"), "zod")
     check(
         "no known_slugs agrees with provenance",
-        N.slug_for_agent("mastra-evals-implementer"),
-        R._slug_for_agent("mastra-evals-implementer"),
+        N.slug_for_agent("widget-platform-evals-implementer"),
+        R._slug_for_agent("widget-platform-evals-implementer"),
     )
 
-    # ── legacy docs domain: deliberately a DIFFERENT table ─────────
-    for stem, want in [
-        ("hetzner", "hetzner-cloud"),
-        ("mastra", "mastra"),
-        ("rust", "rust"),
-        ("kotlin", "kotlin"),
-        ("swift", "swift"),
-        ("spacetimedb", "spacetime-db"),
-        ("electron", "electron"),
-        ("aisdk", "ai-sdk"),
-        ("cmux", "cmux"),
-        ("mastra-evals", "mastra"),
-        ("zod", None),
-        ("", None),
+    # ── legacy docs domain: the alias table, then the stem ─────────
+    for stem, aliases, want in [
+        ("widgetkit", ALIASES, "widget-cloud"),
+        ("widget-platform-evals", {"widget-platform": "widget-platform"}, "widget-platform"),
+        ("core-lib", None, "core-lib"),
+        ("core-lib", ALIASES, "core-lib"),
+        ("toy-vm", None, "toy-vm"),
     ]:
-        check(f"legacy_docs_domain[{stem}]", N.legacy_docs_domain(stem), want)
-        check(f"legacy_docs_domain-provenance[{stem}]", G._docs_domain_for(stem), want)
-
-    # The two tables are NOT interchangeable; the legacy one is a strict superset.
-    check(
-        "legacy table is a superset of the modern table",
-        set(N.AGENT_PREFIX_TO_SLUG) <= set(N.LEGACY_DOCS_DOMAIN_BY_PREFIX),
-        True,
-    )
-    # The one map that WAS genuinely shared now has one identity, not two agreeing copies.
-    check(
-        "shared-graph map has one home",
-        N.SHARED_GRAPHS,
-        {"cloudflare-rust": "cloudflare-workers"},
-    )
+        check(f"legacy_docs_domain[{stem}]", N.legacy_docs_domain(stem, aliases), want)
+        check(f"legacy_docs_domain-provenance[{stem}]",
+              G._docs_domain_for(stem, aliases), want)
 
     # ── graph layout → slug ────────────────────────────────────────
     # The configured docs/agents directories are the FIRST layout; the two legacy layouts are
@@ -125,10 +117,10 @@ def main() -> int:
     docs = root / ".rosetta" / "docs"
     agents = root / "agents"
     for rel, want in [
-        (".rosetta/docs/rust/fact-graph.json", "rust"),
-        ("docs/kotlin/fact-graph.json", "kotlin"),
-        ("agents/morph-cloud-implementer/kb/fact-graph.json", "morph-cloud"),
-        ("agents/morph-cloud/kb/fact-graph.json", "morph-cloud"),
+        (".rosetta/docs/core-lib/fact-graph.json", "core-lib"),
+        ("docs/legacy-kb/fact-graph.json", "legacy-kb"),
+        ("agents/toy-vm-implementer/kb/fact-graph.json", "toy-vm"),
+        ("agents/toy-vm/kb/fact-graph.json", "toy-vm"),
         ("somewhere/else/fact-graph.json", None),
         (".rosetta/research/x.json", None),
     ]:
@@ -144,7 +136,7 @@ def main() -> int:
         ("kb/graphs/x/fact-graph.json", "x"),
         ("prompts/x-implementer/kb/fact-graph.json", "x"),
         ("kb/graphs/nested/deep/fact-graph.json", "nested"),
-        ("docs/kotlin/fact-graph.json", "kotlin"),
+        ("docs/legacy-kb/fact-graph.json", "legacy-kb"),
     ]:
         check(
             f"slug_from_graph_path-custom[{rel}]",
@@ -160,13 +152,13 @@ def main() -> int:
     # ── graph_path_for ─────────────────────────────────────────────
     check(
         "graph_path_for",
-        N.graph_path_for(root, "rust", docs_dir=docs),
-        root / ".rosetta" / "docs" / "rust" / "fact-graph.json",
+        N.graph_path_for(root, "core-lib", docs_dir=docs),
+        root / ".rosetta" / "docs" / "core-lib" / "fact-graph.json",
     )
     check(
         "graph_path_for-custom",
-        N.graph_path_for(root, "rust", docs_dir=custom_docs),
-        root / "kb" / "graphs" / "rust" / "fact-graph.json",
+        N.graph_path_for(root, "core-lib", docs_dir=custom_docs),
+        root / "kb" / "graphs" / "core-lib" / "fact-graph.json",
     )
 
     # registry's delegating alias answers with the repo's resolved layout. Point it at a temp
@@ -189,8 +181,8 @@ def main() -> int:
         }))
         R.set_repo_root(tmp)
         for rel, want in [
-            (".rosetta/docs/rust/fact-graph.json", "rust"),
-            ("agents/morph-cloud-implementer/kb/fact-graph.json", "morph-cloud"),
+            (".rosetta/docs/core-lib/fact-graph.json", "core-lib"),
+            ("agents/toy-vm-implementer/kb/fact-graph.json", "toy-vm"),
             ("somewhere/else/fact-graph.json", None),
         ]:
             check(f"registry_slug[{rel}]", _registry_slug(rel), want)
@@ -203,7 +195,8 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("ok — naming.py preserves both role defaults, 7 slug rules, 9 legacy domains, 6 layouts")
+    print("ok — naming.py preserves both role defaults, alias-declared name resolution, and "
+          "the config layouts")
     return 0
 
 

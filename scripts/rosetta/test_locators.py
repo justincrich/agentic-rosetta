@@ -42,7 +42,7 @@ def main() -> int:
 
     # ── sanitize_url: accepted ─────────────────────────────────────
     accepted = [
-        ("https://developers.cloudflare.com/workers/", "https://developers.cloudflare.com/workers/"),
+        ("https://docs.example.com/workers/", "https://docs.example.com/workers/"),
         ("http://example.com", "http://example.com"),
         # Existing behaviour: the trailing-punctuation strip removes the closing paren.
         # Recorded as-is rather than "fixed" — this run changes structure only.
@@ -104,7 +104,7 @@ def main() -> int:
         ("https://gitlab.com/a/b", "repo"),
         ("https://bitbucket.org/a/b", "repo"),
         ("https://www.github.com/a/b", "repo"),
-        ("https://developers.cloudflare.com/workers", "docs"),
+        ("https://docs.example.com/workers", "docs"),
         ("https://example.com", "docs"),
         ("file:///tmp/repo", "repo"),
     ]:

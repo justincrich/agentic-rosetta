@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
-"""Materialize a real-graph fixture project for the vendored KB-delivery tests.
+"""Materialize a fixture project for the registry / KB-delivery tests.
 
-Copies committed fact-graph fixtures (real graphs, not stubs) into a target
-project's .rosetta/docs/ and agents/*/kb/ layouts so registry / generate_excerpt
-/ embed-graph can run against a self-contained tree that is not ~/Projects/brain.
+Copies the committed fact-graph fixtures into a target project's configured docs directory
+and an agent-local ``kb/`` layout, declares the project's own version 2 config, and writes the
+throwaway ``agent.md`` files the registry scans. Everything here is data a test project needs;
+nothing is a mock of a tool under test.
+
+WHY THE GRAPHS ARE NEUTRAL
+  ``scripts/testdata/graphs`` used to hold copies of real product knowledge bases, so product
+  data lived inside the plugin and every name-shaped expectation in the tests named a real
+  technology. The fixtures are now written by the REAL writer (``write-graph.py --create``)
+  from the committed neutral NRRAs in ``../nrra/`` and the shared closed ledger in
+  ``../ledger/``; ``scripts/rosetta/test_write_graph.py`` regenerates them and compares the
+  bytes, so a fixture cannot be hand-edited without that test failing.
+
+  The shapes are the ones the readers must handle: a shared graph consumed by a differently
+  spelled agent (``widget-kit-*``), a name ≠ slug alias (``widgetkit-*`` → ``widget-cloud``),
+  a longest-known-prefix agent (``widget-platform-evals-*``), an agent-local graph
+  (``toy-vm-implementer/kb/fact-graph.json``), and a composed graph (``toy-stack``).
 """
 from __future__ import annotations
 
@@ -14,40 +28,63 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 GRAPHS = HERE / "graphs"
-AGENTS_SRC = HERE / "kb-project" / "agents"
+NRRA = HERE / "nrra"
+LEDGER = HERE / "ledger" / "closed.json"
 
-# Graphs that live at .rosetta/docs/<slug>/fact-graph.json
-DOCS_SLUGS = ("cloudflare-workers", "rust", "hetzner-cloud", "mastra", "ai-sdk",
-              "spacetime-db", "cmux", "flyio")
+#: The date every fixture stamp carries, passed to ``write-graph.py --as-of``. One constant so
+#: the committed bytes and the regeneration in ``test_write_graph.py`` cannot drift apart.
+FIXTURE_DATE = "2026-11-16"
 
-# Extra empty-but-valid graphs so mapping cases have a known slug on disk.
-MINI_SLUGS = ("hetzner-cloud", "mastra", "ai-sdk", "spacetime-db", "cmux", "flyio")
-
-# Agents that must exist for mapping + --agent resolution.
-AGENTS = (
-    "cloudflare-workers-implementer",
-    "cloudflare-workers-planner",
-    "cloudflare-workers-reviewer",
-    "cloudflare-rust-implementer",
-    "cloudflare-rust-planner",
-    "cloudflare-rust-reviewer",
-    "mastra-implementer",
-    "mastra-evals-implementer",
-    "hetzner-implementer",
-    "aisdk-implementer",
-    "spacetimedb-implementer",
-    "cmux-specialist",
-    "flyio-reviewer",
-    "morph-cloud-implementer",
-    "rust-implementer",
+#: ``(graph slug, NRRA stem, composed-with slug or None)`` — the recipe that reproduces every
+#: file in ``graphs/``. Order matters: a borrower is created after the original it composes.
+FIXTURE_RECIPE: tuple[tuple[str, str, str | None], ...] = (
+    ("widget-platform", "widget-platform", None),
+    ("core-lib", "core-lib", None),
+    ("toy-vm", "toy-vm", None),
+    ("toy-stack", "toy-stack", "core-lib"),
 )
+
+#: Graphs copied into the configured docs directory.
+DOCS_SLUGS = ("widget-platform", "core-lib", "toy-stack")
+
+#: Extra empty-but-valid graphs, so an alias target has a known slug on disk.
+MINI_SLUGS = ("widget-cloud",)
+
+#: The agent-local graph: it lives with the agent that owns it, not in the docs directory.
+AGENT_LOCAL = ("toy-vm", "toy-vm-implementer")
+
+#: Agents that must exist for mapping + ``--agent`` resolution. Their names carry the shapes
+#: above; the alias table below is what connects the spelled-differently ones to a graph.
+AGENTS = (
+    "widget-platform-implementer",
+    "widget-platform-planner",
+    "widget-platform-reviewer",
+    "widget-kit-implementer",
+    "widget-kit-planner",
+    "widget-kit-reviewer",
+    "widgetkit-implementer",
+    "widget-platform-evals-implementer",
+    "core-lib-implementer",
+    "toy-stack-implementer",
+    "toy-vm-implementer",
+    "plain-agent",
+)
+
+#: The agent-name aliases this fixture project declares in its own config. ``widget-kit``
+#: consumes the widget platform's graph; ``widgetkit`` is the same idea with a name that
+#: shares no prefix with its graph. Both are DATA: a project without these keys resolves
+#: neither, which is what ``test_registry.py`` proves.
+AGENT_ALIASES = {
+    "widget-kit": "widget-platform",
+    "widgetkit": "widget-cloud",
+}
 
 
 def _mini_graph(slug: str) -> dict:
     return {
         "_meta": {"technology": slug.replace("-", " ").title()},
         "v": {"pkg": slug, "version": "0.0.0", "kb_version": "1.0.0",
-              "pinned_date": "2026-01-01"},
+              "pinned_date": FIXTURE_DATE},
         "w": {},
         "r": {},
         "a": {},
@@ -61,13 +98,17 @@ def materialize(
     docs: str = ".rosetta/docs",
     agents: str = "agents",
     citation_aliases: dict[str, str] | None = None,
+    agent_aliases: dict[str, str] | None = None,
 ) -> Path:
-    """Build a real fixture project. ``docs``/``agents`` are the layout its config declares.
+    """Build a fixture project. ``docs``/``agents`` are the layout its config declares.
 
     The default is the standard layout; a caller that wants the config's authority proven
     passes a custom one (``kb/graphs``, ``prompts``) and gets the same graphs and agents under
     it, so every reader that honours the config finds them and every reader that hardcodes a
     name does not.
+
+    ``agent_aliases=None`` declares this project's :data:`AGENT_ALIASES`; pass ``{}`` to build
+    the same tree with no aliases at all (the control for "the data lives in config").
     """
     dest = dest.expanduser().resolve()
     docs_dir = dest / docs
@@ -89,18 +130,18 @@ def materialize(
     }
     if citation_aliases:
         config["citation_aliases"] = dict(citation_aliases)
+    aliases = AGENT_ALIASES if agent_aliases is None else agent_aliases
+    if aliases:
+        config["agent_aliases"] = dict(aliases)
     (dest / ".rosetta").mkdir(parents=True, exist_ok=True)
     (dest / ".rosetta" / "config.json").write_text(json.dumps(config, indent=2) + "\n",
                                                    encoding="utf-8")
 
-    # Real committed graphs.
-    for slug, src_name in (
-        ("cloudflare-workers", "cloudflare-workers.fact-graph.json"),
-        ("rust", "rust.fact-graph.json"),
-    ):
-        src = GRAPHS / src_name
+    # The real fixture graphs, written by the real writer from the committed NRRAs.
+    for slug in DOCS_SLUGS:
+        src = GRAPHS / f"{slug}.fact-graph.json"
         if not src.is_file():
-            raise SystemExit(f"missing fixture {src}")
+            raise SystemExit(f"missing fixture {src}; regenerate it with test_write_graph.py")
         d = docs_dir / slug
         d.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, d / "fact-graph.json")
@@ -112,11 +153,15 @@ def materialize(
         if not target.is_file():
             target.write_text(json.dumps(_mini_graph(slug), indent=2) + "\n")
 
-    morph_src = GRAPHS / "morph-cloud.fact-graph.json"
-    morph_dir = agents_dir / "morph-cloud-implementer" / "kb"
-    morph_dir.mkdir(parents=True, exist_ok=True)
-    if morph_src.is_file():
-        shutil.copy2(morph_src, morph_dir / "fact-graph.json")
+    # The agent-local graph, under the agent that owns it.
+    local_slug, local_agent = AGENT_LOCAL
+    local_src = GRAPHS / f"{local_slug}.fact-graph.json"
+    local_dir = agents_dir / local_agent / "kb"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    if local_src.is_file():
+        shutil.copy2(local_src, local_dir / "fact-graph.json")
+    else:
+        raise SystemExit(f"missing fixture {local_src}; regenerate it with test_write_graph.py")
 
     for name in AGENTS:
         ad = agents_dir / name

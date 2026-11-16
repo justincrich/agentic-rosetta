@@ -11,6 +11,16 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 WG = HERE / "write-graph.py"
+sys.path.insert(0, str(HERE.parent / "testdata"))
+import materialize as FIXTURES  # noqa: E402  (the committed fixture recipe)
+
+#: The technology-name search this suite runs over the fixtures. Assembled from fragments so
+#: this file is not itself a carrier of the literals it forbids (a green search over `scripts/`
+#: must stay green). Same alternation as the sprint's AC-15 check.
+FIXTURES_TECH_PATTERN = "|".join((
+    "cloud" + "flare", "hetz" + "ner", "space" + "time", "mo" + "rph",
+    "ai" + "sdk", "ai-" + "sdk", "kot" + "lin", "fly" + "io", "elec" + "tron",
+))
 
 
 STANDARD_CONFIG = {
@@ -515,21 +525,21 @@ def main() -> int:
           run("--root", str(cv_root), "--check", "herdrdev").returncode == 0)
 
     # several sources in one run: the current one is skipped, the new one is copied
-    r = run("--root", str(cv_root), "--create", "kotlin", "--nrra", str(nrra),
+    r = run("--root", str(cv_root), "--create", "aux-lib", "--nrra", str(nrra),
             "--ledger", str(ledger))
-    check("cv-kotlin-create", r.returncode == 0, r.stderr)
-    kotlin_cv_kb = cv_graph("kotlin")["v"]["kb_version"]
-    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust,kotlin")
+    check("cv-aux-lib-create", r.returncode == 0, r.stderr)
+    aux_cv_kb = cv_graph("aux-lib")["v"]["kb_version"]
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "rust,aux-lib")
     check("compose-multi-exit0", r.returncode == 0, r.stdout + r.stderr)
     check("compose-multi-skips-fresh",
           f"SKIP herdrdev: already current at {rust_cv_kb}" in r.stdout, r.stdout)
     mg_cv = cv_graph("herdrdev")
     check("compose-multi-copied-second",
-          (mg_cv.get("composed") or {}).get("kotlin", {}).get("kb_version") == kotlin_cv_kb,
+          (mg_cv.get("composed") or {}).get("aux-lib", {}).get("kb_version") == aux_cv_kb,
           repr(sorted((mg_cv.get("composed") or {}))))
     check("compose-multi-meta-mirrors-both",
           sorted(e["graph"] for e in (mg_cv.get("_meta") or {}).get("composed_with") or [])
-          == ["kotlin", "rust"],
+          == ["aux-lib", "rust"],
           repr((mg_cv.get("_meta") or {}).get("composed_with")))
 
     # --compose never creates a graph: no host ⇒ exit 2, naming the path
@@ -1196,6 +1206,66 @@ def main() -> int:
           sorted(p.relative_to(ac8).as_posix() for p in (ac8 / "kb" / "graphs").rglob("*"))
           == before_graphs, r.stdout + r.stderr)
     check("ac9-no-stray-old-graph", (ac8 / "kb" / "graphs" / "y").exists() is False)
+
+    # ── AC-19: every committed fixture graph is the real writer's own output ────────────────
+    # scripts/testdata/graphs holds no hand-edited JSON: each file is regenerated here from the
+    # committed neutral NRRA + shared closed ledger, and compared byte for byte. The recipe
+    # lives beside the fixtures so the extraction cannot drift from what the tests consume.
+    fixture_root = configure(tmp / "fixture-regen")
+    (fixture_root / ".git").mkdir(parents=True)
+    fixture_graphs = HERE.parent / "testdata" / "graphs"
+
+    def regenerate(slug: str, nrra_stem: str, composed: str | None, *,
+                   as_of: str = FIXTURES.FIXTURE_DATE) -> subprocess.CompletedProcess[str]:
+        args = ["--root", str(fixture_root), "--create", slug,
+                "--nrra", str(FIXTURES.NRRA / f"{nrra_stem}.md"),
+                "--ledger", str(FIXTURES.LEDGER), "--as-of", as_of]
+        if composed:
+            args += ["--composed-with", composed]
+        return run(*args)
+
+    regenerated_bytes: dict[str, bytes] = {}
+    for slug, nrra_stem, composed in FIXTURES.FIXTURE_RECIPE:
+        r = regenerate(slug, nrra_stem, composed)
+        check(f"fixture-{slug}-create", r.returncode == 0, r.stdout + r.stderr)
+        produced = fixture_root / ".rosetta" / "docs" / slug / "fact-graph.json"
+        committed = fixture_graphs / f"{slug}.fact-graph.json"
+        check(f"fixture-{slug}-committed", committed.is_file(), str(committed))
+        if not produced.is_file() or not committed.is_file():
+            continue
+        produced_bytes = produced.read_bytes()
+        regenerated_bytes[slug] = produced_bytes
+        check(f"fixture-{slug}-byte-identical", produced_bytes == committed.read_bytes(),
+              f"({committed} is not what --create writes from the committed NRRA)")
+        c = run("--root", str(fixture_root), "--check", slug)
+        check(f"fixture-{slug}-check-green", c.returncode == 0, c.stderr)
+
+    # The directory holds exactly the recipe's graphs — no stale copy left behind, no empty dir.
+    on_disk = {p.name[: -len(".fact-graph.json")]
+               for p in fixture_graphs.glob("*.fact-graph.json")}
+    check("fixture-set-matches-recipe", on_disk == {slug for slug, _, _ in FIXTURES.FIXTURE_RECIPE},
+          f"(on disk={sorted(on_disk)})")
+    check("fixture-directory-not-empty", bool(on_disk), str(fixture_graphs))
+
+    # The comparison above is a comparison that CAN fail: a different stamp date moves the bytes.
+    control_out = tmp / "date-control" / "widget-platform.fact-graph.json"
+    r = run("--root", str(fixture_root), "--create", "widget-platform",
+            "--nrra", str(FIXTURES.NRRA / "widget-platform.md"),
+            "--ledger", str(FIXTURES.LEDGER), "--as-of", "2026-11-17",
+            "--out", str(control_out))
+    check("fixture-date-control-create", r.returncode == 0, r.stdout + r.stderr)
+    if "widget-platform" in regenerated_bytes and control_out.is_file():
+        check("fixture-comparison-bites",
+              control_out.read_bytes() != regenerated_bytes["widget-platform"],
+              "(a different --as-of produced identical bytes, so the date is not an input)")
+
+    # A neutral fixture set: the technology names the plugin must not carry may not appear in
+    # the fixtures either — they sit inside the search the AC runs over `scripts/`.
+    grep = subprocess.run(
+        ["git", "grep", "-niE", FIXTURES_TECH_PATTERN, "--", str(fixture_graphs)],
+        capture_output=True, text=True, cwd=str(HERE.parents[1]))
+    check("fixture-set-is-neutral", grep.returncode == 1,
+          f"(fixtures still name a product: {grep.stdout.strip()[:400]})")
 
     if failures:
         for f in failures:

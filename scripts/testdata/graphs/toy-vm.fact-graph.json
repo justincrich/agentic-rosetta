@@ -1,0 +1,71 @@
+{
+  "_meta": {
+    "assimilation": {
+      "censused": 0,
+      "closed": 0,
+      "gaps": 0,
+      "graph_sha256": "8025e45e0f1d6feb884974e1c2986b3a8b88355519b664f8ff6a16e39fa56ccc",
+      "run_id": "run-fixtures-2026-11",
+      "waves": 1,
+      "writer": "write-graph.py@1.4.0",
+      "written_at": "2026-11-16"
+    },
+    "slug": "toy-vm",
+    "technology": "toy-vm"
+  },
+  "a": {
+    "client_init": "client = Client()",
+    "create_snapshot": "client.snapshots.create(image='toy-minimal', vcpus=1)",
+    "exec": "machine.exec('uname -a')",
+    "pause": "machine.pause()",
+    "start_machine": "machine = client.machines.start(snapshot=snapshot.id)"
+  },
+  "r": {
+    "r_api_key_env": "REJECT",
+    "r_api_key_env_note": "Never hardcode the API key; read it from the environment.",
+    "r_cleanup_instances": "nr",
+    "r_cleanup_instances_note": "Delete machines you created when the run ends",
+    "r_snapshot_immutable": "REJECT",
+    "r_snapshot_immutable_note": "A snapshot is immutable: boot a machine from it, never edit it.",
+    "r_sync_before_snapshot": "r",
+    "r_sync_before_snapshot_note": "Flush pending writes before taking a snapshot",
+    "r_ttl_positive": "r",
+    "r_ttl_positive_note": "Every machine carries a positive time to live"
+  },
+  "t": {
+    "ClientOps": "snapshots.create, machines.start, machines.list",
+    "MachineOps": "exec, pause, resume, delete"
+  },
+  "v": {
+    "api_base": "https://api.example.com/v1",
+    "cli": "toyvm",
+    "install": "pip install toyvm",
+    "kb_version": "1.0.0",
+    "pinned_date": "2026-11-16",
+    "pkg": "toyvm",
+    "version": "1.4.0",
+    "version_source": "undetermined"
+  },
+  "w": {
+    "Client": {
+      "i": "toyvm",
+      "note": "the entry point for every call",
+      "t": "class"
+    },
+    "Machine": {
+      "i": "toyvm",
+      "note": "a running instance created from a snapshot",
+      "t": "class"
+    },
+    "Snapshot": {
+      "i": "toyvm",
+      "note": "an immutable image a machine boots from",
+      "t": "class"
+    }
+  },
+  "x": {
+    "creating a machine without a time to live": "set ttl= on every start",
+    "leaking a machine per test run": "delete it in a fixture teardown",
+    "reusing a snapshot as writable storage": "boot a machine and write there"
+  }
+}

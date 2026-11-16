@@ -11,6 +11,10 @@
   write-graph.py --adopt  <tech> [--root DIR]
   write-graph.py --backfill [TECH] [--all] [--root DIR] [--sources FILE]
 
+Any writing verb also accepts `--as-of YYYY-MM-DD`, which pins the date every stamp writes
+(`v.pinned_date`, `_meta.assimilation.written_at`). The default is today; the pin exists so a
+committed fixture can be reproduced byte-for-byte on any later day.
+
 Gate (before create/update/apply-nrra acts):
   1. ledger closed — closed + named-gap rows == censused
   2. ledger run_id matches the NRRA's run_id
@@ -78,7 +82,16 @@ from versions import (
     declared_composed_slugs,
 )
 
-WRITER = "write-graph.py@1.3.0"
+WRITER = "write-graph.py@1.4.0"
+
+#: The date every stamp this run writes. ``None`` means today (the normal case); ``--as-of``
+#: pins it so a fixture can be reproduced byte-for-byte on any later day.
+_AS_OF: str | None = None
+
+
+def _today() -> str:
+    """The date to stamp, as ISO ``YYYY-MM-DD``: today, or the run's ``--as-of`` pin."""
+    return _AS_OF or date.today().isoformat()
 
 
 class GateError(SystemExit):
@@ -201,18 +214,18 @@ def apply_derived_version(graph: dict, pins: list[dict], repo_path: Path | None)
         if not v.get("version_source"):
             v["version_source"] = src
         if not v.get("pinned_date"):
-            v["pinned_date"] = date.today().isoformat()
+            v["pinned_date"] = _today()
         return
     v["version"] = ver
     v["version_source"] = src
-    v["pinned_date"] = date.today().isoformat()
+    v["pinned_date"] = _today()
 
 
 def stamp(graph: dict, ledger: dict) -> dict:
     meta = dict(graph.get("_meta") or {})
     meta["assimilation"] = {
         "run_id": ledger.get("run_id"),
-        "written_at": date.today().isoformat(),
+        "written_at": _today(),
         "waves": ledger.get("waves"),
         "censused": ledger.get("censused"),
         "closed": ledger.get("closed"),
@@ -239,7 +252,7 @@ def restamp(graph: dict) -> dict:
     meta = dict(graph.get("_meta") or {})
     assimilation = dict(meta.get("assimilation") or {})
     assimilation["graph_sha256"] = body_digest(graph)
-    assimilation["written_at"] = date.today().isoformat()
+    assimilation["written_at"] = _today()
     assimilation["writer"] = WRITER
     meta["assimilation"] = assimilation
     out = dict(graph)
@@ -374,7 +387,7 @@ def cmd_update(
     kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
     hist = dest.parent / ".history"
     hist.mkdir(parents=True, exist_ok=True)
-    snap = hist / f"{date.today().isoformat()}-v{kb}.json"
+    snap = hist / f"{_today()}-v{kb}.json"
     shutil.copy2(dest, snap)
 
     cs = load_json(changeset_path)
@@ -418,7 +431,7 @@ def cmd_update(
         srcs = P.source_urls(pins)
         P.prepend_migration(
             dest.parent / "MIGRATION.md",
-            f"{date.today().isoformat()} ← v{kb}",
+            f"{_today()} ← v{kb}",
             lines,
             srcs,
         )
@@ -483,7 +496,7 @@ def cmd_apply_nrra(
     kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
     hist = dest.parent / ".history"
     hist.mkdir(parents=True, exist_ok=True)
-    snap = hist / f"{date.today().isoformat()}-v{kb}.json"
+    snap = hist / f"{_today()}-v{kb}.json"
     shutil.copy2(dest, snap)
 
     seed = seed_from_nrra(nrra, tech)
@@ -565,7 +578,7 @@ def ensure_adopt_fields(graph: dict, kb_dir: Path) -> bool:
         v["kb_version"] = _readme_kb(kb_dir) or "1.0.0"
         changed = True
     if not v.get("pinned_date"):
-        v["pinned_date"] = str(v.get("pinned") or date.today().isoformat())
+        v["pinned_date"] = str(v.get("pinned") or _today())
         changed = True
     ver = v.get("version")
     if ver in ("", "0.0.0"):
@@ -645,7 +658,7 @@ def cmd_adopt(tech: str, root: Path) -> int:
     if not v.get("kb_version"):
         v["kb_version"] = _readme_kb(dest.parent) or "1.0.0"
     if not v.get("pinned_date"):
-        v["pinned_date"] = str(v.get("pinned") or date.today().isoformat())
+        v["pinned_date"] = str(v.get("pinned") or _today())
     ver = v.get("version")
     if ver in (None, "", "0.0.0"):
         v["version"] = None
@@ -662,7 +675,7 @@ def cmd_adopt(tech: str, root: Path) -> int:
     pins = [{
         "kind": "legacy",
         "status": "legacy-unknown",
-        "fetched_at": date.today().isoformat(),
+        "fetched_at": _today(),
         "units": 0,
         "corpus_sha256": P.corpus_digest([]),
     }]
@@ -1015,7 +1028,19 @@ def main(argv: list[str]) -> int:
                    help="comma-separated graph slugs this KB composes (--create / --update "
                         "only); copied by value into composed[<slug>] and mirrored into "
                         "_meta.composed_with with each graph's current kb_version")
+    p.add_argument("--as-of", metavar="YYYY-MM-DD", default=None,
+                   help="pin the date every stamp writes (v.pinned_date, the assimilation "
+                        "written_at). Default: today. Used to reproduce a fixture byte-for-byte.")
     args = p.parse_args(argv)
+
+    # A pinned date is an input like any other: validated once, here, so no stamp can carry a
+    # half-parsed value.
+    global _AS_OF
+    if args.as_of is not None:
+        try:
+            _AS_OF = date.fromisoformat(args.as_of).isoformat()
+        except ValueError:
+            _die("usage", f"--as-of must be an ISO date YYYY-MM-DD, got {args.as_of!r}")
 
     # Where the KB goes is a CONFIGURED decision: the repo's .rosetta/config.json names it.
     # RT.choose pins WHICH repo (--root/$ROSETTA_PROJECT/cwd) and refuses when that repo has no

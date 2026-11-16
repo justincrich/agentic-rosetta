@@ -15,10 +15,12 @@ Graphs resolve in this order (see :func:`resolve_graph`):
   1. agent-local  ``<paths.agents>/{name}/kb/fact-graph.json``
   2. legacy       ``docs/<domain>/fact-graph.json``                (pre-config trees)
   3. repo-shared  ``<paths.docs>/{domain}/fact-graph.json``
-  4. shared via   ``naming.SHARED_GRAPHS``  (cloudflare-rust → cloudflare-workers graph)
+  4. shared via   the project's ``agent_aliases`` table (an agent that consumes another
+                  domain's graph declares the prefix there, not in this module)
 
-``paths.docs`` and ``paths.agents`` come from the repo's own ``.rosetta/config.json``: this
-generator reads a repo's declared layout and refuses (exit 2) in a repo that has none.
+``paths.docs``, ``paths.agents`` and ``agent_aliases`` come from the repo's own
+``.rosetta/config.json``: this generator reads a repo's declared layout and refuses (exit 2)
+in a repo that has none.
 
 kb_version is ``<version> @ <pinned_date> sha:<8>`` — a content hash so graph drift is detectable.
 
@@ -48,9 +50,7 @@ _ROSETTA = Path(__file__).resolve().parent.parent / "rosetta"
 if str(_ROSETTA) not in sys.path:
     sys.path.insert(0, str(_ROSETTA))
 from naming import (  # noqa: E402
-    LEGACY_DOCS_DOMAIN_BY_PREFIX,
     ROLES,
-    SHARED_GRAPHS,
     legacy_docs_domain,
     split_agent_name,
 )
@@ -77,31 +77,6 @@ def set_repo_root(path: str | Path) -> Path:
 
 
 REPO_ROOT = discover_repo_root()
-DEFAULT_DOMAIN = "cloudflare-workers"
-
-# Domains whose agents share another domain's graph file now live in naming.SHARED_GRAPHS;
-# the local alias keeps this module's older call sites readable.
-SHARED_DOMAIN_MAP = SHARED_GRAPHS
-
-# Agent-name prefix → docs-domain slug for graphs that live under ``docs/<domain>/`` (NOT
-# ``.rosetta/docs/``). The agent name and the docs dir differ for several domains
-# (hetzner-* → hetzner-cloud, aisdk-* → ai-sdk, spacetimedb-* → spacetime-db). Longest-
-# prefix match, so "mastra" covers both mastra-implementer and mastra-evals-implementer.
-DOCSDOMAIN_BY_PREFIX = LEGACY_DOCS_DOMAIN_BY_PREFIX
-
-# Human technology label per docs-domain (these graphs have no _meta.technology, so the render
-# title would otherwise be an ugly title-cased slug like "Ai Sdk"/"Spacetime Db").
-TECH_BY_DOMAIN = {
-    "hetzner-cloud": "Hetzner Cloud",
-    "ai-sdk": "Vercel AI SDK",
-    "spacetime-db": "SpacetimeDB",
-    "cmux": "cmux",
-    "mastra": "Mastra",
-    "rust": "Rust",
-    "kotlin": "Kotlin (Jetpack Compose)",
-    "swift": "Swift (SwiftUI)",
-    "electron": "Electron",
-}
 
 BEGIN_MARKER = "<!-- rosetta-kb:begin"
 END_MARKER = "<!-- rosetta-kb:end -->"
@@ -124,17 +99,26 @@ def agents_dir() -> Path:
     return layout()[1]
 
 
+def agent_aliases(repo: Path | None = None) -> dict[str, str]:
+    """The repo's ``agent_aliases`` table (agent-name prefix → graph slug), or ``{}``."""
+    return roots.agent_aliases(Path(repo or REPO_ROOT))
+
+
 def fact_graph_path(domain: str) -> Path:
     """Repo-shared graph for a domain (``<paths.docs>/<domain>/fact-graph.json``).
 
-    Shared/aliased domains (e.g. cloudflare-rust) are remapped to their backing graph."""
-    domain = SHARED_DOMAIN_MAP.get(domain, domain)
+    A domain the project aliased to another graph (an agent that consumes a sibling's KB) is
+    remapped through its own config; nothing here names a technology."""
+    domain = agent_aliases().get(domain, domain)
     return docs_dir() / domain / GRAPH_FILENAME
 
 
-def _docs_domain_for(stem: str) -> str | None:
-    """Delegating alias: the legacy docs/ prefix table lives in ``naming``."""
-    return legacy_docs_domain(stem)
+def _docs_domain_for(stem: str, aliases: dict[str, str] | None = None) -> str:
+    """Delegating alias: the legacy ``docs/`` lookup, with the project's alias table.
+
+    Pure on purpose — an alias table is an argument, so a caller can ask the question without
+    a repo (and so the answer cannot change because of a config this call never read)."""
+    return legacy_docs_domain(stem, aliases)
 
 
 def _split_name_role(agent_name: str) -> tuple[str, str]:
@@ -154,27 +138,29 @@ def resolve_graph(agent_name_or_path: str) -> tuple[Path, str, str]:
         agent_name = raw.parent.name
     domain, role = _split_name_role(agent_name)
 
-    # 1. agent-local graph (morph-cloud): <paths.agents>/{name}/kb/fact-graph.json
+    # 1. agent-local graph: <paths.agents>/{name}/kb/fact-graph.json
     agent_dir = agents_dir() / agent_name
     local = agent_dir / "kb" / GRAPH_FILENAME
     if local.is_file():
         return local, domain, role
 
-    # 2. legacy docs/<domain>/fact-graph.json (hetzner, mastra, rust, kotlin, swift, spacetimedb,
-    #    electron, ai-sdk, cmux). Domain slug may differ from the agent-name stem.
-    docs_domain = _docs_domain_for(domain)
-    if docs_domain:
-        docs_graph = REPO_ROOT / "docs" / docs_domain / GRAPH_FILENAME
-        if docs_graph.is_file():
-            return docs_graph, docs_domain, role
+    # 2. legacy docs/<domain>/fact-graph.json (a tree that predates its config). The project's
+    #    alias table decides the domain when the agent stem and the directory differ.
+    docs_domain = _docs_domain_for(domain, agent_aliases())
+    docs_graph = REPO_ROOT / "docs" / docs_domain / GRAPH_FILENAME
+    if docs_graph.is_file():
+        return docs_graph, docs_domain, role
 
-    # 3. repo-shared graph (<paths.docs>/{domain}/fact-graph.json, with shared-domain remap)
-    shared = fact_graph_path(domain)
+    # 3. repo-shared graph (<paths.docs>/{domain}/fact-graph.json, remapped through the
+    #    project's alias table when this agent consumes a sibling's graph)
+    aliases = agent_aliases()
+    shared_domain = aliases.get(domain, domain)
+    shared = docs_dir() / shared_domain / GRAPH_FILENAME
     if shared.is_file():
-        return shared, domain, role
+        return shared, shared_domain, role
 
     raise FileNotFoundError(
-        f"no fact-graph for agent {agent_name!r}: tried {local}, docs/{docs_domain or domain}, and {shared}"
+        f"no fact-graph for agent {agent_name!r}: tried {local}, docs/{docs_domain}, and {shared}"
     )
 
 
@@ -260,26 +246,38 @@ def begin_marker(
 
 
 def condensed_excerpt(graph: dict, domain: str) -> str:
-    """The ~10-line bootstrap. Mirrors the FACT GRAPH block currently hard-embedded in
-    agent.md so 'condensed' means the same thing whether delivered by agent.md or by the
-    toggle. Derived from the graph, not copy-pasted, so it cannot drift."""
-    v = graph.get("v", {})
-    r = graph.get("r", {})
-    tech = graph.get("_meta", {}).get("technology", domain)
-    limits = r.get("r_cpu_limits_note", "(see graph)")
-    memory = r.get("r_memory_128mb_note", "(see graph)")
-    storage = r.get("r_storage_decision_matrix_note", "(see graph)")
-    runtime = v.get("runtime", "V8 isolates")
-    return f"""# {tech} — FACT GRAPH (condensed bootstrap)
+    """The ~10-line bootstrap: one line per fact the graph actually carries.
 
-**Runtime**: {runtime}. No fs, no child_process, no require().
-**Entry Points**: `export default {{ fetch, scheduled, queue, email }}` — ES modules required.
-**Limits**: {limits}
-**Memory**: {memory}
-**Storage**: {storage}
-**Key Rules**: NO global mutable state. NO blocking I/O. ALL persistence via bindings.
-**KV**: eventually consistent (~60s) — use Durable Objects for strong consistency.
-**compatibility_date** required in wrangler.toml."""
+    Every line is derived from a graph field — a ``v`` value or an ``r`` rule — so the
+    condensed form cannot give one technology's advice to another domain. A graph that omits
+    a field renders ``(see graph)`` for that line rather than an invented default.
+    """
+    v = graph.get("v") or {}
+    tech = (graph.get("_meta") or {}).get("technology") or domain.replace("-", " ").title()
+
+    def first(*keys: str) -> str:
+        for key in keys:
+            value = v.get(key)
+            if isinstance(value, (list, tuple)):
+                value = ", ".join(str(item) for item in value)
+            if value:
+                return str(value).replace("\n", " ").strip()
+        return "(see graph)"
+
+    sev = _rules_by_severity(graph)
+    rejects = [f"{name} — {note}" if note else name for name, note in sev["REJECT"][:4]]
+    required = [f"{name}: {note}" if note else name for name, note in sev["r"][:4]]
+    apis = list((graph.get("a") or {}).keys())[:6]
+
+    lines = [f"# {tech} — FACT GRAPH (condensed bootstrap)", ""]
+    lines.append(f"**Package**: {first('pkg', 'package')} {first('version', 'upstream_version')}"
+                 .rstrip())
+    lines.append(f"**Runtime**: {first('runtime', 'toolchain', 'edition')}")
+    lines.append(f"**Entry Points**: {first('entry_points', 'entry', 'cli', 'install')}")
+    lines.append("**Hard Rules (REJECT)**: " + ("; ".join(rejects) if rejects else "(none marked REJECT)"))
+    lines.append("**Required Limits**: " + ("; ".join(required) if required else "(none recorded)"))
+    lines.append("**API**: " + (", ".join(apis) if apis else "(see graph)"))
+    return "\n".join(lines) + "\n"
 
 
 def _rules_by_severity(graph: dict) -> dict[str, list[tuple[str, str]]]:
@@ -298,12 +296,11 @@ def _rules_by_severity(graph: dict) -> dict[str, list[tuple[str, str]]]:
 
 
 def _identity_block(graph: dict, domain: str) -> list[str]:
-    """Render the ``v`` block generically so every graph schema is faithful — not just
-    cloudflare-workers. Skips internal/pinned fields and caps long values."""
+    """Render the ``v`` block generically so every graph schema is faithful. Skips
+    internal/pinned fields and caps long values."""
     v = graph.get("v", {})
     tech = (
-        graph.get("_meta", {}).get("technology")
-        or TECH_BY_DOMAIN.get(domain)
+        (graph.get("_meta") or {}).get("technology")
         or domain.replace("-", " ").title()
     )
     skip = {"pinned_date", "pinned", "version_source"}
@@ -418,7 +415,7 @@ def composed_excerpt(graph: dict, role: str) -> list[str]:
 
 def _original_graph_path(slug: str) -> Path:
     """Where this project keeps a graph's own file: configured docs, then agent-local, then legacy."""
-    remapped = SHARED_DOMAIN_MAP.get(slug, slug)
+    remapped = agent_aliases().get(slug, slug)
     configured = docs_dir() / remapped / GRAPH_FILENAME
     for candidate in (
         configured,
@@ -570,9 +567,22 @@ def _load_graph(path: Path) -> tuple[dict, bytes]:
     return json.loads(raw), raw
 
 
+def _slug_hint(graph: dict, path: Path) -> str:
+    """The slug to label a `--graph` render with when `--domain` was not given.
+
+    Reads the graph's own identity, never a built-in default: ``_meta.slug``, then ``v.pkg``,
+    then the directory the file sits in."""
+    meta = graph.get("_meta") or {}
+    for candidate in (meta.get("slug"), (graph.get("v") or {}).get("pkg"), path.parent.name):
+        if candidate:
+            return str(candidate)
+    return path.stem
+
+
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--domain", default=DEFAULT_DOMAIN)
+    p.add_argument("--domain", default=None,
+                   help="graph slug to render (required unless --agent or --graph names one)")
     p.add_argument("--role", choices=ROLES, default="implementer")
     p.add_argument("--kb-source", choices=("condensed", "full"), default="full")
     p.add_argument("--print-version", action="store_true", help="print only the kb_version string and exit")
@@ -585,6 +595,11 @@ def main(argv: list[str]) -> int:
     p.add_argument("--root", default=None,
                    help="target project root (default: $ROSETTA_PROJECT or cwd project)")
     args = p.parse_args(argv)
+    # `--domain` names the graph to render, so it is required — there is no default domain.
+    # `--agent` and `--graph` name one instead; only then may `--domain` be omitted.
+    if not args.agent and not args.graph and not args.domain:
+        p.error("--domain is required when neither --agent nor --graph names a graph "
+                "(there is no default domain)")
     if args.root:
         set_repo_root(args.root)
         os.environ["ROSETTA_PROJECT"] = str(REPO_ROOT)
@@ -606,7 +621,8 @@ def main(argv: list[str]) -> int:
         elif args.graph:
             path = Path(args.graph)
             g, raw = _load_graph(path)
-            items.append((g, raw, args.domain))
+            slug = args.domain or _slug_hint(g, path)
+            items.append((g, raw, slug))
             item_paths.append(path)
         else:
             path = fact_graph_path(args.domain)

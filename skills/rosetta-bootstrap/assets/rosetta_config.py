@@ -21,7 +21,8 @@ THE CONTRACT
           "probes": ".rosetta/probes",
           "agents": "agents"
         },
-        "citation_aliases": {"notes/": ".rosetta/docs/"}
+        "citation_aliases": {"notes/": ".rosetta/docs/"},
+        "agent_aliases": {"vendor": "vendor-cloud"}
       }
 
   All four path keys are required. Every value is a REPO-RELATIVE path: no absolute path, no
@@ -35,6 +36,13 @@ THE CONTRACT
   so a project that spells its citations differently declares it instead of patching code. The
   value obeys the same rules as a path — absolute, `~`, `..` and a symlink escape are refused,
   naming ``citation_aliases.<prefix>``.
+
+  `agent_aliases` is optional. Each entry maps an AGENT-NAME prefix as the project spell it
+  (``vendor``) to the graph slug that agent consumes (``vendor-cloud``), for the cases where
+  the two are spelled differently or an agent consumes another domain's graph. It is data, not
+  code: a project declares its own name mismatches instead of the plugin carrying a table. Both
+  sides are SLUGS — lowercase kebab-case, the rule every graph directory already follows — so a
+  path-shaped value is refused, naming ``agent_aliases.<prefix>``.
 
   There is NO built-in default and NO device root. A missing or invalid config is a refusal
   (exit 2) that names the file and prints the JSON to create, never a silent fallback. A
@@ -57,6 +65,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -71,6 +80,11 @@ STANDARD_PATHS = {
     "probes": ".rosetta/probes",
     "agents": "agents",
 }
+
+#: The slug rule every artifact name already follows: lowercase kebab-case. An
+#: `agent_aliases` entry is a pair of slugs, so `Vendor_Cloud` and `vendor/cloud` are both
+#: refused — the first fails the rule, the second is a path.
+SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 # Mirrors the docs-relevant names in registry.EXCLUDE_DIR_NAMES. A knowledge base under one of
 # them is pruned out of the registry walk, so accepting it would write a graph nobody indexes.
@@ -346,6 +360,56 @@ def validate_citation_aliases(cfg: dict, config_path: Path, repo: Path) -> dict[
     return resolved
 
 
+def validate_agent_aliases(cfg: dict, config_path: Path, repo: Path) -> dict[str, str]:
+    """Return {agent-name prefix: graph slug}. Absent is fine; a bad entry is a refusal.
+
+    Both sides are SLUGS: an agent-name prefix on the left, the graph that agent consumes on
+    the right. The table exists so a project whose agent stem differs from its graph slug
+    (``vendor-implementer`` consuming ``vendor-cloud``) declares the mismatch instead of the
+    plugin carrying a built-in list. A path-shaped value is refused rather than resolved: an
+    alias chooses WHICH graph, never where it lives — ``paths.docs`` owns location.
+    """
+    aliases = cfg.get("agent_aliases")
+    if aliases is None:
+        return {}
+    if not isinstance(aliases, dict):
+        raise ConfigError(
+            f"{config_path}: agent_aliases must be an object mapping an agent-name prefix to "
+            f"the graph slug that agent consumes\nUse:\n{suggested_config()}"
+        )
+    resolved: dict[str, str] = {}
+    for prefix, value in aliases.items():
+        label = f"agent_aliases.{prefix}"
+        if not isinstance(prefix, str) or not prefix.strip():
+            raise ConfigError(f"{config_path}: {label} must be a non-empty agent-name prefix")
+        key = prefix.strip()
+        if not SLUG_RE.match(key):
+            raise ConfigError(
+                f"{config_path}: {label} must be a slug ({SLUG_RE.pattern}) — the agent-name "
+                f"prefix as it appears before the role, got {key!r}"
+            )
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"{config_path}: {label} must be the graph slug that agent consumes, "
+                f"got {value!r}"
+            )
+        raw = value.strip()
+        if (Path(raw).is_absolute() or raw.startswith("~") or "/" in raw or "\\" in raw
+                or ".." in Path(raw).parts):
+            raise ConfigError(
+                f"{config_path}: {label} must name a graph slug, not a path ({raw!r}); "
+                f"where a graph lives is decided by paths.docs"
+            )
+        if not SLUG_RE.match(raw):
+            raise ConfigError(
+                f"{config_path}: {label} must be a slug ({SLUG_RE.pattern}), got {raw!r}"
+            )
+        if key in resolved:
+            raise ConfigError(f"{config_path}: {label} is declared twice")
+        resolved[key] = raw
+    return resolved
+
+
 def device_declares_roots(path: Path) -> bool:
     """True when the device file still tries to decide a location (the removed design)."""
     if not path.is_file():
@@ -381,6 +445,8 @@ class Resolver:
         self.project_cfg = read_config(self.project_cfg_path)
         self.paths = validate_config(self.project_cfg, self.project_cfg_path, self.project)
         self.citation_aliases = validate_citation_aliases(
+            self.project_cfg, self.project_cfg_path, self.project)
+        self.agent_aliases = validate_agent_aliases(
             self.project_cfg, self.project_cfg_path, self.project)
 
         if device_declares_roots(self.device_cfg_path):
@@ -422,6 +488,11 @@ class Resolver:
         """{citation prefix: absolute directory}. The reader matches the longest prefix first."""
         return {prefix: str((self.project / value)) for prefix, value in self.citation_aliases.items()}
 
+    # ---- agent-name aliases ----------------------------------------
+    def agent_alias_table(self) -> dict[str, str]:
+        """{agent-name prefix: graph slug}. Empty when the project declares none."""
+        return dict(self.agent_aliases)
+
     # ---- artifact paths --------------------------------------------
     def artifact(self, cls: str, slug: str, filename: str | None = None) -> dict:
         r = self.resolve(cls)
@@ -462,6 +533,7 @@ class Resolver:
             "config_present": self.project_cfg_path.is_file(),
             "paths": dict(self.paths),
             "citation_aliases": dict(self.citation_aliases),
+            "agent_aliases": dict(self.agent_aliases),
             "roots": {c: self.resolve(c) for c in CLASSES},
             "warnings": self.warnings,
         }
@@ -674,6 +746,28 @@ def selftest() -> int:
             check("alias symlink escape names key", "escape/graphs" in str(exc), True)
         (proj / "escape").unlink()
 
+        print("── an agent alias is a pair of slugs; a path or a bad slug is named on refusal ──")
+        _write(proj / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS),
+                                       "agent_aliases": {"vendor": "vendor-cloud"}})
+        check("agent alias resolves", Resolver(proj, home).agent_alias_table(),
+              {"vendor": "vendor-cloud"})
+        _write(proj / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS)})
+        check("no agent aliases is fine", Resolver(proj, home).agent_alias_table(), {})
+        for key, value in (
+            ("vendor", "../escape"),
+            ("vendor", "vendor/cloud"),
+            ("vendor", "/abs/graph"),
+            ("vendor", "Vendor_Cloud"),
+            ("Vendor_Cloud", "vendor-cloud"),
+        ):
+            _write(proj / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS),
+                                           "agent_aliases": {key: value}})
+            try:
+                Resolver(proj, home)
+                check(f"agent alias {key}->{value} refused", "accepted", "ConfigError")
+            except ConfigError as exc:
+                check(f"agent alias {key}->{value} names key", key in str(exc), True)
+
         print("── a version 1 config is refused with the equivalent version 2 ──")
         _write(proj / CONFIG_RELPATH, {"version": 1, "roots": {"default": "project"}})
         try:
@@ -877,6 +971,11 @@ def main(argv: list[str]) -> int:
         help="print the config's citation prefix table as JSON {prefix: absolute dir}")
     p_alias.add_argument("--project", default=None)
 
+    p_agent_alias = sub.add_parser(
+        "agent-aliases",
+        help="print the config's agent-name alias table as JSON {agent prefix: graph slug}")
+    p_agent_alias.add_argument("--project", default=None)
+
     p_plug = sub.add_parser("plugin", help="absolute path of the plugin checkout that owns engine/")
     p_plug.add_argument("--why", action="store_true", help="also print which tier resolved it")
 
@@ -944,6 +1043,10 @@ def main(argv: list[str]) -> int:
 
     if args.verb == "citation-aliases":
         print(json.dumps(res.aliases(), indent=2, sort_keys=True))
+        return 0
+
+    if args.verb == "agent-aliases":
+        print(json.dumps(res.agent_alias_table(), indent=2, sort_keys=True))
         return 0
 
     if args.verb == "path":

@@ -50,8 +50,8 @@ python3 scripts/kb-delivery/generate_excerpt.py --agent <name> --print-version
 | `--print-version` | Print only the `kb_version` label |
 
 Graph resolve order: agent-local `agents/<name>/kb/fact-graph.json`, then
-`.rosetta/docs/<slug>/`, then the shared-graph map
-(`cloudflare-rust` → `cloudflare-workers`).
+`.rosetta/docs/<slug>/`, then the project's own `agent_aliases` table for an
+agent whose name and graph slug differ (or that consumes a sibling's graph).
 
 ## `assign.py`
 

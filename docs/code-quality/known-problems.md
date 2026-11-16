@@ -7,7 +7,6 @@ them, so the next run does not have to re-diagnose.
 
 | # | Problem | Where |
 |---|---|---|
-| 1 | `condensed_excerpt()` docstring claims the bootstrap is "derived from the graph, not copy-pasted, so it cannot drift". It is a hardcoded Cloudflare Workers paragraph, and `DEFAULT_DOMAIN` is `cloudflare-workers`. Any non-Cloudflare KB gets Cloudflare advice. | `scripts/kb-delivery/generate_excerpt.py` |
 | 2 | `registry.py` turns every parse failure into the string `"unknown"` via `except Exception` (five sites). A malformed graph and a missing graph are indistinguishable in the index. | `scripts/rosetta/registry.py` |
 | 3 | `engine` `bun test`: 3 of 81 fail (`real Grok ACP worker lifecycle`, ~13 s each). They spawn a real ACP child; environmental. Red before any cleaning work. | `engine/tests/worker.integration.test.ts` |
 | 4 | `pipeline.schema.json` is generated, committed, and read by nobody. `zod-json-schema.ts`'s own comment claims it exists "so write-graph.py can validate without a second hand-maintained copy". It does not, and the schema does not model the fact-graph. | `engine/src/zod-json-schema.ts` |
@@ -18,13 +17,28 @@ them, so the next run does not have to re-diagnose.
 | 9 | Nothing reads `pipeline.schema.json`. It now has proper `$defs` (830 lines, 11 definitions) but is still a generated artifact with no consumer, while `write-graph.py` validates with its own gate. | `scripts/rosetta/schema/pipeline.schema.json` |
 | 10 | `write-graph._DOCS_DIR` is module-level mutable state set by `main()`, so six verbs depend on a global instead of a parameter. | `scripts/rosetta/write-graph.py` |
 
+## Fixed in the 2026-11-16 run (TECHFREE-01)
+
+- `condensed_excerpt()` was a hardcoded paragraph of one platform's advice (runtime, entry
+  points, storage rules, a config-file name) and `generate_excerpt.py` carried a built-in default
+  domain. Every line now derives from a graph field, and `--domain` is required when neither
+  `--agent` nor `--graph` names a graph.
+- Technology data left the machinery: the agent-prefix→graph-slug table and the legacy
+  docs-domain table are gone from `naming.py`, and a project declares its own name mismatches in
+  the config's `agent_aliases` (validated as slugs, refused as paths). The resolver also stopped
+  carrying a technology label per domain.
+- `scripts/testdata/graphs` held copies of real product KBs. They are now neutral fixtures
+  produced by `write-graph.py --create` from the committed NRRAs in `scripts/testdata/nrra/` and
+  the shared ledger, and `test_write_graph.py` regenerates every one and compares the bytes.
+
 ## Fixed in the 2026-11-04 run
 
 - `registry._split_name_role` returned `"specialist"` for an unknown role while
   `generate_excerpt._split_name_role` returned `"implementer"` — one concept, two answers. Unified
   with the difference made explicit.
 - `AGENT_PREFIX_TO_SLUG` (3 entries) and `DOCSDOMAIN_BY_PREFIX` (9 entries) mapped the same
-  agent→slug relation with different content. Unified into one table.
+  agent→slug relation with different content. Unified into one table — and, in the 2026-11-16
+  run, moved out of the code entirely into the project's `agent_aliases` config.
 - `discover_repo_root` existed as two byte-identical copies.
 - Semver helpers, canonical-JSON/atomic-write, and the URL/TLD set each had two or three homes;
   the valid-TLD set had **three** inside `provenance.py` alone.

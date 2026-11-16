@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """test_multigraph.py — multi-graph merge selftest for generate_excerpt.render_embed_multi.
 
-Builds a 2-graph case from two REAL graphs (rust + cloudflare-workers fixtures)
-and asserts the merge contract. Run: python3 scripts/kb-delivery/test_multigraph.py
+Builds a 2-graph case from two real committed fixtures (core-lib + widget-platform) and
+asserts the merge contract. Run: python3 scripts/kb-delivery/test_multigraph.py
 """
 from __future__ import annotations
 
@@ -48,21 +48,21 @@ def main() -> int:
         G.set_repo_root(root)
         R.write(R.scan())
 
-        one = _items_for(["cloudflare-workers"], "implementer")
+        one = _items_for(["widget-platform"], "implementer")
         multi1 = G.render_embed_multi(one, "implementer")
-        single = G.render_embed(one[0][0], one[0][1], "cloudflare-workers", "implementer")
+        single = G.render_embed(one[0][0], one[0][1], "widget-platform", "implementer")
         check("n1-identical-to-single", multi1 == single, "(N==1 diverged from render_embed)")
 
-        two = _items_for(["rust", "cloudflare-workers"], "implementer")
+        two = _items_for(["core-lib", "widget-platform"], "implementer")
         merged = G.render_embed_multi(two, "implementer")
         first_line = merged.splitlines()[0]
         check("merge-begin-domain-lists-both",
-              'domain="rust|cloudflare-workers"' in first_line, f"({first_line})")
+              'domain="core-lib|widget-platform"' in first_line, f"({first_line})")
         check("merge-composite-version", "merge[2] sha:" in first_line, f"({first_line})")
         check("merge-has-unioned-reject", "REJECT (unioned across all graphs;" in merged)
-        check("merge-has-rust-banner", "## [rust]" in merged)
-        check("merge-has-cw-banner", "## [cloudflare-workers]" in merged)
-        check("merge-reject-tagged", "[rust]" in merged and "[cloudflare-workers]" in merged)
+        check("merge-has-core-banner", "## [core-lib]" in merged)
+        check("merge-has-platform-banner", "## [widget-platform]" in merged)
+        check("merge-reject-tagged", "[core-lib]" in merged and "[widget-platform]" in merged)
         check("merge-single-end", merged.count(G.END_MARKER) == 1)
         check("merge-single-begin", merged.count("rosetta-kb:begin") == 1)
 
@@ -75,7 +75,7 @@ def main() -> int:
         j1_lines = j1.splitlines()
         check("json-n1-three-lines", len(j1_lines) == 3, f"(got {len(j1_lines)})")
         check("json-n1-fmt", 'fmt="json"' in j1_lines[0])
-        check("json-n1-domain", 'domain="cloudflare-workers"' in j1_lines[0])
+        check("json-n1-domain", 'domain="widget-platform"' in j1_lines[0])
         j1_body = json.loads(j1_lines[1])
         one_minus_meta = {k: v for k, v in one[0][0].items() if k != "_meta"}
         check("json-n1-lossless", j1_body == one_minus_meta)
@@ -85,14 +85,14 @@ def main() -> int:
         j2 = G.render_embed_json(two, "implementer")
         j2_lines = j2.splitlines()
         check("json-n2-three-lines", len(j2_lines) == 3, f"(got {len(j2_lines)})")
-        check("json-n2-domain-lists-both", 'domain="rust|cloudflare-workers"' in j2_lines[0])
+        check("json-n2-domain-lists-both", 'domain="core-lib|widget-platform"' in j2_lines[0])
         check("json-n2-composite-version", "merge[2] sha:" in j2_lines[0])
         j2_body = json.loads(j2_lines[1])
-        check("json-n2-keyed-by-slug", set(j2_body.keys()) == {"rust", "cloudflare-workers"})
-        check("json-n2-rust-lossless",
-              j2_body.get("rust") == {k: v for k, v in two[0][0].items() if k != "_meta"})
-        check("json-n2-cw-lossless",
-              j2_body.get("cloudflare-workers") == {k: v for k, v in two[1][0].items() if k != "_meta"})
+        check("json-n2-keyed-by-slug", set(j2_body.keys()) == {"core-lib", "widget-platform"})
+        check("json-n2-core-lossless",
+              j2_body.get("core-lib") == {k: v for k, v in two[0][0].items() if k != "_meta"})
+        check("json-n2-platform-lossless",
+              j2_body.get("widget-platform") == {k: v for k, v in two[1][0].items() if k != "_meta"})
         check("json-single-begin", j2.count("rosetta-kb:begin") == 1)
         check("json-single-end", j2.count(G.END_MARKER) == 1)
 

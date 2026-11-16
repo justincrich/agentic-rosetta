@@ -11,21 +11,23 @@ WHY THIS EXISTS
   was. That is a latent bug wearing a DRY violation's clothes, and it is the reason this
   module exists before any of the bigger splits.
 
-  There were also two agent→slug tables with different content:
-    AGENT_PREFIX_TO_SLUG   {hetzner, aisdk, spacetimedb}            (3 entries)
-    DOCSDOMAIN_BY_PREFIX   {hetzner, mastra, rust, kotlin, swift,
-                            spacetimedb, electron, aisdk, cmux}     (9 entries)
+WHERE THE NAME RULES COME FROM
+  This module used to carry technology tables: an agent-prefix→graph-slug map and a
+  legacy docs-domain map, both listing real products. That made every new domain an edit to
+  the plugin, and it put product data inside machinery.
 
-WHAT WAS MERGED, AND WHAT WAS NOT — read before "finishing the DRY job"
-  MERGED: ``SHARED_GRAPHS``. Both modules carried the identical mapping
-  (``cloudflare-rust`` -> ``cloudflare-workers``), so one name serves both layouts.
+  The rules now come from DATA the project declares in its own config
+  (``agent_aliases``: agent-name prefix → graph slug), and the fallbacks are structural:
 
-  NOT MERGED: the two prefix tables. They are not the same decision. One resolves a slug
-  under the docs directory the repo's config declares; the other resolves a slug under the
-  LEGACY ``docs/<slug>`` layout. Registry only ever looks under the configured docs
-  directory; generate_excerpt tries the legacy ``docs/<domain>`` first. Collapsing them would
-  silently start pointing one module at the other's directory. They live side by side, each
-  documented, sharing one shape.
+    shared / remapped   the config's alias table (the project says the two names differ)
+    longest known slug  the longest prefix of the stem that IS an indexed slug
+                        (``mastra-evals`` → ``mastra``)
+    the bare stem       nothing matched, so the stem is the answer
+
+  ``slug_for_agent`` and ``legacy_docs_domain`` take that table as an argument. Passing
+  ``None`` means "this project declares no aliases", which is a different answer from an
+  empty table only in that it cannot resolve a mismatch — never a silent fallback to a
+  built-in product list.
 
 THE ROLE DEFAULT
   ``split_agent_name`` takes ``default_role`` explicitly. There is no correct global
@@ -45,34 +47,6 @@ ROLES = ("planner", "implementer", "reviewer")
 #: ROLES would change how ``foo-specialist`` splits, which is not a refactor.
 DEFAULT_ROLES = ROLES + ("specialist",)
 
-#: Agents that consume another domain's graph instead of owning one. Identical in both
-#: layouts, so this is the ONE table the two modules genuinely shared.
-SHARED_GRAPHS = {"cloudflare-rust": "cloudflare-workers"}
-
-#: Agent-name prefix → graph slug under the ``.rosetta/docs/<slug>`` layout. Only needed
-#: where the agent stem and the graph slug are spelled differently; stem==slug and
-#: longest-prefix matches are handled by ``slug_for_agent`` without an entry here.
-AGENT_PREFIX_TO_SLUG = {
-    "hetzner": "hetzner-cloud",
-    "aisdk": "ai-sdk",
-    "spacetimedb": "spacetime-db",
-}
-
-#: Agent-name prefix → domain slug under the LEGACY ``docs/<domain>/`` layout. Superset of
-#: the table above because more domains ever existed there. NOT interchangeable with
-#: ``AGENT_PREFIX_TO_SLUG``: see the module docstring.
-LEGACY_DOCS_DOMAIN_BY_PREFIX = {
-    "hetzner": "hetzner-cloud",
-    "mastra": "mastra",
-    "rust": "rust",
-    "kotlin": "kotlin",
-    "swift": "swift",
-    "spacetimedb": "spacetime-db",
-    "electron": "electron",
-    "aisdk": "ai-sdk",
-    "cmux": "cmux",
-}
-
 #: Legacy layouts still READ (a graph written before the repo declared its config). The
 #: configured docs directory is checked FIRST and is the only one a writer targets; these two
 #: stay so an unmigrated tree is still indexable. Held as data so the rule has one home.
@@ -83,7 +57,7 @@ GRAPH_LAYOUTS: tuple[tuple[tuple[str, ...], int], ...] = (
 
 
 def split_agent_name(name: str, *, default_role: str) -> tuple[str, str]:
-    """``cloudflare-workers-implementer`` -> ``("cloudflare-workers", "implementer")``.
+    """``widget-platform-implementer`` -> ``("widget-platform", "implementer")``.
 
     The role is the trailing hyphen token when it is a known role. Otherwise the whole
     name is the stem and ``default_role`` answers — the caller states which reading it
@@ -100,6 +74,8 @@ def split_agent_name(name: str, *, default_role: str) -> tuple[str, str]:
 
 
 def _longest_prefix_match(stem: str, table: dict[str, str]) -> str | None:
+    if not table:
+        return None
     parts = stem.split("-")
     for i in range(len(parts), 0, -1):
         candidate = "-".join(parts[:i])
@@ -113,19 +89,19 @@ def slug_for_agent(
     known_slugs: set[str] | None = None,
     *,
     default_role: str = "specialist",
+    aliases: dict[str, str] | None = None,
 ) -> str | None:
     """Map an agent name to the graph slug it consumes.
 
-    Order: shared-graph override → spelling remap → longest prefix of the stem that is
-    itself a known slug (``mastra-evals`` -> ``mastra``) → the bare stem.
+    Order: the project's alias table → longest prefix of the stem that is itself a known
+    slug (``mastra-evals`` -> ``mastra``) → the bare stem.
 
-    ``known_slugs`` is required for the last fallback; without it only the shared and
-    remap cases resolve.
+    ``aliases`` is the project's ``agent_aliases`` table (agent prefix → graph slug); it is
+    passed in because the answer belongs to the project, not to this module. ``known_slugs``
+    is required for the longest-known-prefix step; without it only the alias cases resolve.
     """
     stem, _ = split_agent_name(name, default_role=default_role)
-    if stem in SHARED_GRAPHS:
-        return SHARED_GRAPHS[stem]
-    remapped = _longest_prefix_match(stem, AGENT_PREFIX_TO_SLUG)
+    remapped = _longest_prefix_match(stem, aliases or {})
     if remapped:
         return remapped
     if known_slugs:
@@ -135,9 +111,14 @@ def slug_for_agent(
     return stem
 
 
-def legacy_docs_domain(stem: str) -> str | None:
-    """Map an agent stem to a ``docs/<domain>`` slug. ``None`` when no such graph is known."""
-    return _longest_prefix_match(stem, LEGACY_DOCS_DOMAIN_BY_PREFIX)
+def legacy_docs_domain(stem: str, aliases: dict[str, str] | None = None) -> str:
+    """Map an agent stem to a ``docs/<domain>`` slug under the pre-config layout.
+
+    An alias the project declared wins; otherwise the stem is the domain, which covers every
+    case where the agent name and the graph directory agree. A legacy tree is never a writer
+    target — this only keeps an unmigrated graph readable.
+    """
+    return _longest_prefix_match(stem, aliases or {}) or stem
 
 
 def slug_from_graph_path(

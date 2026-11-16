@@ -1,0 +1,89 @@
+{
+  "_meta": {
+    "assimilation": {
+      "censused": 0,
+      "closed": 0,
+      "gaps": 0,
+      "graph_sha256": "7a77a9183511f0b135b679efc98c2ef111a8e041b0dcf9903724b4de42df9356",
+      "run_id": "run-fixtures-2026-11",
+      "waves": 1,
+      "writer": "write-graph.py@1.4.0",
+      "written_at": "2026-11-16"
+    },
+    "slug": "widget-platform",
+    "technology": "widget-platform"
+  },
+  "a": {
+    "bucket_get": "await env.BUCKET.get(key)",
+    "bucket_put": "await env.BUCKET.put(key, body)",
+    "fetch_handler": "export default { async fetch(request, env) { ... } }",
+    "queue_send": "await env.QUEUE.send(message)",
+    "store_get": "await env.STORE.get(key)",
+    "store_put": "await env.STORE.put(key, value)"
+  },
+  "r": {
+    "r_cpu_limits": "r",
+    "r_cpu_limits_note": "10 ms of CPU per request by default",
+    "r_entry_points": "r",
+    "r_entry_points_note": "export a default object; ES modules only",
+    "r_memory_limit": "r",
+    "r_memory_limit_note": "128 MB of memory per instance",
+    "r_no_blocking_io": "REJECT",
+    "r_no_blocking_io_note": "No blocking I/O: the runtime has no filesystem, no child processes and no require().",
+    "r_no_global_mutable_state": "REJECT",
+    "r_no_global_mutable_state_note": "No global mutable state between requests; every request may get its own instance.",
+    "r_startup_budget": "r",
+    "r_startup_budget_note": "cold start must stay under 1 s",
+    "r_storage_choice": "nr",
+    "r_storage_choice_note": "pick the binding by consistency need, not by convenience",
+    "r_store_eventual": "r",
+    "r_store_eventual_note": "the key/value binding is eventually consistent (about 60 s)"
+  },
+  "t": {
+    "Env": "the bindings object the runtime passes to the handler",
+    "Handler": "export default { fetch }",
+    "Message": "a queue message body (JSON)"
+  },
+  "v": {
+    "coverage": "platform-wide: requests, scheduled jobs, queues and object storage",
+    "entry_points": "export default { fetch }",
+    "kb_version": "1.0.0",
+    "languages": [
+      "TypeScript",
+      "Rust (wasm)"
+    ],
+    "pinned_date": "2026-11-16",
+    "pkg": "widgetctl",
+    "runtime": "portable worker runtime",
+    "version": "4.2.0",
+    "version_source": "undetermined"
+  },
+  "w": {
+    "AssetBucket": {
+      "i": "widgetctl:bucket",
+      "note": "strongly consistent object store",
+      "t": "binding"
+    },
+    "Handler": {
+      "i": "widgetctl",
+      "note": "the default export the runtime calls per request",
+      "t": "sl"
+    },
+    "Queue": {
+      "i": "widgetctl:queue",
+      "note": "at-least-once delivery binding",
+      "t": "binding"
+    },
+    "Store": {
+      "i": "widgetctl:store",
+      "note": "eventually consistent key/value binding",
+      "t": "binding"
+    }
+  },
+  "x": {
+    "a module-level cache variable": "put shared state in the store or a durable object",
+    "an unbounded loop in a handler": "bound the work and return early",
+    "filesystem calls in a handler": "use the object-store binding",
+    "the store for transactional state": "use the strongly consistent binding"
+  }
+}

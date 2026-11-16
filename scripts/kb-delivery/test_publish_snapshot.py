@@ -66,18 +66,11 @@ PRE_MOVE_SNAPSHOT_ID = "4ee128bc60e4"
 PRE_MOVE_TARGETS_DIGEST = "d0e7558f314d02f977b32a2e678e39e113b44f0e08c2544d777fa730e516775f"
 PRE_MOVE_TARGET_FILES = {"claude": 336, "codex": 293}
 PRE_MOVE_KB_DIGEST = "204631beafa0df4766f1faad3e8b713657043512f90042a18c23fae0ed53791c"
-PRE_MOVE_KB_SLUGS = (
-    "agent-intel", "ai-sdk", "assistant-ui", "astro", "betterauth", "bun",
-    "clean-code", "cloudflare-agents", "cloudflare-durable-objects-ios", "cloudflare-realtime",
-    "cloudflare-workers", "cmux", "cmux-codebase", "deepseek-harness", "docker-agent", "doppler",
-    "electron", "evals", "expo-ai-elements", "flue", "flyio", "github-agentic-workflow", "gpui",
-    "grok-build-tui", "hatchet", "herdr", "herdr-app", "herdr-core", "herdrdev", "hetzner-cloud",
-    "hubspot-crm", "jev", "kotlin", "langfuse", "livekit", "logging-best-practices", "mastra",
-    "mcp-python-sdk", "modal", "morph-cloud", "n8n", "nextjs", "nextjs-cloudflare", "openhands",
-    "pi-packages", "project-management", "quickbooks", "react-native-reusables", "restate", "rig",
-    "rust", "rust-acp", "rust-mcp", "shadcn", "shadcn-ai-elements", "simpro-api", "spacetime-db",
-    "supabase", "sweetui", "swift", "tart", "tauri", "taurpc", "techwriting", "trpc",
-)
+#: The pre-move snapshot's KB slug SET, as one digest over the sorted names. The names
+#: themselves are the content repository's data, not this plugin's: writing them here would put
+#: one project's technology list inside the machinery (TECHFREE-01 AC-15). A digest keeps the
+#: assertion (a renamed, dropped or added graph moves it) without carrying the names.
+PRE_MOVE_KB_SLUG_DIGEST = "30a47f3de0c73e4d10182b3b330ec33529e8315ddad890c5c347d3514c84fc42"
 # The graph agentic-rosetta held the only copy of; the move added it to the content repository
 # (CONTENTMOVE-01), so a publish of today's content carries one more KB than the pre-move snapshot.
 CONTENT_KB_ADDITIONS = ("go",)
@@ -142,6 +135,12 @@ def sha256_of(path: Path) -> str:
 def digest_of(files: dict[str, str]) -> str:
     """One digest over ``{path: sha256}``: equal digests mean every file matches byte for byte."""
     lines = "".join(f"{path} {digest}\n" for path, digest in sorted(files.items()))
+    return hashlib.sha256(lines.encode("utf-8")).hexdigest()
+
+
+def digest_of_names(names) -> str:
+    """One digest over a sorted set of names: a rename, a drop or an addition moves it."""
+    lines = "".join(f"{name}\n" for name in sorted(names))
     return hashlib.sha256(lines.encode("utf-8")).hexdigest()
 
 
@@ -730,13 +729,20 @@ class PublishSnapshotTests(unittest.TestCase):
         self.assertEqual(sum(1 for path in targets if path.endswith("/agent.md")), EXPECTED_AGENTS)
 
         # Every knowledge graph the pre-move snapshot carried is byte-identical here; the content
-        # repository adds only the graph agentic-rosetta held the only copy of.
+        # repository adds only the graph agentic-rosetta held the only copy of. The slug SET is
+        # compared by digest, so a rename cannot slip through unnoticed.
         kbs = {path: digest for path, digest in staged.items() if path.startswith("kb/")}
-        pre_move_kbs = {path: digest for path, digest in kbs.items() if path.split("/")[1] in PRE_MOVE_KB_SLUGS}
-        self.assertEqual(len(pre_move_kbs), len(PRE_MOVE_KB_SLUGS))
+        pre_move_kbs = {path: digest for path, digest in kbs.items()
+                        if path.split("/")[1] not in CONTENT_KB_ADDITIONS}
+        pre_move_slugs = {path.split("/")[1] for path in pre_move_kbs}
+        self.assertEqual(len(pre_move_kbs), EXPECTED_KBS - len(CONTENT_KB_ADDITIONS))
+        self.assertEqual(len(pre_move_slugs), EXPECTED_KBS - len(CONTENT_KB_ADDITIONS))
         self.assertEqual(digest_of(pre_move_kbs), PRE_MOVE_KB_DIGEST, "a pre-move graph's bytes changed")
-        self.assertEqual(sorted({path.split("/")[1] for path in kbs} - set(PRE_MOVE_KB_SLUGS)), list(CONTENT_KB_ADDITIONS))
-        self.assertEqual(len(manifest["kbs"]), len(PRE_MOVE_KB_SLUGS) + len(CONTENT_KB_ADDITIONS))
+        self.assertEqual(digest_of_names(pre_move_slugs), PRE_MOVE_KB_SLUG_DIGEST,
+                         "the pre-move graph set changed (a name was added, dropped or renamed)")
+        self.assertEqual(sorted({path.split("/")[1] for path in kbs} - pre_move_slugs),
+                         list(CONTENT_KB_ADDITIONS))
+        self.assertEqual(len(manifest["kbs"]), EXPECTED_KBS)
         print(
             f"[ac25] published from {clone} ({clone_ref}): {len(manifest['agents'])} agents, "
             f"{len(manifest['kbs'])} KBs, snapshot {manifest['snapshot_id']}"

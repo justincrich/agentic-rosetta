@@ -288,8 +288,8 @@ def main() -> int:
         check("san-drop-internal", P.sanitize_url("http://_api.internal:4280") is None)
         check(
             "san-scheme-less",
-            P.sanitize_url("developers.cloudflare.com/agents/llms-full.txt")
-            == "https://developers.cloudflare.com/agents/llms-full.txt",
+            P.sanitize_url("docs.example.com/agents/llms-full.txt")
+            == "https://docs.example.com/agents/llms-full.txt",
         )
         check(
             "san-keep-github",
@@ -338,7 +338,7 @@ def main() -> int:
             },
         }
         (hdir / "README.md").write_text(
-            "See developers.cloudflare.com/agents/llms-full.txt and https://x\n"
+            "See docs.example.com/agents/llms-full.txt and https://x\n"
         )
         (hdir / ".history").mkdir()
         (hdir / ".history" / "manifest.json").write_text(json.dumps({
@@ -351,7 +351,7 @@ def main() -> int:
         docs = set(harvested.get("docs") or [])
         repos = set(harvested.get("repos") or [])
         local = harvested.get("local") or []
-        check("harvest-scheme-less-cf", "https://developers.cloudflare.com/agents/llms-full.txt" in docs)
+        check("harvest-scheme-less-cf", "https://docs.example.com/agents/llms-full.txt" in docs)
         check("harvest-meta-docs", "https://example.com/docs/" in docs or "https://example.com/docs" in docs)
         check("harvest-history", "https://example.com/history-src.md" in docs)
         check("harvest-contract", "https://example.com/contract.md" in docs)

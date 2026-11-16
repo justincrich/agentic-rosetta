@@ -500,8 +500,8 @@ class SyncAgentsTests(unittest.TestCase):
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json",
-                # The edge rejects the default `Python-urllib/x.y` user agent (Cloudflare
-                # error 1010), so ask the way the shipped client asks.
+                # The edge rejects the default `Python-urllib/x.y` user agent, so ask the way
+                # the shipped client asks.
                 "User-Agent": "rosetta-sync/1",
             },
         )
@@ -845,7 +845,11 @@ class SyncAgentsTests(unittest.TestCase):
             "of the consumer",
         )
 
-        changed_source = checkout / "agents" / "morph-cloud-planner" / "kb" / "volumes.md"
+        # Pick a real payload file from the published checkout: the first agent KB document,
+        # chosen from the tree itself so no product name is hardcoded here.
+        changed_source = next(
+            path for path in sorted((checkout / "agents").glob("*/kb/*.md")) if path.is_file()
+        )
         self.assertTrue(changed_source.is_file(), f"{changed_source} is not part of the consumer")
         changed_source.write_text(
             changed_source.read_text(encoding="utf-8") + "\nSync-01 republish probe: one changed file.\n",

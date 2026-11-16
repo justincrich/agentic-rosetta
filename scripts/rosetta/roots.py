@@ -137,6 +137,45 @@ def resolved_citation_aliases(project: Path | None = None) -> dict[str, Path]:
     return {str(k): Path(v) for k, v in data.items()}
 
 
+def resolved_agent_aliases(project: Path | None = None) -> dict[str, str]:
+    """{agent-name prefix: graph slug} from the repo's config. Empty when none declared.
+
+    An alias says WHICH graph an agent consumes when its name and that graph are spelled
+    differently. It is data in the project's own config, not a table in the plugin, so a repo
+    that needs one declares it and a repo that does not is unaffected. A repo with a bad entry
+    is refused here, with the resolver's message naming ``agent_aliases.<prefix>``.
+    """
+    r = resolver_path()
+    if r is None:
+        print("rosetta-roots: ERROR: rosetta_config.py not found. Re-run install.sh from the "
+              "plugin checkout, or set $ROSETTA_CONFIG.", file=sys.stderr)
+        raise SystemExit(2)
+    repo = project or _cwd_logical()
+    try:
+        out = subprocess.run(
+            [sys.executable, str(r), "agent-aliases", "--project", str(repo)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"rosetta-roots: ERROR: resolver failed ({exc})", file=sys.stderr)
+        raise SystemExit(2) from None
+    if out.returncode != 0:
+        print((out.stderr or "").strip() or f"rosetta_config.py agent-aliases exited "
+              f"{out.returncode}", file=sys.stderr)
+        raise SystemExit(out.returncode if out.returncode > 0 else 2)
+    if (out.stderr or "").strip():
+        print(out.stderr.strip(), file=sys.stderr)
+    try:
+        data = json.loads(out.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        print(f"rosetta-roots: ERROR: agent-aliases printed invalid JSON ({exc})",
+              file=sys.stderr)
+        raise SystemExit(2) from None
+    if not isinstance(data, dict):
+        raise SystemExit(2)
+    return {str(k): str(v) for k, v in data.items()}
+
+
 def _cwd_logical() -> Path:
     """cwd in the spelling the caller used ($PWD) — os.getcwd() resolves symlinks.
 
@@ -193,6 +232,28 @@ def layout(project: Path, warn: bool = False) -> tuple[Path, Path]:
         _LAYOUT_CACHE[key] = (resolved_dir("docs", repo, warn=warn),
                               resolved_dir("agents", repo, warn=warn))
     return _LAYOUT_CACHE[key]
+
+
+#: Same cache rule as ``layout``: one resolver call per repo per config version.
+_ALIAS_CACHE: dict[tuple[str, str], dict[str, str]] = {}
+
+
+def agent_aliases(project: Path) -> dict[str, str]:
+    """The repo's declared agent-name aliases, cached by its config's own bytes.
+
+    A scan asks this once per graph file otherwise, and each ask is a subprocess. Keyed by the
+    config bytes for the same reason as ``layout``: an edit is seen on the next call.
+    """
+    repo = Path(project)
+    cfg = repo / ".rosetta" / "config.json"
+    try:
+        stamp = hashlib.sha256(cfg.read_bytes()).hexdigest()
+    except OSError:
+        stamp = "absent"
+    key = (str(repo), stamp)
+    if key not in _ALIAS_CACHE:
+        _ALIAS_CACHE[key] = resolved_agent_aliases(repo)
+    return _ALIAS_CACHE[key]
 
 
 def base_of(docs: Path) -> Path:

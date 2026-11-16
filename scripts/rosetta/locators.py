@@ -59,7 +59,7 @@ def find_urls(text: str) -> list[str]:
 
 
 def find_hosts(text: str) -> list[str]:
-    """Every scheme-less host in prose (``developers.cloudflare.com/workers``)."""
+    """Every scheme-less host in prose (``docs.example.com/workers``)."""
     return HOST_RE.findall(text)
 
 

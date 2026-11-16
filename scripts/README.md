@@ -22,6 +22,7 @@ rules: [`AGENTS.md`](AGENTS.md).
 | `materialize-grok-skills.py` | `test_materialize_grok_skills.py` | Only writer of `grok-skills/` |
 | `assert-no-drift.sh` | (self-failing gate) | Skill copies + named scripts + Grok pack |
 | `testdata/materialize.py` | used by the registry / excerpt tests | Build a real temp consumer project from fixtures |
+| `testdata/graphs/` | `rosetta/test_write_graph.py` | Neutral fixture graphs, regenerated from `testdata/nrra/` + `testdata/ledger/` and compared byte for byte |
 
 Each module above owns exactly one decision, and its test is the contract for that
 decision. Adding a second copy of one beside it is the mistake these files exist to

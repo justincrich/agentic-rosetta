@@ -10,11 +10,10 @@ The index (``.rosetta/registry.json``) has two sides:
   - ``agents``: agent-name → {graphs: [slug, ...], role}   (``graphs`` is a LIST so an agent
     can consume multiple graphs — the generator merges them into one block)
 
-Consumer discovery uses a small curated override table (agent-name prefix → slug) for the
-handful of cases where the agent name and the graph slug differ (hetzner→hetzner-cloud,
-aisdk→ai-sdk, spacetimedb→spacetime-db, cmux→cmux-specialist) and the shared-graph case
-(cloudflare-rust consumes cloudflare-workers). This table is the ONE place to edit when adding
-a new domain with a name mismatch; discovery of the graph FILES themselves is exhaustive.
+Consumer discovery uses the project's own ``agent_aliases`` table (agent-name prefix → graph
+slug) for the handful of cases where the agent name and the graph slug differ, or where an
+agent consumes another domain's graph. That table lives in the repo's config, never here: a
+project declares its own name mismatches, and discovery of the graph FILES stays exhaustive.
 
 Self-contained (no import of generate_excerpt) so the generator can import this freely.
 
@@ -68,6 +67,11 @@ class Paths:
     @property
     def agents(self) -> Path:
         return _layout(self.root)[1]
+
+    @property
+    def aliases(self) -> dict[str, str]:
+        """The repo's declared agent-name aliases (agent prefix → graph slug)."""
+        return roots.agent_aliases(self.root)
 
 
 # One resolver call per class per repo per process: a scan asks for the layout for every graph
@@ -127,9 +131,18 @@ def _slug_for_graph(path: Path) -> str | None:
     return slug_from_graph_path(path, _paths.root, docs_dir=_paths.docs, agents_dir=_paths.agents)
 
 
-def _slug_for_agent(name: str, known_slugs: set[str] | None = None) -> str | None:
-    """Delegating alias. ``known_slugs`` enables the longest-known-prefix fallback."""
-    return slug_for_agent(name, known_slugs, default_role="specialist")
+def _slug_for_agent(
+    name: str,
+    known_slugs: set[str] | None = None,
+    aliases: dict[str, str] | None = None,
+) -> str | None:
+    """Delegating alias. ``known_slugs`` enables the longest-known-prefix fallback.
+
+    ``aliases`` is the project's ``agent_aliases`` table. It is a parameter, not a module
+    global, so a caller can answer "what would this name resolve to under no aliases?" —
+    which is exactly the control that shows the data lives in the config.
+    """
+    return slug_for_agent(name, known_slugs, default_role="specialist", aliases=aliases)
 
 
 #: Failures that mean "this file is not readable as a graph" rather than "this is a bug".
@@ -219,6 +232,10 @@ def scan() -> dict:
     Manual bindings (``manual_bindings``) are PRESERVED across rescans — they survive the
     filesystem rebuild because they're user-authored, not auto-derived. After auto-deriving
     agents from names, manual bindings are applied on top (override or add)."""
+    # Resolve the project's alias table FIRST: a config whose aliases are malformed must refuse
+    # the scan before anything is derived from it, and before a registry file is written.
+    aliases = _paths.aliases
+
     # preserve manual_bindings from the prior registry (survives rescan)
     manual: dict[str, list[str]] = {}
     if _paths.registry.is_file():
@@ -228,7 +245,7 @@ def scan() -> dict:
             manual = {}
 
     graphs: dict[str, dict] = {}
-    # 1. discover every graph file (dedup by slug — e.g. morph-cloud's 3 pre-consolidation copies)
+    # 1. discover every graph file (dedup by slug — an agent-local KB can mirror a repo graph)
     for path, slug in _iter_fact_graphs():
         rel = str(path.relative_to(_paths.root))
         if slug not in graphs:
@@ -247,7 +264,7 @@ def scan() -> dict:
             if not agent_dir.is_dir() or not (agent_dir / "agent.md").is_file():
                 continue
             name = agent_dir.name
-            slug = _slug_for_agent(name, known)
+            slug = _slug_for_agent(name, known, aliases)
             if slug in graphs:
                 _, role = _split_name_role(name)
                 agents[name] = {"graphs": [slug], "role": role}

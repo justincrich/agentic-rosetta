@@ -1,0 +1,75 @@
+{
+  "_meta": {
+    "assimilation": {
+      "censused": 0,
+      "closed": 0,
+      "gaps": 0,
+      "graph_sha256": "828ae6efe01be550ed6adec044187326ecc669216a0ba9723cb371f4b15b88a9",
+      "run_id": "run-fixtures-2026-11",
+      "waves": 1,
+      "writer": "write-graph.py@1.4.0",
+      "written_at": "2026-11-16"
+    },
+    "slug": "core-lib",
+    "technology": "core-lib"
+  },
+  "a": {
+    "collect_results": "items.into_iter().map(fallible).collect::<Result<Vec<_>, _>>()",
+    "map_err": "fallible().map_err(Error::from)",
+    "match_option": "match option { Some(v) => v, None => return Err(Error::Missing) }",
+    "ok_or": "option.ok_or(Error::Missing)?",
+    "unwrap_or_else": "value.unwrap_or_else(|| default())"
+  },
+  "r": {
+    "r_document_public_items": "r",
+    "r_document_public_items_note": "Every public item carries a doc comment",
+    "r_format_before_commit": "nr",
+    "r_format_before_commit_note": "Run the formatter before committing",
+    "r_no_panic_in_flow": "REJECT",
+    "r_no_panic_in_flow_note": "A panic is not control flow; model the failure in the return type.",
+    "r_no_unwrap_in_library": "REJECT",
+    "r_no_unwrap_in_library_note": "Never unwrap a fallible value in library code; return the error.",
+    "r_no_wildcard_match": "r",
+    "r_no_wildcard_match_note": "Match every variant so a new one breaks the build, not the runtime",
+    "r_prefer_result": "r",
+    "r_prefer_result_note": "Return Result for anything that can fail"
+  },
+  "t": {
+    "Clone": "value semantics for the type",
+    "Debug": "a printable diagnostic form",
+    "Default": "a documented neutral value",
+    "Display": "the user-facing message"
+  },
+  "v": {
+    "edition": "2024",
+    "kb_version": "1.0.0",
+    "pinned_date": "2026-11-16",
+    "pkg": "corelib",
+    "toolchain": "stable",
+    "version": "2.3.1",
+    "version_source": "undetermined"
+  },
+  "w": {
+    "Channel": {
+      "i": "corelib",
+      "note": "a bounded hand-off between tasks",
+      "t": "type"
+    },
+    "Option": {
+      "i": "corelib",
+      "note": "a present-or-absent value",
+      "t": "type"
+    },
+    "Result": {
+      "i": "corelib",
+      "note": "a success-or-failure value",
+      "t": "type"
+    }
+  },
+  "x": {
+    "a string as the error type": "use a typed error",
+    "clone() to silence the borrow checker": "restructure the ownership instead",
+    "indexing a slice": "use get() and handle None",
+    "unwrap() in library code": "return the error"
+  }
+}
