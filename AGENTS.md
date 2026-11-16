@@ -13,8 +13,12 @@ Mastra fanout engine, Python writers, and install/sync scripts.
 
 It is **not** a knowledge-base host. No language KBs, no `agents/` triad, no
 `fact-graph.json` for a real stack belong here. Those live in a **consumer**
-project (on this machine that is often `~/Projects/brain`). Brain is a consumer.
-Never `cd` there to “find the plugin.” Never hardcode `~/Projects/brain`.
+project — [`hackerpug-ai/agent-content`](https://github.com/hackerpug-ai/agent-content)
+is the one this machinery is built against, and `~/Projects/brain` is another.
+Never `cd` into a consumer to “find the plugin.” Never hardcode `~/Projects/brain`.
+
+The read-only MCP service and the snapshot publisher/sync client that used to live
+here were removed (see `CHANGELOG.md`); delivery is the consumer's concern now.
 
 Install ships machinery only. It does not copy KBs and does not edit a target
 project’s `AGENTS.md`.

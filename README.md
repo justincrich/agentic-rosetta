@@ -26,7 +26,9 @@ It ships **seven skills** and a **Mastra fanout engine** — and **zero pre-inst
 | `rosetta-sync` | Distribute graphs into agent bodies (`registry.py` + `embed-graph.sh`) |
 | `rosetta-ab-test` / `rosetta-stress-test` | Evaluation family |
 
-This repo is the **one true source**. Brain is a consumer of the graphs, not of the machinery.
+This repo is the **one true source of the machinery**. Agent prompts and knowledge bases
+live in [`hackerpug-ai/agent-content`](https://github.com/hackerpug-ai/agent-content);
+Brain is another consumer. Nothing here serves data — no knowledge, and no runtime service.
 
 ## Install
 
@@ -180,6 +182,13 @@ See [WHY.md](./WHY.md) for the theory of operation: two-layer knowledge injectio
 This checkout is **machinery**. Run bootstrap / sync / upgrade from the **consumer**
 project that owns `agents/` — not from here. Brain (when present) is a consumer,
 not a hardcoded path.
+
+The agents and fact graphs now live in
+[`hackerpug-ai/agent-content`](https://github.com/hackerpug-ai/agent-content). The
+read-only MCP service that served them, and the publisher and device-sync client
+that staged it, were **removed from this repo** and are being rebuilt there — see
+the `Unreleased` entry in [CHANGELOG.md](CHANGELOG.md). This repo now ships the
+skills, the fanout engine, and the graph writers, and nothing that serves content.
 
 | File | When to open it |
 |---|---|

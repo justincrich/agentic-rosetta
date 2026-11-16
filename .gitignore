@@ -14,6 +14,3 @@ __pycache__/
 /.pi/
 /.claude/
 /engine/.pi/
-
-# Staged agent + KB snapshot for the MCP Worker. Written only by
-# scripts/kb-delivery/publish_snapshot.py; never committed.

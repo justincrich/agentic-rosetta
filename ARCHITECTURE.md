@@ -3,8 +3,15 @@
 How Rosetta machinery fits together. Invariants live in [`AGENTS.md`](AGENTS.md).
 Storage schema lives in [`CONFIG.md`](CONFIG.md). Theory lives in [`WHY.md`](WHY.md).
 
-This repo is the **plugin**. Knowledge bases live in a **consumer** project that
-owns `agents/` — not here.
+This repo is the **plugin**. Knowledge bases and agent prompts live in a
+**consumer** project that owns `agents/` — not here.
+[`hackerpug-ai/agent-content`](https://github.com/hackerpug-ai/agent-content) is
+the consumer this machinery is built against.
+
+This repo also ships **no service**. The read-only MCP Worker that served a
+published snapshot, and the publisher and device-sync client that staged it, were
+removed and are being rebuilt in that consumer. Everything below is the write
+path that produces a graph; how one is delivered is now the consumer's problem.
 
 ## Write path
 
