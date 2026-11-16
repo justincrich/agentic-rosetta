@@ -24,18 +24,98 @@ base_branch: improvement/imp-graph-composition-1793812559-graph-composition
 
 **Gate:** A maintainer can compose the Rust knowledge into the Herdr knowledge base, see the borrowed rules in the agent's prompt, and refresh every borrower after a Rust upgrade with one confirmed command.
 
-Pre-step: build a temp project with `scripts/testdata/materialize.py`, then add
-`.rosetta/docs/rust/fact-graph.json` (v.kb_version `1.0.0`, rule `reject-unwrap` = REJECT) and
-`.rosetta/docs/herdrdev/fact-graph.json` declaring `_meta.composed_with=[{"graph":"rust","kb_version":"1.0.0"}]`.
+**Pre-step.** Build a temp project whose two graphs are written by the writer. This matters: a
+hand-written graph carries no `_meta.assimilation` stamp, so `--check` only *warns* on it and step
+7 cannot reproduce; `--create` is what stamps a graph. Requires the repo's declared Python
+dependency (`pip install --user 'pydantic>=2.6,<3'`). Keep one shell for every step — `$T` must
+stay in scope.
 
-1. python3 scripts/rosetta/write-graph.py --update rust --changeset bump.json  # sets v.kb_version to "1.1.0"; python3 scripts/rosetta/write-graph.py --propagate rust --list -> stdout lists borrower `herdrdev` with recorded kb_version "1.0.0" and current "1.1.0"; stdout asks `update all`, `a subset`, or `skip` and states `update all` is the default. You should NOT see: stdout reports 0 borrowers; an empty list; a silent exit with no prompt.
-2. python3 scripts/rosetta/write-graph.py --update herdrdev --changeset compose.json  # --composed-with rust; python3 scripts/kb-delivery/generate_excerpt.py --agent herdrdev-implementer --embed -> embed stdout contains the Rust rule key "reject-unwrap"; embed stdout contains a composed container keyed "rust". You should NOT see: 0 occurrences of "reject-unwrap"; an embed containing only the herdrdev body.
-3. python3 scripts/rosetta/write-graph.py --update herdrdev --changeset compose.json --composed-with ghost -> exit code 2; stderr names "ghost" and the missing fact-graph path. You should NOT see: a rendered block with 0 borrowed facts; a silent success (exit 0).
-4. python3 scripts/rosetta/write-graph.py --propagate rust --confirm -> exit code 10; stderr contains "copy fingerprint mismatch"; herdrdev body digest still equals "c4e7a91d" after the run. You should NOT see: the borrower file rewritten; 0 bytes changed reported as success.
-5. printf '' | python3 scripts/rosetta/write-graph.py --propagate rust  # no --confirm, stdin is not a TTY -> exit code 2; stderr contains "confirmation required"; herdrdev file digest is unchanged at "1f392b03". You should NOT see: the refresh applied without an answer; an empty confirmation accepted; 0 refusals.
-6. edit .rosetta/docs/herdrdev/fact-graph.json by hand (change one rule text); python3 scripts/rosetta/write-graph.py --check herdrdev -> exit code 1; stderr contains "stamp" and "mismatch". You should NOT see: exit 0 with 0 findings; a passing check.
-7. run test_registry.py, test_write_graph.py, test_provenance.py, test_factgraph.py, test_versions.py, test_generate_excerpt.py, test_multigraph.py, test-embed-graph.sh -> each of the 8 scripts exits 0 and prints "ok"; stdout of the run names "test_factgraph.py" and "test_versions.py" among the 8 executed. You should NOT see: any script exits non-zero; 0 scripts run; an empty test selection.
-8. python3 scripts/rosetta/write-graph.py --check-composed herdrdev -> exit code 10; stderr prints recorded "1.0.0" and current "1.2.0". You should NOT see: exit 0 with no difference reported; an empty report; 0 differences when a version moved.
+~~~bash
+T=$(mktemp -d)/proj
+mkdir -p "$T/.git"
+
+cat > "$T/ledger.json" <<'JSON'
+{"run_id": "run-abc", "tech": "x", "source_mode": "repo",
+ "decoder_ring_hash": "deadbeefcafebabe", "waves": 1, "censused": 1, "closed": 1,
+ "rows": [{"id": "t01", "territory": "README.md", "class": "orientation", "owner": "t01",
+           "status": "closed", "fact_count": 1, "reason": null}], "gaps": []}
+JSON
+
+cat > "$T/rust.md" <<'MD'
+---
+artifact: rosetta-research
+tech: "rust"
+tech_slug: "rust"
+status: "complete"
+run_id: "run-abc"
+decoder_ring_hash: "deadbeefcafebabe"
+---
+
+# Rosetta Research: rust
+
+## 9. Fact-Graph Seed (draft JSON, >= MEDIUM confidence only)
+```json
+{"v": {"pkg": "rust", "version": "1.0.0"},
+ "w": {"Crate": {"t": "sl", "i": "rust", "note": "a library"}},
+ "r": {"reject-unwrap": {"verdict": "REJECT", "rule": "no unwrap in library code"}},
+ "a": {"build": "cargo build"}, "x": {}, "t": {}}
+```
+MD
+
+cat > "$T/herdrdev.md" <<'MD'
+---
+artifact: rosetta-research
+tech: "herdrdev"
+tech_slug: "herdrdev"
+status: "complete"
+run_id: "run-abc"
+decoder_ring_hash: "deadbeefcafebabe"
+---
+
+# Rosetta Research: herdrdev
+
+## 9. Fact-Graph Seed (draft JSON, >= MEDIUM confidence only)
+```json
+{"v": {"pkg": "herdrdev", "version": "1.0.0"},
+ "w": {"Window": {"t": "sl", "i": "herdrdev", "note": "a window"}},
+ "r": {"no-panic": {"verdict": "REJECT", "rule": "never panic in a layout"}},
+ "a": {"check": "herdr app check"}, "x": {}, "t": {}}
+```
+MD
+
+cat > "$T/bump.json" <<'JSON'
+{"added": {"r": {"no-std-alloc": {"verdict": "REJECT", "rule": "no alloc in library code"}}}}
+JSON
+cat > "$T/bump2.json" <<'JSON'
+{"added": {"r": {"no-unsafe": {"verdict": "REJECT", "rule": "no unsafe blocks"}}}}
+JSON
+
+python3 scripts/rosetta/write-graph.py --root "$T" --create rust     --nrra "$T/rust.md"     --ledger "$T/ledger.json"
+python3 scripts/rosetta/write-graph.py --root "$T" --create herdrdev --nrra "$T/herdrdev.md" --ledger "$T/ledger.json"
+~~~
+
+Expected: two `created … kb_version=1.0.0` lines, exit 0 each.
+
+<!-- TESTING-GATE-START -->
+- [ ] 1. Compose Rust into the Herdr graph and read the render: `python3 scripts/rosetta/write-graph.py --root "$T" --compose herdrdev --from rust` → exit 0, stdout says `composed herdrdev <- rust kb_version=1.0.0` and the host moves `1.0.0 -> 1.0.1`. Then `python3 scripts/kb-delivery/generate_excerpt.py --root "$T" --agent herdrdev-implementer --embed` → exit 0, and the embed names the borrowed rule `reject-unwrap` once and the container `composed` once. You should NOT see: 0 occurrences of `reject-unwrap`; an embed carrying only the Herdr body.
+_exercises: COMPOSE-01_
+- [ ] 2. Land a Rust upgrade and list who borrowed it: `python3 scripts/rosetta/write-graph.py --root "$T" --update rust --changeset "$T/bump.json" --ledger "$T/ledger.json"` → exit 0, `1.0.0 → 2.0.0` (a new REJECT rule is a major bump, by design). Then `--propagate rust --list` with the same `--root "$T"` → exit 0, one row `herdrdev recorded=1.0.0 current=2.0.0 stale`, and the command returns without prompting and without writing. You should NOT see: stdout reporting 0 borrowers; a prompt from `--list`; a recorded edition of `-`.
+_exercises: COMPOSE-01_
+- [ ] 3. Answer staleness offline: `python3 scripts/rosetta/write-graph.py --root "$T" --check-composed herdrdev` → exit 10, `herdrdev <- rust: recorded=1.0.0 current=2.0.0 stale`. You should NOT see: exit 0; an empty report; 0 differences when a version moved.
+_exercises: COMPOSE-01_
+- [ ] 4. Refresh every borrower with one confirmed command: `python3 scripts/rosetta/write-graph.py --root "$T" --propagate rust --confirm` → exit 0, `propagated rust -> herdrdev 1.0.1 -> 1.0.2`. Then `python3 scripts/rosetta/write-graph.py --root "$T" --check-composed herdrdev` → exit 0, `recorded=2.0.0 current=2.0.0 fresh`. You should NOT see: the borrower left stale after a confirmed refresh; a second confirmation prompt.
+_exercises: COMPOSE-01_
+- [ ] 5. Make it stale again and prove it cannot run unattended: `python3 scripts/rosetta/write-graph.py --root "$T" --update rust --changeset "$T/bump2.json" --ledger "$T/ledger.json"` → exit 0, `2.0.0 → 3.0.0`. Record `shasum -a 256 "$T/.rosetta/docs/herdrdev/fact-graph.json"`, then `printf '' | python3 scripts/rosetta/write-graph.py --root "$T" --propagate rust` → exit 2, `confirmation required: … pass --confirm`, and the digest is unchanged. You should NOT see: the refresh applied without an answer; an empty confirmation accepted; a changed digest.
+_exercises: COMPOSE-01_
+- [ ] 6. Ask for an original that is not there: `python3 scripts/rosetta/write-graph.py --root "$T" --compose herdrdev --from ghost` → exit 2, stderr names `ghost` and the full `…/docs/ghost/fact-graph.json` path. You should NOT see: a rendered block with 0 borrowed facts; a silent success (exit 0).
+_exercises: COMPOSE-01_
+- [ ] 7. Only the writer may change a graph: change one Herdr body rule by hand (`r.no-panic.rule`), then `python3 scripts/rosetta/write-graph.py --root "$T" --check herdrdev` → exit 2, `stamp: graph_sha256 mismatch (file was hand-edited?)`. Restore with `python3 scripts/rosetta/write-graph.py --root "$T" --compose herdrdev --from rust --force` → exit 0, and `--check herdrdev` → exit 0 `stamp=…`. You should NOT see: exit 0 on the hand-edited file; a passing check after a hand edit.
+_exercises: COMPOSE-01_
+- [ ] 8. A diverged borrowed copy stops the refresh: edit the borrowed rule (`composed.rust.facts.r.reject-unwrap.rule`) to `locally edited borrowed rule`, then `python3 scripts/rosetta/write-graph.py --root "$T" --propagate rust --confirm` → exit 10, `copy fingerprint mismatch — its recorded copy diverged from its own facts`, and the borrowed rule still reads `locally edited borrowed rule`. You should NOT see: the borrower rewritten; the local edit lost.
+_exercises: COMPOSE-01_
+- [ ] 9. The repo's own gate stays green: `python3 scripts/rosetta/test_registry.py`, `python3 scripts/rosetta/test_write_graph.py`, `python3 scripts/rosetta/test_provenance.py`, `python3 scripts/rosetta/test_factgraph.py`, `python3 scripts/rosetta/test_versions.py`, `python3 scripts/kb-delivery/test_generate_excerpt.py`, `python3 scripts/kb-delivery/test_multigraph.py`, `bash scripts/kb-delivery/test-embed-graph.sh` → all eight exit 0 and each prints `ok`. You should NOT see: any script exiting non-zero; a run that skips one of the eight.
+_exercises: COMPOSE-01_
+<!-- TESTING-GATE-END -->
 
 ## Notes
 
