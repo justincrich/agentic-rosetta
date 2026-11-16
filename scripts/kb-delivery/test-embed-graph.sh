@@ -288,6 +288,10 @@ cp "$HERE/generate_excerpt.py" "$HERE/embed-graph.sh" "$BARE/scripts/kb-delivery
 cp "$PLUGIN_ROOT/scripts/rosetta/"*.py "$BARE/scripts/rosetta/"
 chmod +x "$BARE/scripts/kb-delivery/embed-graph.sh"
 printf '# untouched\n' > "$BARE/prompts/x-implementer/agent.md"
+# A repo boundary, exactly as the AC-2 fixture defines it (`git init -q "$T"`): without one, a temp
+# directory that happens to sit under $HOME resolves to the enclosing tree and the refusal names
+# THAT config — a fixture artifact, not the behaviour under test.
+git init -q "$BARE"
 BEG="$BARE/scripts/kb-delivery/embed-graph.sh"
 if "$BEG" --root "$BARE" --sync x >"$TMP/bare.stdout" 2>"$TMP/bare.stderr"; then
   fail "bare-refused" "(sync succeeded with no config)"
