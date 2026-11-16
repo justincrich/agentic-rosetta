@@ -16,13 +16,15 @@ value.
 PART 3 — the code no longer builds a layout by hand (``AC-14``).
 The requirement is a SEARCH, so the assertion is a search: this checkout is grepped for a
 hand-built ``.rosetta/docs`` and for the retired orphan-warning helper, and every match must
-sit inside a comment, a docstring or Markdown prose. A restored helper or one code line that
+sit inside a COMMENT token or a real DOCSTRING (a path literal is a string token but not prose),
+or be Markdown prose. A planted shape per kind proves the rule both ways. A restored helper or one code line that
 spells the retired layout makes this exit non-zero — the check has teeth, not just a clean tree.
 
 Run: python3 scripts/rosetta/test_resolve.py
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import os
@@ -352,22 +354,58 @@ def _line_starts(text: str) -> list[int]:
     return starts
 
 
-def _prose_spans(text: str) -> list[tuple[int, int]]:
-    """Absolute ``[start, end)`` of every COMMENT and STRING token: the prose a match may sit in.
+def _utf8_char_col(line: str, byte_col: int) -> int:
+    """``ast`` reports UTF-8 BYTE columns; every offset this module compares is a character index.
 
-    A token is the unit, not the line: a line such as ``LEGACY = root / ".rosetta" / "docs"``
-    contains a string literal, and a line-level check would wrongly accept the hand-built path
-    it spells. The match has to be CONTAINED in one token, so that line is rejected.
+    Several docstrings here carry non-ASCII prose (arrows, dashes), so mixing the two unit systems
+    would shift a span by a few characters and quietly change the verdict.
     """
+    return len(line.encode("utf-8")[:byte_col].decode("utf-8", "ignore"))
+
+
+def _docstring_spans(text: str, lines: list[str]) -> list[tuple[int, int]]:
+    """Absolute ``[start, end)`` of every module, class and function docstring."""
     starts = _line_starts(text)
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
     spans: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        first = body[0]
+        value = getattr(first, "value", None)
+        if not (isinstance(first, ast.Expr) and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)):
+            continue
+        spans.append((
+            starts[value.lineno - 1] + _utf8_char_col(lines[value.lineno - 1], value.col_offset),
+            starts[value.end_lineno - 1]
+            + _utf8_char_col(lines[value.end_lineno - 1], value.end_col_offset),
+        ))
+    return spans
+
+
+def _prose_spans(text: str) -> list[tuple[int, int]]:
+    """Absolute ``[start, end)`` a prose match may occupy: COMMENT tokens and DOCSTRINGS.
+
+    A STRING token is prose ONLY when it is a docstring. A path literal is a string token too, so
+    accepting any string let ``LEGACY = Path(".rosetta/docs")`` pass as prose — one surviving
+    shape of the very thing AC-14 forbids (F-READERS-01-4). Comments are prose by construction;
+    Markdown is handled by suffix, and a non-Python, non-Markdown line only when it is a comment.
+    """
+    lines = text.splitlines(keepends=True)
+    starts = _line_starts(text)
+    spans: list[tuple[int, int]] = _docstring_spans(text, lines)
     try:
         for tok in tokenize.generate_tokens(io.StringIO(text).readline):
-            if tok.type in (tokenize.COMMENT, tokenize.STRING):
+            if tok.type == tokenize.COMMENT:
                 spans.append((starts[tok.start[0] - 1] + tok.start[1],
                               starts[tok.end[0] - 1] + tok.end[1]))
     except (tokenize.TokenError, IndentationError, SyntaxError):
-        return []
+        pass
     return spans
 
 
@@ -431,32 +469,30 @@ def check_layout_hygiene(failures: list[str], tmp: Path) -> None:
     must("ac14-only-prose", code_lines == [],
          "a code line builds the retired layout:\n    " + "\n    ".join(code_lines))
 
-    # The check is not blind: a hand-built path planted in the same surface is caught.
-    planted = tmp / "ac14-mutant"
-    (planted / "scripts").mkdir(parents=True)
-    mutant = planted / "scripts" / "layout_mutant.py"
-    mutant.write_text(
-        '"""A module whose prose names .rosetta/docs, and whose code builds it."""\n'
-        'LEGACY_DOCS = repo_root / ".rosetta" / "docs"\n'
-        "# a comment may name .rosetta/docs freely\n",
-        encoding="utf-8",
-    )
-    mutant_code = [raw for raw in mutant.read_text(encoding="utf-8").splitlines()
-                   if RETIRED_LAYOUT_RE.search(raw)
-                   and not _match_is_prose(mutant, mutant.read_text(encoding="utf-8")
-                                           .splitlines().index(raw) + 1, raw)]
-    must("ac14-mutant-caught", len(mutant_code) == 1,
-         f"the prose test accepted a hand-built path: {mutant_code}")
-    mutant_docstring_only = mutant.with_name("docstring_mutant.py")
-    mutant_docstring_only.write_text(
-        '"""Only prose: .rosetta/docs is named inside the module docstring."""\nVALUE = 1\n',
-        encoding="utf-8",
-    )
-    doc_lines = (mutant_docstring_only.read_text(encoding="utf-8").splitlines())
-    must("ac14-docstring-accepted",
-         all(_match_is_prose(mutant_docstring_only, i + 1, line)
-             for i, line in enumerate(doc_lines) if RETIRED_LAYOUT_RE.search(line)),
-         "the prose test rejected a docstring that only names the path")
+    # The check is not blind, and its prose rule has one shape per kind. Each fixture below is
+    # classified, so loosening the rule (or narrowing it) shows up here before it can hide a code
+    # line: both hand-built paths must be REJECTED, and a comment and both docstring kinds ACCEPTED.
+    shapes = {
+        "one-string-path": '_MUTANT = Path(".rosetta/docs")\n',
+        "two-token-path": '_MUTANT = root / ".rosetta" / "docs"\n',
+        "comment": "# the retired layout may be named here: .rosetta/docs\nVALUE = 1\n",
+        "module-docstring":
+            '"""Prose: .rosetta/docs is named only in this module docstring."""\nVALUE = 1\n',
+        "function-docstring":
+            'def helper():\n    """Prose: .rosetta/docs in a function docstring."""\n    return 1\n',
+    }
+    must_flag = {"one-string-path", "two-token-path"}
+    flagged: set[str] = set()
+    for shape, body in shapes.items():
+        fixture = tmp / "ac14-shapes" / f"{shape.replace('-', '_')}.py"
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text(body, encoding="utf-8")
+        for line_no, line_text in enumerate(body.splitlines(), start=1):
+            if RETIRED_LAYOUT_RE.search(line_text) and not _match_is_prose(
+                    fixture, line_no, line_text):
+                flagged.add(shape)
+    must("ac14-shape-classification", flagged == must_flag,
+         f"flagged {sorted(flagged)}; expected exactly {sorted(must_flag)}")
 
     # ── the second search: the retired helper has no home ──────────────────────
     helper = _git_grep(REPO, RETIRED_HELPER, ["scripts"], [])
