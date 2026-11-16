@@ -42,12 +42,12 @@ Dependencies point one way: `kb-delivery` → `rosetta`; `rosetta` never imports
 |---|---|---|
 | `resolve.py` | Which project a run is about (5-tier precedence) | reads env + filesystem |
 | `naming.py` | Agent name → (stem, role), agent → graph slug, graph path → slug, `ROLES` | yes |
-| `versions.py` | Semver parse/increment, the `kb_version` bump rule | yes |
+| `versions.py` | Semver parse/increment, the `kb_version` bump rule, composed editions and their freshness rule | yes |
 | `locators.py` | What counts as a URL, where it points, the one TLD table | yes |
-| `factgraph.py` | The fact-graph shape: pydantic model + the write gate | yes |
+| `factgraph.py` | The fact-graph shape: pydantic model + the write gate, composition by value | yes |
 | `jsonfile.py` | Atomic JSON/text write, strict read, canonical digest | disk |
 | `provenance.py` | **Facade** over versions/locators/jsonfile; pins, staleness, companion files | disk + network |
-| `registry.py` | Exhaustive graph index and consumer mapping | disk |
+| `registry.py` | Exhaustive graph index and consumer mapping; the borrowers reverse query | disk |
 | `roots.py` | Where the KB goes (deliberately does NOT walk up — see `resolve.py`) | env + subprocess |
 | `write-graph.py` | **Entry point**: the only writer of `fact-graph.json` | — |
 
@@ -74,21 +74,24 @@ Dependencies point one way: `kb-delivery` → `rosetta`; `rosetta` never imports
 
 | Decision | One home | Consumed by |
 |---|---|---|
-| Repo root | `scripts/rosetta/resolve.py` | `registry`, `generate_excerpt`, `write-graph` |
+| Repo root | `scripts/rosetta/resolve.py` | `registry`, `generate_excerpt` |
+| Docs root (where the KB goes) | `scripts/rosetta/roots.py` | `write-graph`, `provenance` |
 | Agent name → (stem, role) | `scripts/rosetta/naming.py` | `registry`, `generate_excerpt` |
 | Agent name → graph slug | `scripts/rosetta/naming.py` | `registry`, `generate_excerpt` |
 | Graph path → slug (3 layouts) | `scripts/rosetta/naming.py` | `registry`, `generate_excerpt` |
 | `ROLES` | `scripts/rosetta/naming.py` | both |
-| Semver parse/inc/bump | `scripts/rosetta/versions.py` | `provenance`, `write-graph` |
-| Canonical JSON + atomic write | `scripts/rosetta/jsonfile.py` | `provenance`, `write-graph`, `registry` |
+| Semver parse/inc/bump | `scripts/rosetta/versions.py` | `provenance`, `write-graph`, `factgraph`, `registry`, `generate_excerpt` |
+| Composed edition + copy fingerprint (`COMPOSED_KEY`, `fact_fingerprint`, `composed_freshness`) | `scripts/rosetta/versions.py` | `factgraph`, `registry`, `write-graph`, `generate_excerpt` |
+| Canonical JSON + atomic write | `scripts/rosetta/jsonfile.py` | `provenance`, `write-graph`, `versions` |
 | Valid TLDs | `scripts/rosetta/locators.py` | `provenance` |
 | URL sanitise / classify | `scripts/rosetta/locators.py` | `provenance` |
 | The fact-graph shape | `scripts/rosetta/factgraph.py` | `write-graph`, `provenance`, `registry` |
 
 ## Where the code is heading
 
-From 90 days of subjects and `AGENTS.md`: graph **composition** (`_meta.composed_with`,
-multi-slug register) is the live feature; KB **drift/refresh** (`--topics`, backfill pins,
+From 90 days of subjects and `AGENTS.md`: graph **composition** is the live feature — a host graph's
+body carries `composed[<slug>]` with the recorded edition, the copy fingerprint and the copied
+facts, mirrored into `_meta.composed_with`; KB **drift/refresh** (`--topics`, backfill pins,
 provenance) is the live maintenance axis. Both need the graph shape and the slug/version decisions
 to have one home each — which is what this plan builds.
 
