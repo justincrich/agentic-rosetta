@@ -44,7 +44,6 @@ _ROSETTA = Path(__file__).resolve().parent.parent / "rosetta"
 if str(_ROSETTA) not in sys.path:
     sys.path.insert(0, str(_ROSETTA))
 from naming import (  # noqa: E402
-    LEGACY_DOCS_DOMAIN_BY_PREFIX,
     ROLES,
     SHARED_GRAPHS,
     legacy_docs_domain,
@@ -78,12 +77,6 @@ DEFAULT_DOMAIN = "cloudflare-workers"
 # Domains whose agents share another domain's graph file now live in naming.SHARED_GRAPHS;
 # the local alias keeps this module's older call sites readable.
 SHARED_DOMAIN_MAP = SHARED_GRAPHS
-
-# Agent-name prefix → docs-domain slug for graphs that live under ``docs/<domain>/`` (NOT
-# ``.rosetta/docs/``). The agent name and the docs dir differ for several domains
-# (hetzner-* → hetzner-cloud, aisdk-* → ai-sdk, spacetimedb-* → spacetime-db). Longest-
-# prefix match, so "mastra" covers both mastra-implementer and mastra-evals-implementer.
-DOCSDOMAIN_BY_PREFIX = LEGACY_DOCS_DOMAIN_BY_PREFIX
 
 # Human technology label per docs-domain (these graphs have no _meta.technology, so the render
 # title would otherwise be an ugly title-cased slug like "Ai Sdk"/"Spacetime Db").

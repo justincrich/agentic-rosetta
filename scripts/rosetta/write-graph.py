@@ -47,9 +47,7 @@ not current (0 current, 1 composes nothing, 2 a real error).
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 import re
 import shutil
 import sys
