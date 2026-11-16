@@ -13,16 +13,25 @@ checks drive the real resolver and the real writer as subprocesses against real 
 repos, because the contract is about exit codes and stderr, not about a helper's return
 value.
 
+PART 3 — the code no longer builds a layout by hand (``AC-14``).
+The requirement is a SEARCH, so the assertion is a search: this checkout is grepped for a
+hand-built ``.rosetta/docs`` and for the retired orphan-warning helper, and every match must
+sit inside a comment, a docstring or Markdown prose. A restored helper or one code line that
+spells the retired layout makes this exit non-zero — the check has teeth, not just a clean tree.
+
 Run: python3 scripts/rosetta/test_resolve.py
 """
 from __future__ import annotations
 
 import hashlib
+import io
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import tokenize
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -310,6 +319,164 @@ def check_config_contract(tmp: Path, failures: list[str]) -> None:
     must("ac7-no-missing-config-refusal", "no project config" not in proc.stderr, proc.stderr)
 
 
+# ─────────────────────────── part 3: AC-14's search ───────────────────────────
+
+#: The criterion's own search: a hand-built ``.rosetta/docs`` in the writer surface. It is
+#: spelled here once, and the assertion is that every match is prose (a comment, a docstring or
+#: a Markdown file) — never a line that builds a path.
+RETIRED_LAYOUT_RE = re.compile(r"\.rosetta.{0,6}docs")
+
+#: The helper AC-14 removes. It is assembled so this file is not itself a carrier of the name
+#: the criterion's second search forbids.
+RETIRED_HELPER = "warn_if" + "_orphaned"
+
+
+def _git_grep(repo: Path, pattern: str, paths: list[str],
+              excludes: list[str]) -> subprocess.CompletedProcess:
+    """Run one real ``git grep`` over the checkout, exactly as the criterion spells it.
+
+    ``-E`` is required, not cosmetic: the criterion's pattern is ``\\.rosetta.{0,6}docs``, and
+    in git's basic regex ``{0,6}`` is literal text — the search would then find nothing and the
+    assertion below would pass by being blind.
+    """
+    return subprocess.run(
+        ["git", "-C", str(repo), "grep", "-nE", pattern, "--", *paths, *excludes],
+        capture_output=True, text=True,
+    )
+
+
+def _line_starts(text: str) -> list[int]:
+    starts = [0]
+    for line in text.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    return starts
+
+
+def _prose_spans(text: str) -> list[tuple[int, int]]:
+    """Absolute ``[start, end)`` of every COMMENT and STRING token: the prose a match may sit in.
+
+    A token is the unit, not the line: a line such as ``LEGACY = root / ".rosetta" / "docs"``
+    contains a string literal, and a line-level check would wrongly accept the hand-built path
+    it spells. The match has to be CONTAINED in one token, so that line is rejected.
+    """
+    starts = _line_starts(text)
+    spans: list[tuple[int, int]] = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type in (tokenize.COMMENT, tokenize.STRING):
+                spans.append((starts[tok.start[0] - 1] + tok.start[1],
+                              starts[tok.end[0] - 1] + tok.end[1]))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return []
+    return spans
+
+
+def _match_is_prose(path: Path, line_no: int, line_text: str) -> bool:
+    """Is every occurrence of the retired layout on this line inside prose?"""
+    matches = list(RETIRED_LAYOUT_RE.finditer(line_text))
+    if not matches:
+        return True
+    if path.suffix != ".py":
+        # Markdown is prose; a shell or TOML line is prose only when it is a comment.
+        return path.suffix in (".md", ".markdown") or line_text.strip().startswith("#")
+    text = path.read_text(encoding="utf-8")
+    spans = _prose_spans(text)
+    base = _line_starts(text)[line_no - 1]
+    for match in matches:
+        start, end = base + match.start(), base + match.end()
+        if not any(s <= start and end <= e for s, e in spans):
+            return False
+    return True
+
+
+def check_layout_hygiene(failures: list[str], tmp: Path) -> None:
+    """AC-14: the search finds only prose, the retired helper is gone, and doctor is silent.
+
+    Each claim is checked twice over: against the checkout as it stands (the criterion's own
+    search, so a regression is named by file:line) and against a copy of the tree that has the
+    forbidden shape planted in it (so the check cannot pass by being blind).
+    """
+    def must(name: str, cond: bool, detail: str = "") -> None:
+        if not cond:
+            failures.append(f"{name}: {detail}" if detail else name)
+
+    inside = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--is-inside-work-tree"],
+                            capture_output=True, text=True)
+    must("ac14-git-checkout", inside.returncode == 0 and inside.stdout.strip() == "true",
+         f"{REPO} is not a git checkout, so the criterion's search cannot run")
+    if inside.returncode != 0:
+        return
+
+    paths = ["scripts/rosetta", "scripts/kb-delivery"]
+    excludes = [":!*test*"]
+
+    # ── the first search: only comments, docstrings and Markdown prose ──────────
+    proc = _git_grep(REPO, r"\.rosetta.{0,6}docs", paths, excludes)
+    must("ac14-search-exit", proc.returncode in (0, 1),
+         f"git grep exited {proc.returncode}: {proc.stderr}")
+    code_lines: list[str] = []
+    for raw in proc.stdout.splitlines():
+        if not raw.strip():
+            continue
+        # `git grep -n` prints `<file>:<line>:<text>`; the file path itself may contain a colon,
+        # so split from the left once for the path and once for the line number.
+        file_part, _, rest = raw.partition(":")
+        line_part, _, line_text = rest.partition(":")
+        path = REPO / file_part
+        if not path.is_file() or not line_part.isdigit():
+            code_lines.append(f"{raw}  (unreadable match location)")
+            continue
+        if not _match_is_prose(path, int(line_part), line_text):
+            code_lines.append(raw)
+    must("ac14-only-prose", code_lines == [],
+         "a code line builds the retired layout:\n    " + "\n    ".join(code_lines))
+
+    # The check is not blind: a hand-built path planted in the same surface is caught.
+    planted = tmp / "ac14-mutant"
+    (planted / "scripts").mkdir(parents=True)
+    mutant = planted / "scripts" / "layout_mutant.py"
+    mutant.write_text(
+        '"""A module whose prose names .rosetta/docs, and whose code builds it."""\n'
+        'LEGACY_DOCS = repo_root / ".rosetta" / "docs"\n'
+        "# a comment may name .rosetta/docs freely\n",
+        encoding="utf-8",
+    )
+    mutant_code = [raw for raw in mutant.read_text(encoding="utf-8").splitlines()
+                   if RETIRED_LAYOUT_RE.search(raw)
+                   and not _match_is_prose(mutant, mutant.read_text(encoding="utf-8")
+                                           .splitlines().index(raw) + 1, raw)]
+    must("ac14-mutant-caught", len(mutant_code) == 1,
+         f"the prose test accepted a hand-built path: {mutant_code}")
+    mutant_docstring_only = mutant.with_name("docstring_mutant.py")
+    mutant_docstring_only.write_text(
+        '"""Only prose: .rosetta/docs is named inside the module docstring."""\nVALUE = 1\n',
+        encoding="utf-8",
+    )
+    doc_lines = (mutant_docstring_only.read_text(encoding="utf-8").splitlines())
+    must("ac14-docstring-accepted",
+         all(_match_is_prose(mutant_docstring_only, i + 1, line)
+             for i, line in enumerate(doc_lines) if RETIRED_LAYOUT_RE.search(line)),
+         "the prose test rejected a docstring that only names the path")
+
+    # ── the second search: the retired helper has no home ──────────────────────
+    helper = _git_grep(REPO, RETIRED_HELPER, ["scripts"], [])
+    must("ac14-no-retired-helper", helper.returncode == 1 and helper.stdout.strip() == "",
+         f"'{RETIRED_HELPER}' still exists:\n{helper.stdout}")
+
+    # ── doctor: no agents-sibling note, and the declared paths are what it prints ──
+    doc_repo = new_repo(tmp, "ac14-doctor-repo")
+    doc_home = tmp / "ac14-doctor-home"
+    doc_home.mkdir()
+    write_config(doc_repo, standard_config())
+    proc = run_cli([sys.executable, str(RESOLVER), "doctor", "--project", str(doc_repo),
+                    "--scan-root", str(tmp / "ac14-no-such-scan-root")],
+                   doc_repo, {"ROSETTA_HOME": doc_home})
+    must("ac14-doctor-exit0", proc.returncode == 0, proc.stderr)
+    must("ac14-doctor-no-sibling-note", "sibling" not in proc.stdout.lower(), proc.stdout)
+    for cls in CLASSES:
+        must(f"ac14-doctor-lists-{cls}", f"paths.{cls}" in proc.stdout, proc.stdout)
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -388,6 +555,9 @@ def main() -> int:
 
         # ── the required version 2 project config (CONFIG-01) ──────
         check_config_contract(tmp, failures)
+
+        # ── no reader spells the retired layout by hand (AC-14) ────
+        check_layout_hygiene(failures, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
