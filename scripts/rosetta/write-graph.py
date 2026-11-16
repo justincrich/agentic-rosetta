@@ -442,6 +442,27 @@ def cmd_update(
     if absent:
         _die("composed-with",
              f"declared composed graph(s) absent from the project: {', '.join(absent)}")
+
+    # AC-4 on the refresh path this verb documents: a declared copy that no longer matches
+    # its own facts is a local edit the writer must not silently replace. --compose and
+    # --propagate already refuse it; `--update <host> --composed-with <original>` is the
+    # documented research-refresh route, so it refuses too, before any write (no snapshot).
+    # The deliberate overwrite is `--compose <host> --from <original> --force`.
+    if composed_with:
+        diverged = [
+            slug for slug, original in resolve_composed_with(root, composed_with)
+            if composed_freshness(current, original, slug)["status"] == COMPOSED_DIVERGED
+        ]
+        if diverged:
+            for slug in diverged:
+                print(
+                    f"[write-graph] SKIP {tech} <- {slug}: copy fingerprint mismatch — its "
+                    f"recorded copy diverged from its own facts (a local edit changed the "
+                    f"copy); refusing to overwrite", file=sys.stderr,
+                )
+            print(f"[write-graph] refused {tech}: copy fingerprint mismatch "
+                  f"({', '.join(diverged)}); wrote nothing", file=sys.stderr)
+            return EXIT_COMPOSED_STALE
     old_snapshot = json.loads(json.dumps(current))
     kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
     snap = snapshot_history(dest, kb)
@@ -885,7 +906,10 @@ def cmd_propagate(
             print(f"[write-graph] SKIP {name}: already current at "
                   f"{borrower['recorded_kb_version'] or '-'}")
             continue
-        dest = graph_path(root, name)
+        # Use the path the reverse query found. A borrower on a legacy layout lives at
+        # docs/<slug>/ or agents/<name>/kb/, and guessing <docs_dir>/<slug> would report a
+        # listed borrower as missing and leave a half-refreshed project.
+        dest = root / borrower["path"]
         graph = load_json(dest)
         old_kb = str((graph.get("v") or {}).get("kb_version") or "1.0.0")
         updated = factgraph.compose_by_value(graph, original, original_slug)

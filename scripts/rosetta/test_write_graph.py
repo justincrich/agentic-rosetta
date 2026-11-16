@@ -335,6 +335,20 @@ def main() -> int:
           and graph_at("mobile")["composed"]["rust"]["kb_version"] == rust_kb_c,
           r.stdout)
 
+    # AC-4 on the OTHER documented refresh path. `--update <host> --composed-with <orig>` is
+    # the research-refresh route the upgrade skill names, and it used to overwrite a diverged
+    # copy with exit 0 (verified: the local edit vanished). It must refuse like --compose.
+    update_diverged_bytes = herdrdev_path.read_text()
+    r = run("--root", str(compose_root), "--update", "herdrdev",
+            "--changeset", str(rust_step3), "--ledger", str(ledger),
+            "--composed-with", "rust")
+    check("update-composed-diverged-exit10", r.returncode == 10,
+          f"(rc={r.returncode}) {r.stdout}{r.stderr}")
+    check("update-composed-diverged-wrote-nothing",
+          herdrdev_path.read_text() == update_diverged_bytes)
+    check("update-composed-diverged-names-mismatch",
+          "copy fingerprint mismatch" in r.stderr, r.stderr)
+
     # AC-8: a fresh copy that is merely behind fails the composed-version check as stale
     rust_step4 = tmp / "rust-step4.json"
     rust_step4.write_text(json.dumps({
