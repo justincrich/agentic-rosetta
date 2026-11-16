@@ -213,6 +213,18 @@ def main() -> int:
 
     # AC-1: the default is update ALL — every stale borrower moves, and one already current
     # is reported as current rather than churned.
+    # The refresh rewrites the sibling files too. Plant a README and a research pin first so
+    # the assertions below pin what propagate DOES to files it did not create in this test.
+    hd_dir = herdrdev_path.parent
+    (hd_dir / "README.md").write_text(
+        "# herdrdev\n\n- **KB version**: 1.0.0 · **upstream**: undetermined\n")
+    hd_prov_path = hd_dir / "provenance.json"
+    hd_pin = {"kind": "local", "locator": "README.md", "status": "current"}
+    hd_prov = json.loads(hd_prov_path.read_text())
+    hd_prov["sources"] = [hd_pin]
+    hd_prov_path.write_text(json.dumps(hd_prov, indent=2) + "\n")
+    hd_fresh_kb = graph_at("herdrdev")["v"]["kb_version"]
+
     r = run("--root", str(compose_root), "--propagate", "rust", "--confirm")
     check("propagate-all-exit0", r.returncode == 0, r.stdout + r.stderr)
     check("propagate-all-names-every-borrower",
@@ -228,6 +240,26 @@ def main() -> int:
           hg["_meta"]["composed_with"] == [{"graph": "rust", "kb_version": rust_kb_b}],
           repr(hg["_meta"].get("composed_with")))
     check("propagate-all-bumped-host-edition", hg["v"]["kb_version"] != "1.0.0", repr(hg["v"]))
+    # Composition is a content change: the host moves by the patch rule, never a judgment call.
+    check("propagate-all-bumps-host-edition-by-patch",
+          hd_fresh_kb == "1.0.0" and hg["v"]["kb_version"] == "1.0.1",
+          f"{hd_fresh_kb} -> {hg['v']['kb_version']}")
+    check("propagate-all-supersedes-the-old-edition",
+          hg["v"].get("supersedes") == hd_fresh_kb, repr(hg["v"].get("supersedes")))
+    # The siblings the refresh rewrites, pinned the same way the --compose case pins them.
+    check("propagate-provenance-written", hd_prov_path.is_file())
+    hd_prov_after = json.loads(hd_prov_path.read_text())
+    check("propagate-provenance-status",
+          hd_prov_after.get("status") == "propagated", repr(hd_prov_after.get("status")))
+    check("propagate-provenance-kb",
+          hd_prov_after.get("kb_version") == hg["v"]["kb_version"],
+          repr(hd_prov_after.get("kb_version")))
+    check("propagate-provenance-keeps-pins",
+          hd_prov_after.get("sources") == [hd_pin], repr(hd_prov_after.get("sources")))
+    check("propagate-keeps-fact-sources", (hd_dir / "fact-sources.json").is_file())
+    check("propagate-readme-kb-line",
+          f"KB version**: {hg['v']['kb_version']}" in (hd_dir / "README.md").read_text(),
+          (hd_dir / "README.md").read_text())
 
     # AC-1's named action: `--propagate <slug> --list` is side-effect free — no prompt, no write
     before_list = herdrdev_path.read_text()
@@ -439,6 +471,12 @@ def main() -> int:
           == [{"graph": "rust", "kb_version": rust_cv_kb}],
           repr((hg.get("_meta") or {}).get("composed_with")))
     check("compose-bumps-host", hg["v"]["kb_version"] != host_kb_before, hg["v"]["kb_version"])
+    # Composition is a content change: the host moves by the patch rule, never a judgment call.
+    check("compose-bumps-host-edition-by-patch",
+          host_kb_before == "1.0.0" and hg["v"]["kb_version"] == "1.0.1",
+          f"{host_kb_before} -> {hg['v']['kb_version']}")
+    check("compose-supersedes-the-old-edition",
+          hg["v"].get("supersedes") == host_kb_before, repr(hg["v"].get("supersedes")))
     check("compose-own-body-untouched", "unwrap_in_library_code" not in (hg.get("r") or {}),
           repr(list(hg.get("r") or {})))
     check("compose-does-not-touch-source", rust_cv_path.read_text() == rust_cv_bytes)
@@ -527,6 +565,31 @@ def main() -> int:
            .get("r", {}).get("unwrap_in_library_code", {}).get("rule")) == "no unwrap",
           repr((fg_cv.get("composed") or {}).get("rust")))
     check("compose-force-diverged-check-green",
+          run("--root", str(cv_root), "--check", "herdrdev").returncode == 0)
+
+    # A compose is ONE atomic write to ONE host, so every source is checked before anything
+    # is written: a not-yet-composed source listed FIRST must not land when a later source's
+    # copy diverged. "new source first" is what makes the ordering the thing under test.
+    r = run("--root", str(cv_root), "--create", "scala", "--nrra", str(nrra),
+            "--ledger", str(ledger))
+    check("cv-scala-create", r.returncode == 0, r.stderr)
+    hand_multi = json.loads(host_path.read_text())
+    hand_multi["composed"]["rust"]["facts"]["r"]["unwrap_in_library_code"]["rule"] = "hand edited"
+    host_path.write_text(json.dumps(hand_multi, indent=2) + "\n")
+    multi_bytes = host_path.read_text()
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "scala,rust")
+    check("compose-multi-diverged-exit10", r.returncode == 10, f"(rc={r.returncode}) {r.stdout}")
+    check("compose-multi-diverged-wrote-nothing", host_path.read_text() == multi_bytes)
+    check("compose-multi-diverged-wrote-no-source",
+          "scala" not in (cv_graph("herdrdev").get("composed") or {}),
+          repr(sorted((cv_graph("herdrdev").get("composed") or {}))))
+    # --force is the deliberate overwrite; it composes both sources and restores the copy.
+    r = run("--root", str(cv_root), "--compose", "herdrdev", "--from", "scala,rust", "--force")
+    check("compose-multi-diverged-force-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("compose-multi-diverged-force-composes-both",
+          sorted((cv_graph("herdrdev").get("composed") or {})) == ["kotlin", "rust", "scala"],
+          repr(sorted((cv_graph("herdrdev").get("composed") or {}))))
+    check("compose-multi-diverged-force-check-green",
           run("--root", str(cv_root), "--check", "herdrdev").returncode == 0)
 
     # --compose takes no census inputs and no other verb's flags
