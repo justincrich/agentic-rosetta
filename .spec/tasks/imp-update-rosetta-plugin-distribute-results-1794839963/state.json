@@ -1,0 +1,51 @@
+{
+  "schema": "kb-prd-state/v1",
+  "prd": "imp-update-rosetta-plugin-distribute-results-1794839963",
+  "home_branch": "improvement/imp-update-rosetta-plugin-distribute-results-1794839963-update-rosetta-plugin-distribute-results",
+  "pr_sequencing": false,
+  "concurrency": {
+    "max_running": 2,
+    "plan_ahead": 1
+  },
+  "sprints": [
+    {
+      "id": "imp-update-rosetta-plugin-distribute-results-1794839963",
+      "number": 1,
+      "title": "Require a per-repo Rosetta config; remove brain and technology data from the plugin",
+      "dir": ".",
+      "depends_on": [],
+      "status": "planned",
+      "history": [
+        {
+          "status": "planned",
+          "at": "2026-11-16T15:35:18Z",
+          "by": "agent"
+        }
+      ],
+      "branch": null,
+      "pr": null,
+      "tasks": {
+        "CONFIG-01": {
+          "status": "pending",
+          "merge_sha": null
+        },
+        "READERS-01": {
+          "status": "pending",
+          "merge_sha": null
+        },
+        "TECHFREE-01": {
+          "status": "pending",
+          "merge_sha": null
+        },
+        "HANDOFF-01": {
+          "status": "pending",
+          "merge_sha": null
+        },
+        "DOCS-01": {
+          "status": "pending",
+          "merge_sha": null
+        }
+      }
+    }
+  ]
+}
