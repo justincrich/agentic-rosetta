@@ -1,40 +1,47 @@
 #!/usr/bin/env python3
-"""
-rosetta_config.py — deterministic storage-root resolver for the agentic-rosetta skills.
+"""rosetta_config.py — where a repo's Rosetta artifacts live. Required, validated, in code.
 
 WHY THIS EXISTS
-  The skills used to hardcode `.rosetta/research/<slug>.md` (and docs/, probes/) relative to
-  whatever project the session happened to be running in. Research and probe catalogs therefore
-  stranded themselves across repos, split from the knowledge base and agents they belong to.
   Where an artifact goes must ALWAYS be decided the same way, so the decision lives in CODE —
-  this file — not in skill prose that an LLM re-interprets every run.
+  this file — not in skill prose that an LLM re-interprets every run. The skills used to
+  hardcode `.rosetta/research/<slug>.md` (and docs/, probes/) relative to whatever project the
+  session happened to be running in, so catalogs stranded themselves across repos. The first
+  fix put a machine-wide device file in front of that: every repo on the machine resolved to
+  one consumer's layout, and no repo ever declared its own. Rosetta is distributed, so the
+  repo being worked on is the only thing that can answer the question.
 
-PRECEDENCE (per artifact class; first tier that yields a value wins)
-  1. CLI flag                        --root / --research-root / --docs-root / --probes-root
-  2. <project>/.rosetta/config.json  roots.<class>, then roots.default
-  3. $ROSETTA_HOME/config.json       roots.<class>, then roots.default   (default: ~/.rosetta)
-  4. built-in                        "project"
+THE CONTRACT
+  Rosetta runs only in a repo that declares its own layout, in <repo>/.rosetta/config.json:
 
-ROOT FORMS
-  "project"   the current project root (nearest ancestor with .git, else with .rosetta, else cwd)
-  "device"    $ROSETTA_HOME itself
-  <path>      absolute or ~-relative, e.g. ~/Projects/brain
+      {
+        "version": 2,
+        "paths": {
+          "docs": ".rosetta/docs",
+          "research": ".rosetta/research",
+          "probes": ".rosetta/probes",
+          "agents": "agents"
+        }
+      }
 
-LAYOUT (identical under whichever root wins)
-  <root>/.rosetta/research/<slug>.md
-  <root>/.rosetta/docs/<slug>/
-  <root>/.rosetta/probes/<slug>.md
-  ...except root form "device", which already IS the .rosetta dir:
-  $ROSETTA_HOME/research/<slug>.md
+  All four path keys are required. Every value is a REPO-RELATIVE path: no absolute path, no
+  `~` expansion, no `device`, no `..`, nothing that leaves the repo through a symlink.
+  `paths.docs` may not pass through a name the registry prunes (tmp, research, sandbox,
+  .history) — a knowledge base there is invisible to `registry.py`.
 
-HONEST DEGRADATION (never fake, never crash)
-  no config anywhere  -> "project" (byte-identical to pre-config behavior)
-  malformed JSON      -> warn naming the file, skip that tier, continue, exit 0
-  unwritable root     -> warn, fall back to project, and REPORT the fallback, so the artifact's
-                         `storage:` field can honestly record where it actually landed
+  There is NO built-in default and NO device root. A missing or invalid config is a refusal
+  (exit 2) that names the file and prints the JSON to create, never a silent fallback. A
+  device file at $ROSETTA_HOME/config.json is read only to warn, once, that device roots are
+  ignored.
 
-Config schema (both tiers use the same shape):
-  {"version": 1, "roots": {"default": "project", "research": "~/Projects/brain"}}
+  `--<class>-root` / `--root` are the one explicit override, and therefore the one way to
+  point a single invocation outside the repo.
+
+EXEMPT
+  `plugin`, `init` and `--selftest` need no project config: they do not name an artifact.
+
+SELF-HEALING IS NOT DONE HERE
+  The resolver never creates or edits a config, and never creates a directory. `show`, `path`
+  and `root` leave the tree byte-identical; `--ensure` is the one verb that makes a directory.
 """
 
 from __future__ import annotations
@@ -47,21 +54,40 @@ import sys
 import tempfile
 from pathlib import Path
 
-CLASSES = ("research", "docs", "probes")
+CLASSES = ("docs", "research", "probes", "agents")
 CONFIG_RELPATH = Path(".rosetta") / "config.json"
-BUILTIN_DEFAULT = "project"
-SCHEMA_VERSION = 1
-
-DEFAULT_CONFIG = {
-    "version": SCHEMA_VERSION,
-    "roots": {"default": "project"},
+SCHEMA_VERSION = 2
+STANDARD_PATHS = {
+    "docs": ".rosetta/docs",
+    "research": ".rosetta/research",
+    "probes": ".rosetta/probes",
+    "agents": "agents",
 }
+
+# Mirrors the docs-relevant names in registry.EXCLUDE_DIR_NAMES. A knowledge base under one of
+# them is pruned out of the registry walk, so accepting it would write a graph nobody indexes.
+PRUNED_DOC_SEGMENTS = frozenset({"tmp", "research", "sandbox", ".history"})
 
 
 # ───────────────────────────── helpers ─────────────────────────────
 
+class ConfigError(Exception):
+    """A refusal with a repair. Rosetta never guesses where artifacts go."""
+
+
 def warn(msg: str) -> None:
     print(f"[rosetta-config] WARN: {msg}", file=sys.stderr)
+
+
+def suggested_config() -> str:
+    return json.dumps(
+        {"version": SCHEMA_VERSION, "paths": dict(STANDARD_PATHS)}, indent=2
+    )
+
+
+def error_text(exc: ConfigError) -> str:
+    """The refusal as the user reads it: one prefix, the JSON block left copy-pasteable."""
+    return f"[rosetta-config] {exc}"
 
 
 def rosetta_home() -> Path:
@@ -121,47 +147,169 @@ def plugin_root() -> tuple[Path | None, str]:
     return None, "not-found"
 
 
+def _start_dir() -> Path:
+    """The caller's cwd in the spelling they used ($PWD), falling back to the physical path.
+
+    `os.getcwd()` returns the symlink-free path, so `cd /tmp/repo && rosetta_config.py path`
+    would print `/private/tmp/repo/...` — the same file, but not the path the operator typed.
+    $PWD is used only after it is proven to name the current directory.
+    """
+    pwd = os.environ.get("PWD")
+    if pwd:
+        try:
+            if os.path.samefile(pwd, "."):
+                return Path(pwd)
+        except OSError:
+            pass
+    return Path.cwd()
+
+
 def project_root(start: Path) -> Path:
-    """Nearest ancestor with .git, else nearest with .rosetta, else `start` itself."""
-    start = start.expanduser().resolve()
-    git_hit = rosetta_hit = None
+    """The repo a command is about: nearest .git, else nearest config, else nearest .rosetta.
+
+    .git wins so a repo's config is never silently replaced by an outer tree's config. A
+    nested `.rosetta` directory with no config in it (a stray docs/ folder) must not become
+    the project root either — only a real config does.
+
+    The operator's spelling of the path is preserved (absolute, but symlinks unresolved), so
+    `path` prints `<T>/.rosetta/docs/...` for the `$T` they passed rather than a `/private`
+    twin of it. Containment checks still resolve both sides, so a symlink cannot escape.
+    """
+    start = Path(os.path.abspath(start.expanduser()))
+    git_hit = config_hit = rosetta_hit = None
     cur = start
     while True:
         if git_hit is None and (cur / ".git").exists():
             git_hit = cur
+        if config_hit is None and (cur / CONFIG_RELPATH).is_file():
+            config_hit = cur
         if rosetta_hit is None and (cur / ".rosetta").is_dir():
             rosetta_hit = cur
         if cur.parent == cur:
             break
         cur = cur.parent
-    return git_hit or rosetta_hit or start
+    return git_hit or config_hit or rosetta_hit or start
 
 
-def load_config(path: Path) -> tuple[dict, str | None]:
-    """Return (config, warning). Malformed/unreadable never raises — it degrades to {}."""
+# ───────────────────────────── validation ─────────────────────────────
+
+def read_config(path: Path) -> dict:
+    """Read one config file strictly. Missing or malformed is a refusal, not a default."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise ConfigError(
+            f"no project config at {path}\n"
+            f"Rosetta runs only in a repo that declares where its knowledge bases, research "
+            f"notes, probes and agent prompts live.\n"
+            f"Create {path} with:\n{suggested_config()}"
+        ) from None
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc.strerror}") from None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            f"{path}: invalid JSON ({exc.msg} at line {exc.lineno}) — refusing to guess\n"
+            f"Fix it to match:\n{suggested_config()}"
+        ) from None
+    if not isinstance(data, dict):
+        raise ConfigError(
+            f"{path}: top level must be a JSON object — refusing to guess\n"
+            f"Fix it to match:\n{suggested_config()}"
+        )
+    return data
+
+
+def _validate_path(key: str, value, repo: Path, config_path: Path) -> str:
+    """One `paths.<key>` value: repo-relative, inside the repo, and visible to the registry."""
+    label = f"paths.{key}"
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{config_path}: {label} must be a non-empty string, got {value!r}")
+    raw = value.strip()
+
+    if raw == "device":
+        raise ConfigError(
+            f"{config_path}: {label} must be a path inside {repo}, got 'device' "
+            f"(device roots are not supported: every artifact lives in the repo)"
+        )
+    if raw.startswith("~"):
+        raise ConfigError(
+            f"{config_path}: {label} must be a path inside {repo}, got {raw!r} "
+            f"(no ~ expansion — write it relative to the repo root)"
+        )
+    if Path(raw).is_absolute():
+        raise ConfigError(
+            f"{config_path}: {label} must be a path inside {repo}, got absolute {raw!r}"
+        )
+    if ".." in Path(raw).parts:
+        raise ConfigError(
+            f"{config_path}: {label} must be a path inside {repo}, got {raw!r} "
+            f"('..' leaves the repo)"
+        )
+    if key == "docs":
+        pruned = [part for part in Path(raw).parts if part in PRUNED_DOC_SEGMENTS]
+        if pruned:
+            raise ConfigError(
+                f"{config_path}: {label} passes through a registry-pruned name "
+                f"{pruned[0]!r}; choose a directory the registry walks"
+            )
+
+    repo_resolved = repo.resolve()
+    target = (repo / raw).resolve()
+    if target != repo_resolved and repo_resolved not in target.parents:
+        raise ConfigError(
+            f"{config_path}: {label} resolves outside {repo_resolved} "
+            f"({raw!r} -> {target}); a symlink must not carry the path out of the repo"
+        )
+    return raw
+
+
+def validate_config(cfg: dict, config_path: Path, repo: Path) -> dict[str, str]:
+    """Return {class: relative path}. Raises ConfigError naming the offending key."""
+    version = cfg.get("version")
+    if "paths" not in cfg and "roots" in cfg or version == 1:
+        raise ConfigError(
+            f"{config_path}: version 1 configs (a `roots` map) are no longer read\n"
+            f"Replace it with the equivalent version 2 config:\n{suggested_config()}"
+        )
+    if version != SCHEMA_VERSION:
+        raise ConfigError(
+            f"{config_path}: version must be {SCHEMA_VERSION}, got {version!r}\n"
+            f"Use:\n{suggested_config()}"
+        )
+    paths = cfg.get("paths")
+    if not isinstance(paths, dict):
+        raise ConfigError(
+            f"{config_path}: `paths` must be an object with docs, research, probes and agents\n"
+            f"Use:\n{suggested_config()}"
+        )
+    resolved: dict[str, str] = {}
+    for key in CLASSES:
+        if key not in paths:
+            raise ConfigError(
+                f"{config_path}: paths.{key} is required — docs, research, probes and agents "
+                f"must all be declared\nUse:\n{suggested_config()}"
+            )
+        resolved[key] = _validate_path(key, paths[key], repo, config_path)
+    return resolved
+
+
+def device_declares_roots(path: Path) -> bool:
+    """True when the device file still tries to decide a location (the removed design)."""
     if not path.is_file():
-        return {}, None
+        return False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        return {}, f"{path}: invalid JSON ({exc.msg} at line {exc.lineno}) — tier skipped"
-    except OSError as exc:
-        return {}, f"{path}: unreadable ({exc.strerror}) — tier skipped"
+    except (OSError, json.JSONDecodeError):
+        return False
     if not isinstance(data, dict):
-        return {}, f"{path}: top level must be an object — tier skipped"
-    return data, None
-
-
-def _roots_of(cfg: dict) -> dict:
-    roots = cfg.get("roots")
-    return roots if isinstance(roots, dict) else {}
-
-
-def nearest_existing(p: Path) -> Path:
-    cur = p
-    while not cur.exists() and cur.parent != cur:
-        cur = cur.parent
-    return cur
+        return False
+    for key in ("roots", "paths"):
+        val = data.get(key)
+        if isinstance(val, dict) and val:
+            return True
+    return False
 
 
 # ───────────────────────────── resolver ─────────────────────────────
@@ -170,83 +318,57 @@ class Resolver:
     def __init__(self, project_dir: Path | None = None, home: Path | None = None,
                  cli_roots: dict | None = None):
         self.home = (home or rosetta_home())
-        self.project = project_root(project_dir or Path.cwd())
+        self.project = project_root(project_dir or _start_dir())
         self.cli_roots = {k: v for k, v in (cli_roots or {}).items() if v}
         self.warnings: list[str] = []
 
         self.project_cfg_path = self.project / CONFIG_RELPATH
         self.device_cfg_path = self.home / "config.json"
 
-        self.project_cfg, w1 = load_config(self.project_cfg_path)
-        self.device_cfg, w2 = load_config(self.device_cfg_path)
-        for w in (w1, w2):
-            if w:
-                self.warnings.append(w)
-                warn(w)
+        # Validate the project config BEFORE the device note, so a refusal is never buried
+        # under an unrelated warning.
+        self.project_cfg = read_config(self.project_cfg_path)
+        self.paths = validate_config(self.project_cfg, self.project_cfg_path, self.project)
 
-    # ---- tier walk -------------------------------------------------
+        if device_declares_roots(self.device_cfg_path):
+            msg = (f"{self.device_cfg_path} declares roots; device roots are ignored — only "
+                   f"{self.project_cfg_path} decides where artifacts go")
+            self.warnings.append(msg)
+            warn(msg)
+
+    # ---- resolution ------------------------------------------------
     def _decide(self, cls: str) -> dict:
-        """Return {'value','tier','file','key'} for the winning tier — pure, no fs writes."""
-        cli = self.cli_roots.get(cls) or self.cli_roots.get("default")
-        if cli:
-            key = cls if self.cli_roots.get(cls) else "default"
-            return {"value": cli, "tier": "cli", "file": None, "key": f"--{key}-root"}
-
-        for tier, cfg, path in (
-            ("project", self.project_cfg, self.project_cfg_path),
-            ("device", self.device_cfg, self.device_cfg_path),
-        ):
-            roots = _roots_of(cfg)
-            for key in (cls, "default"):
-                val = roots.get(key)
-                if isinstance(val, str) and val.strip():
-                    return {"value": val.strip(), "tier": tier, "file": str(path),
-                            "key": f"roots.{key}"}
-        return {"value": BUILTIN_DEFAULT, "tier": "builtin-default", "file": None,
-                "key": "roots.default"}
-
-    def _base_for(self, value: str) -> tuple[Path, str]:
-        """Map a root value to the directory that holds research/ docs/ probes/."""
-        if value == "project":
-            return self.project / ".rosetta", "project"
-        if value == "device":
-            return self.home, "device"
-        return Path(value).expanduser().resolve() / ".rosetta", "path"
+        """Return the winning value for one class. Pure — no fs writes, uses self.paths."""
+        for key in (cls, "default"):
+            val = self.cli_roots.get(key)
+            if isinstance(val, str) and val.strip():
+                p = Path(val.strip()).expanduser()
+                if not p.is_absolute():
+                    p = self.project / p
+                return {"dir": p.resolve(), "tier": "cli",
+                        "config_key": f"--{key}-root", "value": val.strip()}
+        value = self.paths[cls]
+        return {"dir": self.project / value, "tier": "config",
+                "config_key": f"paths.{cls}", "value": value}
 
     def resolve(self, cls: str) -> dict:
         if cls not in CLASSES:
             raise SystemExit(f"unknown class {cls!r}; expected one of {', '.join(CLASSES)}")
         decision = self._decide(cls)
-        base, form = self._base_for(decision["value"])
-        target = base / cls
-        fallback = False
-
-        anchor = nearest_existing(target)
-        if not os.access(anchor, os.W_OK):
-            msg = (f"resolved {cls} root {target} is not writable (nearest existing: {anchor}) "
-                   f"— falling back to project")
-            self.warnings.append(msg)
-            warn(msg)
-            base, form = self._base_for("project")
-            target = base / cls
-            fallback = True
-
         return {
             "class": cls,
-            "dir": str(target),
-            "root_value": decision["value"],
-            "root_form": form,
-            "tier": "project-fallback" if fallback else decision["tier"],
-            "config_file": decision["file"],
-            "config_key": decision["key"],
-            "fallback": fallback,
+            "dir": str(decision["dir"]),
+            "value": decision["value"],
+            "tier": decision["tier"],
+            "config_file": str(self.project_cfg_path) if decision["tier"] == "config" else None,
+            "config_key": decision["config_key"],
         }
 
     # ---- artifact paths --------------------------------------------
     def artifact(self, cls: str, slug: str, filename: str | None = None) -> dict:
         r = self.resolve(cls)
         d = Path(r["dir"])
-        if cls == "docs":
+        if cls in ("docs", "agents"):
             p = d / slug / filename if filename else d / slug
         else:
             p = d / f"{slug}.md"
@@ -255,21 +377,21 @@ class Resolver:
         return r
 
     def find(self, cls: str, slug: str, filename: str | None = None) -> dict | None:
-        """Read side: configured root, then project, then device. First that exists wins."""
-        seen: list[str] = []
+        """Read side: the configured location, then the legacy project-local one. No device."""
         candidates = [self.artifact(cls, slug, filename)]
-        for forced in ("project", "device"):
-            base, form = self._base_for(forced)
-            d = base / cls
-            p = (d / slug / filename if filename else d / slug) if cls == "docs" else d / f"{slug}.md"
-            candidates.append({"class": cls, "path": str(p), "dir": str(d),
-                               "root_value": forced, "root_form": form,
-                               "tier": f"search:{forced}", "config_file": None,
-                               "config_key": None, "fallback": False})
+        legacy_dir = self.project / ".rosetta" / cls
+        if cls in ("docs", "agents"):
+            legacy_path = (legacy_dir / slug / filename if filename else legacy_dir / slug)
+        else:
+            legacy_path = legacy_dir / f"{slug}.md"
+        candidates.append({"class": cls, "path": str(legacy_path), "dir": str(legacy_dir),
+                           "value": ".rosetta/" + cls, "tier": "legacy-project",
+                           "config_file": None, "config_key": None})
+        seen: set[str] = set()
         for c in candidates:
             if c["path"] in seen:
                 continue
-            seen.append(c["path"])
+            seen.add(c["path"])
             if Path(c["path"]).exists():
                 return c
         return None
@@ -278,14 +400,9 @@ class Resolver:
         return {
             "project_root": str(self.project),
             "rosetta_home": str(self.home),
-            "config_files": {
-                "project": str(self.project_cfg_path),
-                "device": str(self.device_cfg_path),
-            },
-            "config_present": {
-                "project": self.project_cfg_path.is_file(),
-                "device": self.device_cfg_path.is_file(),
-            },
+            "config_file": str(self.project_cfg_path),
+            "config_present": self.project_cfg_path.is_file(),
+            "paths": dict(self.paths),
             "roots": {c: self.resolve(c) for c in CLASSES},
             "warnings": self.warnings,
         }
@@ -294,48 +411,43 @@ class Resolver:
 # ───────────────────────────── verbs ─────────────────────────────
 
 def cmd_init(home: Path) -> int:
+    """Create the device home. It holds the resolver and the plugin pointer, not roots."""
     home.mkdir(parents=True, exist_ok=True)
     (home / "bin").mkdir(parents=True, exist_ok=True)
+    print(f"rosetta home: {home}")
+    print("artifact locations come from <repo>/.rosetta/config.json; this device home "
+          "declares no roots.")
     cfg = home / "config.json"
     if cfg.exists():
-        print(f"config already present, left untouched: {cfg}")
-    else:
-        cfg.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n", encoding="utf-8")
-        print(f"created {cfg}")
-    print(f"rosetta home: {home}")
+        print(f"existing device file left untouched: {cfg}")
+        if device_declares_roots(cfg):
+            print(f"NOTE: {cfg} declares roots, which are ignored — remove them.")
     return 0
+
+
+def _repo_intent(repo: Path, config_path: Path) -> dict[str, str] | None:
+    """One other repo's declared paths, or None when it has no valid config."""
+    try:
+        cfg = read_config(config_path)
+        return validate_config(cfg, config_path, repo)
+    except ConfigError:
+        return None
 
 
 def cmd_doctor(res: Resolver, scan_roots: list[Path], apply: bool,
                excludes: list[Path] | None = None) -> int:
     excludes = [Path(e).expanduser() for e in (excludes or [])]
-    print("=== resolved roots ===")
+    print("=== declared paths in this repo ===")
+    print(f"  {res.project_cfg_path}")
     resolved = {}
     for c in CLASSES:
         r = res.resolve(c)
         resolved[c] = Path(r["dir"]).resolve()
-        src = r["config_file"] or r["tier"]
-        print(f"  {c:<9} {r['dir']}   [{r['tier']}: {r['config_key']} = {r['root_value']}]"
-              + ("  (FELL BACK)" if r["fallback"] else ""))
+        print(f"  {c:<9} {r['dir']}   [{r['tier']}: {r['config_key']} = {r['value']}]")
 
-    # The brain-registry coupling: a KB outside the repo that owns the agents is invisible
-    # to any embed pipeline that walks that repo.
-    docs_dir = resolved["docs"]
-    docs_repo = docs_dir.parent.parent
-    if not (docs_repo / "agents").is_dir():
-        print(f"\n  NOTE: docs root {docs_dir} has no sibling agents/ directory. If your agent")
-        print("        bodies live elsewhere, a KB written here is invisible to that repo's")
-        print("        registry/embed pipeline.")
-
-    # A class whose root is "project" is per-repo BY DESIGN — an artifact sitting in another
-    # project is correctly placed, not stray. Only centralized classes can strand things.
-    centralized = [c for c in CLASSES if res.resolve(c)["root_form"] != "project"]
-    skipped_classes = [c for c in CLASSES if c not in centralized]
-    print("\n=== stray artifacts (outside the resolved roots) ===")
-    if skipped_classes:
-        print(f"  (not checking {', '.join(skipped_classes)} — root is 'project', so every repo "
-              f"is its own correct home)")
+    print("\n=== other repos under the scan roots ===")
     strays: list[tuple[Path, Path]] = []
+    unconfigured = 0
     for scan in scan_roots:
         scan = scan.expanduser()
         if not scan.is_dir():
@@ -346,19 +458,33 @@ def cmd_doctor(res: Resolver, scan_roots: list[Path], apply: bool,
             if any(cfgdir.resolve() == e.resolve() or e.resolve() in cfgdir.resolve().parents
                    for e in excludes):
                 continue
-            for c in centralized:
-                src_dir = cfgdir / c
-                if not src_dir.is_dir() or src_dir.resolve() == resolved[c]:
+            repo = cfgdir.parent
+            cfg_path = cfgdir / "config.json"
+            if repo.resolve() == res.project.resolve():
+                continue
+            declared = _repo_intent(repo, cfg_path)
+            if declared is None:
+                if any((cfgdir / c).is_dir() for c in CLASSES):
+                    unconfigured += 1
+                    print(f"  NO CONFIG (Rosetta refuses to run here): {cfg_path}")
+                continue
+            print(f"  {repo}: docs -> {repo / declared['docs']}")
+            for c in CLASSES:
+                configured = (repo / declared[c]).resolve()
+                legacy = (repo / ".rosetta" / c).resolve()
+                if legacy == configured or not legacy.is_dir():
                     continue
-                for item in sorted(src_dir.iterdir()):
+                for item in sorted(legacy.iterdir()):
                     if item.name.startswith("."):
                         continue
-                    strays.append((item, resolved[c] / item.name))
+                    strays.append((item, configured / item.name))
 
+    print("\n=== artifacts in the legacy .rosetta layout ===")
     if not strays:
         print("  none")
     for src, dst in strays:
-        status = "CONFLICT (destination exists)" if dst.exists() else ("move" if apply else "would move")
+        status = "CONFLICT (destination exists)" if dst.exists() else (
+            "move" if apply else "would move")
         print(f"  {status}: {src}\n      -> {dst}")
 
     moved = skipped = 0
@@ -370,21 +496,11 @@ def cmd_doctor(res: Resolver, scan_roots: list[Path], apply: bool,
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dst))
             moved += 1
-        # prune now-empty class dirs and .rosetta skeletons we emptied
-        for scan in scan_roots:
-            for cfgdir in sorted(Path(scan).expanduser().glob("*/.rosetta")):
-                if not cfgdir.is_dir() or cfgdir.resolve() in {r.parent for r in resolved.values()}:
-                    continue
-                for c in centralized:
-                    d = cfgdir / c
-                    if d.is_dir() and not any(d.iterdir()):
-                        d.rmdir()
-                if cfgdir.is_dir() and not any(cfgdir.iterdir()):
-                    cfgdir.rmdir()
-                    print(f"  pruned empty skeleton: {cfgdir}")
         print(f"\n  moved {moved}, skipped {skipped} (conflicts)")
     elif strays:
         print("\n  (dry run — re-run with --apply to move them)")
+    if unconfigured:
+        print(f"\n  {unconfigured} repo(s) still have artifact directories and no config.")
     return 0
 
 
@@ -400,7 +516,7 @@ def selftest() -> int:
 
     def check(name: str, got, want):
         if got != want:
-            failures.append(f"{name}\n     got:  {got}\n     want: {want}")
+            failures.append(f"{name}\n     got:  {got!r}\n     want: {want!r}")
             print(f"  FAIL {name}")
         else:
             print(f"  ok   {name}")
@@ -408,98 +524,110 @@ def selftest() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="rosetta-config-selftest-"))
     try:
         home = tmp / "device-home"
+        home.mkdir()
         proj = tmp / "proj"
         (proj / ".git").mkdir(parents=True)
-        central = tmp / "central"
-        central.mkdir()
 
-        print("── tier 4: builtin default (no config anywhere) ──")
-        r = Resolver(proj, home)
-        check("research -> project", r.resolve("research")["dir"],
-              str(proj / ".rosetta" / "research"))
-        check("tier is builtin", r.resolve("research")["tier"], "builtin-default")
-        check("docs path", r.artifact("docs", "ai-sdk")["path"],
-              str(proj / ".rosetta" / "docs" / "ai-sdk"))
-        check("docs file", r.artifact("docs", "ai-sdk", "fact-graph.json")["path"],
-              str(proj / ".rosetta" / "docs" / "ai-sdk" / "fact-graph.json"))
-        check("research file", r.artifact("research", "ai-sdk")["path"],
-              str(proj / ".rosetta" / "research" / "ai-sdk.md"))
+        print("── no project config is a refusal naming the file and the JSON ──")
+        missing = proj / CONFIG_RELPATH
+        for name, build in (
+            ("show", lambda: Resolver(proj, home).show()),
+            ("path", lambda: Resolver(proj, home).artifact("docs", "x")),
+            ("root", lambda: Resolver(proj, home).resolve("docs")),
+        ):
+            try:
+                build()
+                check(f"{name} refused", "no error", "ConfigError")
+            except ConfigError as exc:
+                check(f"{name} names config", str(missing) in str(exc), True)
+                check(f"{name} prints json", '"version": 2' in str(exc), True)
 
-        print("── tier 3: device config ──")
-        _write(home / "config.json",
-               {"version": 1, "roots": {"default": "project", "research": str(central)}})
+        print("── the standard version 2 config names the standard layout ──")
+        _write(proj / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS)})
         r = Resolver(proj, home)
-        check("research -> central", r.resolve("research")["dir"],
-              str(central / ".rosetta" / "research"))
-        check("device tier", r.resolve("research")["tier"], "device")
-        check("docs still project (default)", r.resolve("docs")["dir"],
+        check("docs dir", r.resolve("docs")["dir"], str(proj / ".rosetta" / "docs"))
+        check("tier is config", r.resolve("docs")["tier"], "config")
+        check("key is paths.docs", r.resolve("docs")["config_key"], "paths.docs")
+        check("agents dir", r.resolve("agents")["dir"], str(proj / "agents"))
+        check("docs path", r.artifact("docs", "a")["path"], str(proj / ".rosetta" / "docs" / "a"))
+        check("docs file", r.artifact("docs", "a", "fact-graph.json")["path"],
+              str(proj / ".rosetta" / "docs" / "a" / "fact-graph.json"))
+        check("research file", r.artifact("research", "a")["path"],
+              str(proj / ".rosetta" / "research" / "a.md"))
+        check("no warnings", r.warnings, [])
+
+        print("── a custom layout is honoured for every class ──")
+        _write(proj / CONFIG_RELPATH, {"version": 2, "paths": {
+            "docs": "kb/graphs", "research": "kb/research",
+            "probes": "kb/probes", "agents": "prompts"}})
+        r = Resolver(proj, home)
+        check("custom docs", r.resolve("docs")["dir"], str(proj / "kb" / "graphs"))
+        check("custom agents", r.resolve("agents")["dir"], str(proj / "prompts"))
+        check("custom research file", r.artifact("research", "a")["path"],
+              str(proj / "kb" / "research" / "a.md"))
+
+        print("── every bad path kind is refused, naming its key ──")
+        def bad(name: str, paths: dict, key: str) -> None:
+            _write(proj / CONFIG_RELPATH, {"version": 2, "paths": paths})
+            try:
+                Resolver(proj, home)
+                check(name, "accepted", f"refused naming {key}")
+            except ConfigError as exc:
+                check(name, key in str(exc), True)
+
+        base = dict(STANDARD_PATHS)
+        bad("missing agents", {k: v for k, v in base.items() if k != "agents"}, "paths.agents")
+        bad("absolute", dict(base, docs="/abs"), "paths.docs")
+        bad("tilde", dict(base, docs="~/x"), "paths.docs")
+        bad("device", dict(base, docs="device"), "paths.docs")
+        bad("dotdot", dict(base, docs="../x"), "paths.docs")
+        bad("pruned", dict(base, docs="tmp/graphs"), "paths.docs")
+        (proj / "escape").symlink_to("/tmp")
+        bad("symlink escape", dict(base, docs="escape/graphs"), "paths.docs")
+        (proj / "escape").unlink()
+
+        print("── a version 1 config is refused with the equivalent version 2 ──")
+        _write(proj / CONFIG_RELPATH, {"version": 1, "roots": {"default": "project"}})
+        try:
+            Resolver(proj, home)
+            check("v1 refused", "accepted", "ConfigError")
+        except ConfigError as exc:
+            check("v1 suggests version 2", '"version": 2' in str(exc), True)
+            check("v1 suggests paths", '"paths"' in str(exc), True)
+
+        print("── a device file never moves a root and warns exactly once ──")
+        _write(proj / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS)})
+        _write(home / "config.json", {"version": 1, "roots": {"docs": "/elsewhere"}})
+        r = Resolver(proj, home)
+        check("device docs ignored", r.resolve("docs")["dir"],
               str(proj / ".rosetta" / "docs"))
+        check("one device warning", len(r.warnings), 1)
+        check("warning says ignored", "device roots are ignored" in r.warnings[0], True)
+        (home / "config.json").unlink()
 
-        print("── device root form has no nested .rosetta ──")
-        _write(home / "config.json", {"version": 1, "roots": {"default": "device"}})
+        print("── a device home with the resolver does not move anything ──")
         r = Resolver(proj, home)
-        check("device layout", r.resolve("probes")["dir"], str(home / "probes"))
+        check("no device warning without a roots file", r.warnings, [])
 
-        print("── tier 2: project config beats device ──")
-        _write(home / "config.json", {"version": 1, "roots": {"research": str(central)}})
-        _write(proj / CONFIG_RELPATH, {"version": 1, "roots": {"research": "project"}})
-        r = Resolver(proj, home)
-        check("project wins", r.resolve("research")["dir"],
-              str(proj / ".rosetta" / "research"))
-        check("project tier", r.resolve("research")["tier"], "project")
-
-        print("── class beats default within a tier ──")
-        _write(proj / CONFIG_RELPATH,
-               {"version": 1, "roots": {"default": str(central), "research": "project"}})
-        r = Resolver(proj, home)
-        check("research uses class key", r.resolve("research")["dir"],
-              str(proj / ".rosetta" / "research"))
-        check("probes uses default key", r.resolve("probes")["dir"],
-              str(central / ".rosetta" / "probes"))
-
-        print("── tier 1: CLI flag beats everything ──")
+        print("── CLI overrides win over the config, and only they do ──")
         cli_dir = tmp / "cli"
         cli_dir.mkdir()
-        r = Resolver(proj, home, cli_roots={"research": str(cli_dir)})
-        check("cli wins", r.resolve("research")["dir"], str(cli_dir / ".rosetta" / "research"))
-        check("cli tier", r.resolve("research")["tier"], "cli")
+        r = Resolver(proj, home, cli_roots={"docs": str(cli_dir)})
+        check("cli wins", r.resolve("docs")["dir"], str(cli_dir))
+        check("cli tier", r.resolve("docs")["tier"], "cli")
 
-        print("── degradation: malformed JSON warns and falls through ──")
-        _write(proj / CONFIG_RELPATH, "{ this is not json")
-        _write(home / "config.json", {"version": 1, "roots": {"research": str(central)}})
-        r = Resolver(proj, home)
-        check("fell through to device", r.resolve("research")["dir"],
-              str(central / ".rosetta" / "research"))
-        check("warning recorded", any("invalid JSON" in w for w in r.warnings), True)
-
-        print("── degradation: non-dict config is skipped ──")
-        _write(proj / CONFIG_RELPATH, "[1,2,3]")
-        r = Resolver(proj, home)
-        check("skipped list config", r.resolve("research")["dir"],
-              str(central / ".rosetta" / "research"))
-
-        print("── degradation: unwritable root falls back to project ──")
-        locked = tmp / "locked"
-        (locked / ".rosetta").mkdir(parents=True)
-        os.chmod(locked / ".rosetta", 0o500)
-        _write(proj / CONFIG_RELPATH, {"version": 1, "roots": {"research": str(locked)}})
-        r = Resolver(proj, home)
-        got = r.resolve("research")
-        check("fell back to project", got["dir"], str(proj / ".rosetta" / "research"))
-        check("fallback flagged", got["fallback"], True)
-        check("fallback tier", got["tier"], "project-fallback")
-        os.chmod(locked / ".rosetta", 0o700)
-
-        print("── read side: find() searches configured, then project, then device ──")
-        _write(proj / CONFIG_RELPATH, {"version": 1, "roots": {"default": str(central)}})
+        print("── read side: configured first, then the legacy project layout ──")
+        _write(proj / CONFIG_RELPATH, {"version": 2, "paths": {
+            "docs": "kb/graphs", "research": "kb/research",
+            "probes": "kb/probes", "agents": "prompts"}})
         r = Resolver(proj, home)
         check("missing everywhere -> None", r.find("docs", "nope"), None)
         legacy = proj / ".rosetta" / "docs" / "legacy-kb"
         legacy.mkdir(parents=True)
         found = r.find("docs", "legacy-kb")
-        check("finds project-local legacy KB", found and found["path"], str(legacy))
-        check("records which root answered", found and found["tier"], "search:project")
-        preferred = central / ".rosetta" / "docs" / "legacy-kb"
+        check("finds legacy project KB", found and found["path"], str(legacy))
+        check("records legacy tier", found and found["tier"], "legacy-project")
+        preferred = proj / "kb" / "graphs" / "legacy-kb"
         preferred.mkdir(parents=True)
         found = r.find("docs", "legacy-kb")
         check("configured root wins once populated", found and found["path"], str(preferred))
@@ -509,35 +637,39 @@ def selftest() -> int:
         deep.mkdir(parents=True)
         check("nested cwd anchors at repo root", Resolver(deep, home).project, proj)
 
-        print("── init is idempotent and never clobbers ──")
+        print("── init creates the device home and never invents roots ──")
         h2 = tmp / "home2"
         cmd_init(h2)
+        check("home created", (h2 / "bin").is_dir(), True)
+        check("init writes no roots", (h2 / "config.json").exists(), False)
         _write(h2 / "config.json", {"version": 1, "roots": {"default": "device"}, "mine": True})
         cmd_init(h2)
         kept = json.loads((h2 / "config.json").read_text())
-        check("existing config preserved", kept.get("mine"), True)
+        check("existing device file preserved", kept.get("mine"), True)
 
-        print("── CLI subprocess: path prints exactly one line ──")
+        print("── CLI subprocess: path prints exactly one line, and creates nothing ──")
         import subprocess
+        fresh = tmp / "fresh-proj"
+        (fresh / ".git").mkdir(parents=True)
+        _write(fresh / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS)})
         env = dict(os.environ, ROSETTA_HOME=str(home))
+        env.pop("ROSETTA_PROJECT", None)
         out = subprocess.run(
             [sys.executable, str(Path(__file__).resolve()), "path",
-             "--class", "research", "--slug", "demo", "--project", str(proj)],
+             "--class", "docs", "--slug", "demo", "--project", str(fresh)],
             capture_output=True, text=True, env=env)
         check("exit 0", out.returncode, 0)
         check("single line", len(out.stdout.strip().splitlines()), 1)
         check("expected path", out.stdout.strip(),
-              str(central / ".rosetta" / "research" / "demo.md"))
+              str(fresh / ".rosetta" / "docs" / "demo"))
+        check("path created nothing", (fresh / ".rosetta" / "docs").exists(), False)
 
         print("── --ensure creates the directory ──")
-        target = Path(r.artifact("research", "made")["path"]).parent
-        if target.exists():
-            shutil.rmtree(target)
         subprocess.run(
             [sys.executable, str(Path(__file__).resolve()), "path", "--class", "research",
-             "--slug", "made", "--project", str(proj), "--ensure"],
+             "--slug", "made", "--project", str(fresh), "--ensure"],
             capture_output=True, text=True, env=env)
-        check("dir created", target.is_dir(), True)
+        check("dir created", (fresh / ".rosetta" / "research").is_dir(), True)
 
         print("── plugin root: pointer file, env override, and honest failure ──")
         fake_plugin = tmp / "fake-plugin"
@@ -619,7 +751,7 @@ def selftest() -> int:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         prog="rosetta_config.py",
-        description="Resolve where Rosetta artifacts are stored (project / device / any path).")
+        description="Resolve where Rosetta artifacts live, from the repo's version 2 config.")
     ap.add_argument("--selftest", action="store_true", help="run real-filesystem selftests")
     sub = ap.add_subparsers(dest="verb")
 
@@ -628,11 +760,13 @@ def main(argv: list[str]) -> int:
         if slug:
             p.add_argument("--slug", required=True)
             p.add_argument("--file", dest="filename", default=None,
-                           help="file within a docs/<slug>/ directory")
+                           help="file within a docs/<slug> (or agents/<slug>) directory")
         p.add_argument("--project", default=None, help="project dir (default: cwd)")
-        p.add_argument("--root", default=None, help="override every class")
+        p.add_argument("--root", default=None,
+                       help="explicit directory override for every class (not read from config)")
         for c in CLASSES:
-            p.add_argument(f"--{c}-root", dest=f"{c}_root", default=None)
+            p.add_argument(f"--{c}-root", dest=f"{c}_root", default=None,
+                           help=f"explicit directory override for {c} (not read from config)")
         p.add_argument("--ensure", action="store_true", help="create the directory if missing")
 
     common(sub.add_parser("path", help="absolute path for one artifact"), slug=True)
@@ -640,26 +774,26 @@ def main(argv: list[str]) -> int:
     common(sub.add_parser("find", help="read side: first existing copy, searching all roots"),
            slug=True)
 
-    p_show = sub.add_parser("show", help="resolved roots + provenance")
+    p_show = sub.add_parser("show", help="resolved paths + provenance")
     p_show.add_argument("--project", default=None)
     p_show.add_argument("--root", default=None)
     p_show.add_argument("--format", dest="fmt", choices=("json", "plain"), default="json",
-                        help="plain = one 'class dir [tier]' line per class")
+                        help="plain = one 'class dir [source]' line per class")
     for c in CLASSES:
         p_show.add_argument(f"--{c}-root", dest=f"{c}_root", default=None)
 
-    sub.add_parser("init", help="create $ROSETTA_HOME with a default config (idempotent)")
+    sub.add_parser("init", help="create $ROSETTA_HOME (device home + bin/; declares no roots)")
 
     p_plug = sub.add_parser("plugin", help="absolute path of the plugin checkout that owns engine/")
     p_plug.add_argument("--why", action="store_true", help="also print which tier resolved it")
 
-    p_doc = sub.add_parser("doctor", help="report stray artifacts; move them with --apply")
+    p_doc = sub.add_parser("doctor", help="report repos still using the legacy .rosetta layout")
     p_doc.add_argument("--project", default=None)
     p_doc.add_argument("--scan-root", action="append", default=None,
-                       help="where to look for strays (repeatable; default ~/Projects)")
+                       help="where to look for other repos (repeatable; default ~/Projects)")
     p_doc.add_argument("--apply", action="store_true", help="actually move (default: dry run)")
     p_doc.add_argument("--exclude", action="append", default=None,
-                       help="repo to leave alone (repeatable), e.g. a plugin's own dogfood tree")
+                       help="repo to leave alone (repeatable), e.g. the plugin's own tree")
 
     args = ap.parse_args(argv)
 
@@ -687,7 +821,11 @@ def main(argv: list[str]) -> int:
     cli_roots = {"default": getattr(args, "root", None)}
     for c in CLASSES:
         cli_roots[c] = getattr(args, f"{c}_root", None)
-    res = Resolver(Path(args.project) if args.project else None, None, cli_roots)
+    try:
+        res = Resolver(Path(args.project) if args.project else None, None, cli_roots)
+    except ConfigError as exc:
+        print(error_text(exc), file=sys.stderr)
+        return 2
 
     if args.verb == "doctor":
         scans = [Path(s) for s in (args.scan_root or [str(Path.home() / "Projects")])]
@@ -698,11 +836,8 @@ def main(argv: list[str]) -> int:
         data = res.show()
         if args.fmt == "plain":
             for cls, r in data["roots"].items():
-                # Show BOTH what decided it and what it decided — "[device]" alone is ambiguous
-                # when a device config sets the value "project".
-                why = f"{r['tier']}: {r['config_key']} = {r['root_value']}"
-                note = "  (FELL BACK — configured root not writable)" if r["fallback"] else ""
-                print(f"  {cls:<9} {r['dir']}\n            [{why}]{note}")
+                why = f"{r['tier']}: {r['config_key']} = {r['value']}"
+                print(f"  {cls:<9} {r['dir']}\n            [{why}]")
         else:
             print(json.dumps(data, indent=2))
         return 0
@@ -717,7 +852,7 @@ def main(argv: list[str]) -> int:
     if args.verb == "path":
         r = res.artifact(args.cls, args.slug, args.filename)
         if args.ensure:
-            parent = Path(r["path"]) if args.cls == "docs" and not args.filename \
+            parent = Path(r["path"]) if args.cls in ("docs", "agents") and not args.filename \
                 else Path(r["path"]).parent
             parent.mkdir(parents=True, exist_ok=True)
         print(r["path"])

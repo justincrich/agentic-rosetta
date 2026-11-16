@@ -115,9 +115,9 @@ def parse_nrra_frontmatter(text: str) -> dict:
     return meta
 
 
-# Set by main() when the docs directory came from rosetta_config.py rather than from --root.
-# None => <root>/.rosetta/docs. An explicit --root leaves this None, so every caller that pins a
-# root keeps byte-identical behavior.
+# Set by main() from the repo's version 2 config (via roots.choose). Never None in a real run:
+# a repo without a valid config is refused before any verb runs. None remains the module default
+# so importing this file (tests, tools) does not need a repo.
 _DOCS_DIR: Path | None = None
 
 
@@ -1015,14 +1015,15 @@ def main(argv: list[str]) -> int:
                         "_meta.composed_with with each graph's current kb_version")
     args = p.parse_args(argv)
 
-    # Where the KB goes is a CONFIGURED decision, not "wherever the shell happens to be
-    # standing". RT.choose lets --root/$ROSETTA_PROJECT win, else asks rosetta_config.py.
+    # Where the KB goes is a CONFIGURED decision: the repo's .rosetta/config.json names it.
+    # RT.choose pins WHICH repo (--root/$ROSETTA_PROJECT/cwd) and refuses when that repo has no
+    # valid config, so a missing config can never fall back to a guessed layout.
     global _DOCS_DIR
     root, _DOCS_DIR = RT.choose(args.root)
     if R is not None and args.root:
         R.set_repo_root(root)
     if _DOCS_DIR is not None:
-        if _DOCS_DIR != root / ".rosetta" / "docs":
+        if _DOCS_DIR != (root / ".rosetta" / "docs").resolve():
             print(f"write-graph: docs root from config: {_DOCS_DIR} (cwd is {root})",
                   file=sys.stderr)
         RT.warn_if_orphaned(_DOCS_DIR)

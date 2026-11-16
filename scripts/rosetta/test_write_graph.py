@@ -13,10 +13,42 @@ HERE = Path(__file__).resolve().parent
 WG = HERE / "write-graph.py"
 
 
+STANDARD_CONFIG = {
+    "version": 2,
+    "paths": {
+        "docs": ".rosetta/docs",
+        "research": ".rosetta/research",
+        "probes": ".rosetta/probes",
+        "agents": "agents",
+    },
+}
+
+# An empty $ROSETTA_HOME for every run: a device file must never decide a fixture's layout.
+DEVICE_HOME: Path | None = None
+
+
+def configure(root: Path, **paths: str) -> Path:
+    """Seed the version 2 config Rosetta requires. Every fixture repo carries one."""
+    values = dict(STANDARD_CONFIG["paths"], **paths)
+    (root / ".rosetta").mkdir(parents=True, exist_ok=True)
+    (root / ".rosetta" / "config.json").write_text(
+        json.dumps({"version": 2, "paths": values}, indent=2) + "\n")
+    return root
+
+
+def _env() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in ("ROSETTA_PROJECT", "ROSETTA_CONFIG", "ROSETTA_PLUGIN"):
+        env.pop(key, None)
+    if DEVICE_HOME is not None:
+        env["ROSETTA_HOME"] = str(DEVICE_HOME)
+    return env
+
+
 def run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(WG), *args],
-        capture_output=True, text=True, cwd=cwd,
+        capture_output=True, text=True, cwd=cwd, env=_env(),
     )
 
 
@@ -67,8 +99,11 @@ def main() -> int:
         if not ok:
             failures.append(f"{name} {detail}")
 
+    global DEVICE_HOME
     tmp = Path(tempfile.mkdtemp(prefix="rosetta-wg-"))
-    root = tmp / "proj"
+    DEVICE_HOME = tmp / "device-home"
+    DEVICE_HOME.mkdir()
+    root = configure(tmp / "proj")
     (root / ".git").mkdir(parents=True)
     nrra = tmp / "nrra.md"
     ledger = tmp / "ledger.json"
@@ -101,7 +136,7 @@ def main() -> int:
     check("check-fresh", c.returncode == 0, c.stderr)
 
     # --composed-with: stamp _meta.composed_with with the composed graph's kb_version
-    comp_root = tmp / "comp-proj"
+    comp_root = configure(tmp / "comp-proj")
     (comp_root / ".git").mkdir(parents=True)
     comp_docs = comp_root / ".rosetta" / "docs"
     (comp_docs / "rust").mkdir(parents=True)
@@ -131,10 +166,10 @@ def main() -> int:
         """A genuinely non-interactive run: stdin is /dev/null, so isatty() is False."""
         return subprocess.run(
             [sys.executable, str(WG), *args],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, env=_env(),
         )
 
-    compose_root = tmp / "compose-proj"
+    compose_root = configure(tmp / "compose-proj")
     (compose_root / ".git").mkdir(parents=True)
     cdocs = compose_root / ".rosetta" / "docs"
 
@@ -397,7 +432,7 @@ def main() -> int:
     # Composing Rust into an already-researched host is maintenance, not research. --create
     # and --update both demand a closed census ledger, so manufacturing one just to compose
     # would be a fake research artifact. --compose has no ledger and never creates a graph.
-    cv_root = tmp / "compose-verb-proj"
+    cv_root = configure(tmp / "compose-verb-proj")
     (cv_root / ".git").mkdir(parents=True)
     cvdocs = cv_root / ".rosetta" / "docs"
 
@@ -574,7 +609,7 @@ def main() -> int:
           f"(rc={c.returncode}) {c.stdout}{c.stderr}")
 
     # AC-3: a declaration whose original left the project fails closed, writing nothing
-    absent_root = tmp / "absent-proj"
+    absent_root = configure(tmp / "absent-proj")
     (absent_root / ".git").mkdir(parents=True)
     adocs = absent_root / ".rosetta" / "docs"
     r = run("--root", str(absent_root), "--create", "rust", "--nrra", str(nrra),
@@ -686,7 +721,7 @@ def main() -> int:
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "v"],
         cwd=repo, check=True, capture_output=True,
     )
-    pkg_root = tmp / "pkg-proj"
+    pkg_root = configure(tmp / "pkg-proj")
     rpkg = run("--root", str(pkg_root), "--create", "pkgtoy", "--nrra", str(nrra),
                "--ledger", str(ledger), "--source-repo", str(repo),
                "--out", str(pkg_root / ".rosetta" / "docs" / "pkgtoy" / "fact-graph.json"))
@@ -755,7 +790,7 @@ def main() -> int:
     check("mig-starts-heading", mig.lstrip().startswith("## "))
 
     # --- --apply-nrra: dest missing → create persist; dest present → add/change only ---
-    apply_root = tmp / "apply-proj"
+    apply_root = configure(tmp / "apply-proj")
     (apply_root / ".git").mkdir(parents=True)
     apply_dest = apply_root / ".rosetta" / "docs" / "toy" / "fact-graph.json"
     r_ac = run("--root", str(apply_root), "--apply-nrra", "toy",
@@ -843,7 +878,7 @@ def main() -> int:
     check("create-still-names-overwrite", "overwrite" in r_cr.stderr.lower() or "existing" in r_cr.stderr.lower())
 
     # legacy unstamped --check warns, does not fail
-    legacy_root = tmp / "legacy"
+    legacy_root = configure(tmp / "legacy")
     dest_l = legacy_root / ".rosetta" / "docs" / "old" / "fact-graph.json"
     dest_l.parent.mkdir(parents=True)
     dest_l.write_text(json.dumps({
@@ -884,7 +919,7 @@ def main() -> int:
     host, port = httpd.server_address[:2]
     docs_url = f"http://{host}:{port}/guide"
     try:
-        bf_root = tmp / "bf-proj"
+        bf_root = configure(tmp / "bf-proj")
         # docs graph
         docs_kb = bf_root / ".rosetta" / "docs" / "docsish"
         docs_kb.mkdir(parents=True)
@@ -1047,66 +1082,77 @@ def main() -> int:
     finally:
         httpd.shutdown()
 
-    # ── storage root comes from config, not from cwd ──────────────────────────────────────────
-    # REGRESSION: with no --root the writer used Path.cwd(), so the KB landed in whatever repo
-    # the session happened to be standing in and NO config setting could move it.
+    # ── the repo's config decides the storage root — not cwd, not a device file ──────────────
+    # REGRESSION 1: with no --root the writer used Path.cwd(), so the KB landed in whatever repo
+    # the session happened to be standing in and no config setting could move it.
+    # REGRESSION 2 (CONFIG-01): a machine-wide device file decided every repo's layout, so no
+    # repo ever declared its own. Device roots are now ignored, with exactly one warning.
     cfg_home = tmp / "cfg-home"
-    (cfg_home / "bin").mkdir(parents=True)
-    central = tmp / "central-kb"
-    central.mkdir()
+    cfg_home.mkdir(parents=True)
     elsewhere = tmp / "elsewhere"
     (elsewhere / ".git").mkdir(parents=True)
 
     def run_in(cwd: Path, env_extra: dict, *args: str) -> subprocess.CompletedProcess[str]:
-        env = dict(os.environ)
-        env.pop("ROSETTA_PROJECT", None)
-        env.pop("ROSETTA_CONFIG", None)
+        env = _env()
         env.update({k: str(v) for k, v in env_extra.items()})
         return subprocess.run([sys.executable, str(WG), *args],
                               capture_output=True, text=True, cwd=str(cwd), env=env)
 
-    (cfg_home / "config.json").write_text(json.dumps(
-        {"version": 1, "roots": {"default": "project", "docs": str(central)}}))
-
-    r = run_in(elsewhere, {"ROSETTA_HOME": cfg_home},
-               "--create", "cfgtoy", "--nrra", str(nrra), "--ledger", str(ledger))
+    # a custom layout in the repo's own config decides where the graph goes
+    custom = configure(tmp / "custom-repo", docs="kb/graphs", research="kb/research",
+                       probes="kb/probes", agents="prompts")
+    r = run_in(custom, {}, "--create", "cfgtoy", "--nrra", str(nrra), "--ledger", str(ledger))
     check("cfg-create-ok", r.returncode == 0, r.stdout + r.stderr)
-    check("cfg-goes-to-configured-root",
-          (central / ".rosetta" / "docs" / "cfgtoy" / "fact-graph.json").is_file(),
+    check("cfg-goes-to-configured-docs",
+          (custom / "kb" / "graphs" / "cfgtoy" / "fact-graph.json").is_file(),
           r.stdout + r.stderr)
-    check("cfg-does-not-touch-cwd",
-          not (elsewhere / ".rosetta").exists(),
-          str(list(elsewhere.rglob("*"))))
+    check("cfg-creates-no-legacy-docs", not (custom / ".rosetta" / "docs").exists(),
+          str(list(custom.rglob("*"))))
 
-    # roots.docs = "device": the configured root IS the .rosetta dir — no nested .rosetta.
+    # a device file that sets a docs root moves nothing, and says so once
+    device_kb = tmp / "device-kb"
+    device_kb.mkdir()
     (cfg_home / "config.json").write_text(json.dumps(
-        {"version": 1, "roots": {"default": "project", "docs": "device"}}))
-    r = run_in(elsewhere, {"ROSETTA_HOME": cfg_home},
+        {"version": 1, "roots": {"default": "project", "docs": str(device_kb)}}))
+    r = run_in(custom, {"ROSETTA_HOME": cfg_home},
                "--create", "devtoy", "--nrra", str(nrra), "--ledger", str(ledger))
-    check("cfg-device-ok", r.returncode == 0, r.stdout + r.stderr)
-    check("cfg-device-layout", (cfg_home / "docs" / "devtoy" / "fact-graph.json").is_file(),
+    check("cfg-device-create-ok", r.returncode == 0, r.stdout + r.stderr)
+    check("cfg-device-root-ignored",
+          (custom / "kb" / "graphs" / "devtoy" / "fact-graph.json").is_file(),
           r.stdout + r.stderr)
+    check("cfg-device-root-unused", not (device_kb / ".rosetta").exists(),
+          str(list(device_kb.rglob("*"))))
+    device_warnings = [ln for ln in r.stderr.splitlines() if "device roots are ignored" in ln]
+    check("cfg-device-one-warning", len(device_warnings) == 1, str(device_warnings))
 
-    # An explicit --root is an instruction and must still beat the config.
-    pinned = tmp / "pinned"
-    pinned.mkdir()
-    r = run_in(elsewhere, {"ROSETTA_HOME": cfg_home},
-               "--root", str(pinned), "--create", "pintoy",
+    # An explicit --root pins WHICH repo; that repo's config still decides the layout.
+    pinned = configure(tmp / "pinned")
+    r = run_in(elsewhere, {}, "--root", str(pinned), "--create", "pintoy",
                "--nrra", str(nrra), "--ledger", str(ledger))
     check("cfg-root-flag-wins",
           (pinned / ".rosetta" / "docs" / "pintoy" / "fact-graph.json").is_file(),
           r.stdout + r.stderr)
-    check("cfg-root-flag-skips-config",
-          not (cfg_home / "docs" / "pintoy").exists(), r.stdout + r.stderr)
+    check("cfg-root-flag-does-not-touch-cwd", not (elsewhere / ".rosetta").exists(),
+          str(list(elsewhere.rglob("*"))))
 
-    # $ROSETTA_PROJECT is also an explicit pin and beats the config.
-    envproj = tmp / "envproj"
-    envproj.mkdir()
-    r = run_in(elsewhere, {"ROSETTA_HOME": cfg_home, "ROSETTA_PROJECT": envproj},
-               "--create", "envtoy", "--nrra", str(nrra), "--ledger", str(ledger))
+    # $ROSETTA_PROJECT pins the repo the same way.
+    envproj = configure(tmp / "envproj")
+    r = run_in(elsewhere, {"ROSETTA_PROJECT": envproj}, "--create", "envtoy",
+               "--nrra", str(nrra), "--ledger", str(ledger))
     check("cfg-env-project-wins",
           (envproj / ".rosetta" / "docs" / "envtoy" / "fact-graph.json").is_file(),
           r.stdout + r.stderr)
+
+    # A repo with no config is refused: nothing written, the file named, the JSON printed.
+    bare_repo = tmp / "bare-repo"
+    (bare_repo / ".git").mkdir(parents=True)
+    r = run_in(bare_repo, {}, "--create", "noconf", "--nrra", str(nrra), "--ledger", str(ledger))
+    check("cfg-missing-nonzero", r.returncode != 0, f"rc={r.returncode}")
+    check("cfg-missing-names-file",
+          str(bare_repo / ".rosetta" / "config.json") in r.stderr, r.stderr)
+    check("cfg-missing-prints-json", '"version": 2' in r.stderr, r.stderr)
+    check("cfg-missing-writes-nothing", not (bare_repo / ".rosetta").exists(),
+          str(list(bare_repo.rglob("*"))))
 
     if failures:
         for f in failures:

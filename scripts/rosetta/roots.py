@@ -9,21 +9,17 @@ WHY THIS EXISTS
   ~/.rosetta/config.json changed it, because neither script ever read that file.
 
   rosetta_config.py already owns "where do artifacts go". This module is the bridge: it asks the
-  resolver for the docs class and hands both scripts the same answer.
+  resolver for a class and hands every script the same answer.
 
-PRECEDENCE for the docs directory (first that yields a value wins)
-  1. --root DIR            caller pinned a repo   -> <root>/.rosetta/docs   (overrides config)
-  2. $ROSETTA_PROJECT      caller pinned a repo   -> <root>/.rosetta/docs   (overrides config)
-  3. rosetta_config.py     roots.docs             -> whatever it resolves to
-  4. cwd                   resolver unavailable   -> <cwd>/.rosetta/docs    (pre-config behavior)
+THE CONTRACT
+  Rosetta runs only in a repo with its own version 2 config at <repo>/.rosetta/config.json.
+  This bridge therefore FAILS CLOSED: when the resolver refuses (no config, invalid path), its
+  message is printed verbatim and the calling script exits non-zero. There is no silent fallback
+  to `<cwd>/.rosetta/docs` — that fallback is exactly the behaviour the config requirement
+  replaced, and it hid the missing config instead of reporting it.
 
-  Tiers 1-2 are an explicit instruction and must beat the config, or --root would be a lie.
-  Tier 4 is honest degradation: if the resolver cannot answer, behave exactly as before rather
-  than inventing a root of our own.
-
-NOTE the layout is NOT always <root>/.rosetta/docs. With roots.docs = "device" the configured
-root IS the .rosetta directory, so the KB lives at $ROSETTA_HOME/docs/<tech>. That is precisely
-why tier 3 asks the resolver for a DIRECTORY instead of decorating a repo root here.
+  `--root` / `$ROSETTA_PROJECT` still pin WHICH repo a run is about. The layout inside that repo
+  always comes from its config, never from where the shell stands.
 """
 from __future__ import annotations
 
@@ -50,47 +46,78 @@ def resolver_path() -> Path | None:
     return None
 
 
-def resolved_docs_dir(warn: bool = True) -> Path | None:
-    """Ask rosetta_config.py where the docs class lives. None if it cannot answer."""
+def resolved_dir(cls: str, project: Path, warn: bool = True) -> Path:
+    """Ask rosetta_config.py where `cls` lives in `project`. Refuses rather than guesses.
+
+    Raises SystemExit with the resolver's exit code (and its message on stderr) when the repo
+    has no valid config. Callers must not catch this to fall back: a missing config is the
+    user's answer to "where should this go", and inventing one writes a KB nobody can find.
+    """
     r = resolver_path()
     if r is None:
-        if warn:
-            print("rosetta-roots: WARN: rosetta_config.py not found; falling back to cwd",
-                  file=sys.stderr)
-        return None
+        print("rosetta-roots: ERROR: rosetta_config.py not found. Re-run install.sh from the "
+              "plugin checkout, or set $ROSETTA_CONFIG.", file=sys.stderr)
+        raise SystemExit(2)
     try:
         out = subprocess.run(
-            [sys.executable, str(r), "root", "--class", "docs"],
+            [sys.executable, str(r), "root", "--class", cls, "--project", str(project)],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        if warn:
-            print(f"rosetta-roots: WARN: resolver failed ({exc}); falling back to cwd",
-                  file=sys.stderr)
-        return None
+        print(f"rosetta-roots: ERROR: resolver failed ({exc})", file=sys.stderr)
+        raise SystemExit(2) from None
     lines = [ln for ln in (out.stdout or "").strip().splitlines() if ln.strip()]
     if out.returncode != 0 or not lines:
-        if warn:
-            detail = (out.stderr or "").strip() or f"exit {out.returncode}"
-            print(f"rosetta-roots: WARN: resolver gave no docs root ({detail}); "
-                  f"falling back to cwd", file=sys.stderr)
-        return None
+        detail = (out.stderr or "").strip() or f"rosetta_config.py root exited {out.returncode}"
+        print(detail, file=sys.stderr)
+        raise SystemExit(out.returncode if out.returncode > 0 else 2)
+    # The resolver's warnings are for the person running the command (a device file that sets
+    # roots, for example). Swallowing them would make the warning invisible through every
+    # script that goes through this bridge.
+    if (out.stderr or "").strip():
+        print(out.stderr.strip(), file=sys.stderr)
+    if warn and len(lines) > 1:
+        print(f"rosetta-roots: WARN: resolver printed {len(lines)} lines; using the last",
+              file=sys.stderr)
     return Path(lines[-1]).expanduser().resolve()
+
+
+def resolved_docs_dir(project: Path | None = None, warn: bool = True) -> Path:
+    """The docs directory for `project` (default: cwd). See resolved_dir for the refusal."""
+    return resolved_dir("docs", project or _cwd_logical(), warn=warn)
+
+
+def _cwd_logical() -> Path:
+    """cwd in the spelling the caller used ($PWD) — os.getcwd() resolves symlinks.
+
+    The refusal message must name the path the operator typed, not its /private twin.
+    """
+    pwd = os.environ.get("PWD")
+    if pwd:
+        try:
+            if os.path.samefile(pwd, "."):
+                return Path(pwd)
+        except OSError:
+            pass
+    return Path.cwd()
 
 
 def choose(explicit_root: str | Path | None, warn: bool = True) -> tuple[Path, Path | None]:
     """Return (repo_root, docs_override).
 
     repo_root is what registry/agent lookups use — always a repo, never the KB store.
-    docs_override is the resolved docs DIRECTORY, or None to mean "<repo_root>/.rosetta/docs".
+    docs_override is the docs DIRECTORY from the repo's config. It is never None for a valid
+    repo: the config decides, so there is no "<repo_root>/.rosetta/docs" guess left here.
     """
     if explicit_root:
-        return Path(explicit_root).expanduser().resolve(), None
-    env = os.environ.get("ROSETTA_PROJECT")
-    if env:
-        return Path(env).expanduser().resolve(), None
-    root = Path.cwd().resolve()
-    return root, resolved_docs_dir(warn=warn)
+        repo = Path(explicit_root).expanduser()
+    elif os.environ.get("ROSETTA_PROJECT"):
+        repo = Path(os.environ["ROSETTA_PROJECT"]).expanduser()
+    else:
+        repo = _cwd_logical()
+    # Absolute but symlink-preserving, so a refusal names the path the caller passed in.
+    repo = Path(os.path.abspath(repo))
+    return repo, resolved_docs_dir(repo, warn=warn)
 
 
 def docs_dir(root: Path, override: Path | None) -> Path:
