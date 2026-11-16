@@ -65,9 +65,9 @@ validates less.
    "where does the KB go" and deliberately does not walk up, because a shell standing in a
    repo is already the answer it wants.
 2. **`write-graph.py` is the only mutator of `fact-graph.json`.** Gate before
-   `--create` / `--update`: ledger closed (closed + named-gap rows ==
-   censused), `run_id` matches the NRRA, `decoder_ring_hash` present on both.
-   Any miss: exit non-zero, write nothing, name the check.
+   `--create` / `--update` / `--apply-nrra`: ledger closed (closed + named-gap
+   rows == censused), `run_id` matches the NRRA, `decoder_ring_hash` present on
+   both. Any miss: exit non-zero, write nothing, name the check.
 3. **Changesets are dict-keyed-by-section**, not a list:
 
    ```json
@@ -103,6 +103,27 @@ validates less.
    fields on a legacy graph; no ledger. Backfill harvests on-disk locators
    and an optional judged `--sources` overlay. The writer never invents
    URLs.
+9. **Composition writes with no census ledger.** Composing one existing KB into
+   another is maintenance, not research; manufacturing a ledger to satisfy rule
+   2 would be a fake research artifact. So:
+
+   - `--compose <host> --from <slugs>` copies the named originals **by value**
+     into an **already existing** graph, and never creates one (no host → exit
+     `2`). It refuses a diverged copy without `--force` (exit `10`, writes
+     nothing), and skips a host already current at that edition unless
+     `--force`. `--ledger` / `--nrra` / `--changeset` are usage errors here.
+   - `--propagate <graph>` re-copies one original's facts into its borrowers
+     (every graph that declares it or already carries a copy), and refuses to
+     write without `--confirm` when stdin is not a terminal. `--list` prints
+     each borrower's recorded and current edition, then exits `0` without
+     prompting or writing (`1` when nobody borrows it); a borrower already
+     current is skipped unless `--force`.
+   - `--check-composed <tech>` compares each recorded copy against its original,
+     offline: `0` current, `1` composes nothing, `10` stale / diverged / missing
+     — the same `10` as `provenance.py --check-stale` — and `2` a real error.
+
+   All three read the originals; `--check-composed` writes nothing at all, and
+   neither writer ever writes the original it reads.
 
 ## Verify
 
