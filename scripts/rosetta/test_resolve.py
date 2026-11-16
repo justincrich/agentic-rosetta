@@ -46,6 +46,13 @@ STANDARD_PATHS = {
     "agents": "agents",
 }
 
+CLASSES = ("docs", "research", "probes", "agents")
+
+# The registry-pruned names AC-4 requires `paths.docs` to refuse. Mirrored from the contract
+# on purpose: the assertion is that the resolver refuses all four, not that it agrees with a
+# set it also owns.
+PRUNED_DOC_NAMES = ("tmp", "research", "sandbox", ".history")
+
 
 @contextmanager
 def _env(project: str | None):
@@ -202,16 +209,35 @@ def check_config_contract(tmp: Path, failures: list[str]) -> None:
     must("ac3-custom-show-names-config",
          "[config: paths.docs = kb/graphs]" in proc.stdout, proc.stdout)
 
-    # ── AC-4: one real temp repo per bad value kind ──────────────────────────
+    # ── AC-4: the full bad-config matrix, one real temp repo per case ────────
+    # The requirement is a matrix, so the assertion is a matrix: every one of the four keys
+    # missing, every bad value kind applied to every key, and every registry-pruned docs
+    # name. A resolver that requires only `agents`, validates only `docs`, or prunes only
+    # `tmp` refuses nothing here and fails this section - which is the whole point of it.
     bad: list[tuple[str, dict, str]] = []
-    cfg_missing_agents = standard_config()
-    del cfg_missing_agents["paths"]["agents"]
-    bad.append(("ac4-missing-agents", cfg_missing_agents, "paths.agents"))
-    bad.append(("ac4-absolute", standard_config(docs="/abs/graphs"), "paths.docs"))
-    bad.append(("ac4-tilde", standard_config(docs="~/graphs"), "paths.docs"))
-    bad.append(("ac4-device", standard_config(docs="device"), "paths.docs"))
-    bad.append(("ac4-dotdot", standard_config(docs="../graphs"), "paths.docs"))
-    bad.append(("ac4-pruned", standard_config(docs="tmp/graphs"), "paths.docs"))
+
+    # Missing key: refused BY NAME, for each of the four keys.
+    for key in CLASSES:
+        cfg_missing = standard_config()
+        del cfg_missing["paths"][key]
+        bad.append((f"ac4-missing-{key}", cfg_missing, f"paths.{key}"))
+
+    # Bad value kind x key: the value checks must run for every key, not just docs.
+    bad_value_kinds = {
+        "absolute": "/abs/graphs",
+        "tilde": "~/graphs",
+        "device": "device",
+        "dotdot": "../graphs",
+    }
+    for key in CLASSES:
+        for kind, value in bad_value_kinds.items():
+            bad.append((f"ac4-{kind}-{key}", standard_config(**{key: value}),
+                        f"paths.{key}"))
+
+    # Registry-pruned docs name: one case per name, not one representative.
+    for pruned in PRUNED_DOC_NAMES:
+        bad.append((f"ac4-pruned-{pruned.lstrip('.')}",
+                    standard_config(docs=f"{pruned}/graphs"), "paths.docs"))
 
     for name, config, key in bad:
         repo = new_repo(tmp, name)
@@ -224,16 +250,26 @@ def check_config_contract(tmp: Path, failures: list[str]) -> None:
         must(f"{name}-no-stdout", proc.stdout.strip() == "", proc.stdout)
         must(f"{name}-no-outside-path", str(repo) not in proc.stdout, proc.stdout)
 
-    # a docs path that leaves the repo through a symlink
-    link_repo = new_repo(tmp, "ac4-symlink")
-    link_home = tmp / "ac4-symlink-home"
-    link_home.mkdir()
-    (link_repo / "escape").symlink_to("/tmp")
-    link_cfg = write_config(link_repo, standard_config(docs="escape/graphs"))
-    proc = run_cli([sys.executable, str(RESOLVER), "show"], link_repo,
-                   {"ROSETTA_HOME": link_home})
-    refusal("ac4-symlink", proc, link_cfg, key="paths.docs")
-    must("ac4-symlink-no-stdout", proc.stdout.strip() == "", proc.stdout)
+    # The sixth bad value kind needs a real symlink inside the repo: the path only leaves
+    # the repo once it is resolved, so no literal config value can express it.
+    for key in CLASSES:
+        name = f"ac4-symlink-{key}"
+        repo = new_repo(tmp, name)
+        home = tmp / f"{name}-home"
+        home.mkdir()
+        outside = tmp / f"{name}-outside"
+        outside.mkdir()
+        (repo / "escape").symlink_to(outside)
+        link_cfg = write_config(repo, standard_config(**{key: "escape/graphs"}))
+        proc = run_cli([sys.executable, str(RESOLVER), "show"], repo,
+                       {"ROSETTA_HOME": home})
+        refusal(name, proc, link_cfg, key=f"paths.{key}")
+        must(f"{name}-no-stdout", proc.stdout.strip() == "", proc.stdout)
+        must(f"{name}-no-outside-path", str(repo) not in proc.stdout, proc.stdout)
+
+    # 4 missing keys + (5 bad value kinds x 4 keys) + 4 pruned names = the 28 the contract
+    # names. Pinned so a future edit cannot quietly drop a dimension of the matrix.
+    same("ac4-matrix-case-count", len(bad) + len(CLASSES), 28)
 
     # ── AC-5: a device file never moves a root; it warns once ────────────────
     dev = new_repo(tmp, "device-repo")
