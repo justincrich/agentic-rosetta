@@ -12,9 +12,14 @@ The ``full`` render is front-loaded with REJECT rules and the role's most-critic
 facts that matter most land at the top of context (mitigating lost-in-the-middle).
 
 Graphs resolve in this order (see :func:`resolve_graph`):
-  1. agent-local  ``agents/{name}/kb/fact-graph.json``   (morph-cloud)
-  2. repo-shared  ``.rosetta/docs/{domain}/fact-graph.json``  (cloudflare-workers, flyio, …)
-  3. shared via   ``naming.SHARED_GRAPHS``  (cloudflare-rust → cloudflare-workers graph)
+  1. agent-local  ``agents/{name}/kb/fact-graph.json``              (morph-cloud)
+  2. legacy docs  ``docs/<docs-domain>/fact-graph.json``            (hetzner, rust, kotlin, …)
+  3. repo-shared  ``.rosetta/docs/{domain}/fact-graph.json``        (cloudflare-workers, flyio, …)
+
+Step 2 takes its folder name from ``naming.legacy_docs_domain()``, so the ``docs/`` slug can
+differ from the agent stem. Step 3 builds its path through :func:`fact_graph_path`, which
+applies the ``naming.SHARED_GRAPHS`` remap INSIDE the path (cloudflare-rust → the
+cloudflare-workers graph); the remap is not a third fallback of its own.
 
 kb_version is ``<version> @ <pinned_date> sha:<8>`` — a content hash so graph drift is detectable.
 
@@ -232,9 +237,14 @@ def begin_marker(
 
 
 def condensed_excerpt(graph: dict, domain: str) -> str:
-    """The ~10-line bootstrap. Mirrors the FACT GRAPH block currently hard-embedded in
-    agent.md so 'condensed' means the same thing whether delivered by agent.md or by the
-    toggle. Derived from the graph, not copy-pasted, so it cannot drift."""
+    """The ~10-line bootstrap. Fixed Cloudflare Workers copy, only lightly graph-aware.
+
+    The graph supplies the title (``_meta.technology``, else ``domain``), ``v.runtime`` and
+    three ``r.*_note`` lookups (``r_cpu_limits_note``, ``r_memory_128mb_note``,
+    ``r_storage_decision_matrix_note``). Everything else — entry points, key rules, the KV
+    consistency claim, ``compatibility_date`` — is literal text true of ``cloudflare-workers``,
+    which is also ``DEFAULT_DOMAIN``. A non-Cloudflare graph therefore gets Cloudflare advice;
+    see known problem #1 in ``docs/code-quality/known-problems.md``."""
     v = graph.get("v", {})
     r = graph.get("r", {})
     tech = graph.get("_meta", {}).get("technology", domain)
