@@ -47,6 +47,12 @@ WHY THE CONSUMER'S OWN PROJECTOR RUNS
   and their side effects), writing into a temporary ``HOME`` so nothing lands in the real
   ``~/.claude`` or ``~/.codex``.
 
+  Those rules now also exist here, as ``project_agents.py``, proven byte-for-byte against the
+  consumer's copy for all five targets (``test_project_agents.py``, AC-26). The publisher still
+  invokes the consumer's copy so a stage stays identical to that checkout's own projection
+  until the port takes over; it does share the port's target table, so "where this harness
+  reads its agents" has one home.
+
 HARNESS SIDE EFFECTS ARE DECLARED, NEVER SILENT
   Two targets do more on a device than write a file tree: the OpenCode target unpins
   ``agent.<name>.model`` in ``opencode.json``, and the Grok target rewrites
@@ -112,23 +118,19 @@ sys.path.insert(0, str(PLUGIN_ROOT / "scripts" / "rosetta"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from version_label import kb_edition  # noqa: E402  (shared home for the kb_version label)
 import doc_refs  # noqa: E402  (sibling: doc vendoring + citation rewrite)
+import project_agents  # noqa: E402  (sibling: the projector that owns the harness target table)
 
 SCHEMA = 1
 DEFAULT_STAGE = "worker/content"
 DEFAULT_TARGETS = ("claude", "codex")
-# Every target agentshare can project into a plain file tree. Each `dest` is what agentshare
-# itself uses, relative to $HOME, so a synced device lands files where its harness looks.
-# grok's dest is `agent-library`, NOT `agents`: Grok scans `~/.grok/agents/` and lists only the
-# first 64 agents it finds there, so agentshare writes to the library folder instead.
-SUPPORTED_TARGETS = ("claude", "codex", "opencode", "droid", "grok")
-TARGET_DEST = {
-    "claude": ".claude/agents",
-    "codex": ".codex/agents",
-    "opencode": ".config/opencode/agents",
-    "droid": ".factory/droids",
-    "grok": ".grok/agent-library",
-}
-TARGET_SUFFIX = {"claude": ".md", "codex": ".toml", "opencode": ".md", "droid": ".md", "grok": ".md"}
+# Every target the projector can write into a plain file tree, and where each harness reads it
+# relative to $HOME. Both answers live in `project_agents.py` (the projector): this table is what
+# a staged `targets/<t>/` tree and a synced device are laid out from, so a harness move is one
+# edit there. grok's dest is `agent-library`, NOT `agents`: Grok scans `~/.grok/agents/` and
+# lists only the first 64 agents it finds there, so the projector writes to the library instead.
+SUPPORTED_TARGETS = project_agents.TARGETS
+TARGET_DEST = dict(project_agents.TARGET_DEST)
+TARGET_SUFFIX = dict(project_agents.TARGET_SUFFIX)
 # What a target's projector does BESIDES writing its file tree. A file snapshot cannot carry a
 # config rewrite, so each one is declared and either repeated by the device sync
 # (`sync-applies`) or reported to the device as not done (`not-applied`). Nothing here is silent.
