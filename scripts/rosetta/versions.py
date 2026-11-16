@@ -186,10 +186,6 @@ COMPOSED_MISSING_COPY = "missing-copy"
 #: The declared original has no fact-graph in this project.
 COMPOSED_MISSING_ORIGINAL = "missing-original"
 
-#: Statuses that mean "this copy must not be overwritten silently".
-COMPOSED_PROBLEMS = frozenset({COMPOSED_STALE, COMPOSED_DIVERGED,
-                              COMPOSED_MISSING_COPY, COMPOSED_MISSING_ORIGINAL})
-
 
 def fact_fingerprint(facts: Any) -> str:
     """Digest of an exact set of copied facts. Key order and whitespace do not matter."""

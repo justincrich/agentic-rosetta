@@ -51,7 +51,7 @@ import json
 from enum import Enum
 from typing import Any
 
-from versions import COMPOSED_KEY, fact_fingerprint
+from versions import COMPOSED_KEY, SECTIONS, fact_fingerprint, verdict_of
 from version_label import kb_edition
 
 try:
@@ -72,10 +72,6 @@ VERDICTS = frozenset({"r", "nr", "REJECT"})
 
 #: Present in a graph that must never be written: it would truncate the embed region.
 END_SENTINEL = "rosetta-kb:end"
-
-#: Graph sections, in writer iteration order.
-SECTIONS = ("v", "w", "r", "a", "x", "t")
-
 
 class SchemaError(Exception):
     """A graph that must not be written. ``check`` names the failed gate."""
@@ -144,16 +140,6 @@ class FactGraph(BaseModel):
             for key, value in self.r.items()
             if not key.endswith("_note") and verdict_of(value) == verdict
         }
-
-
-def verdict_of(value: Any) -> str | None:
-    """A rule value may carry its verdict inline (``"REJECT"``) or as a dict field."""
-    if isinstance(value, dict):
-        found = value.get("verdict")
-        return str(found) if found is not None else None
-    if isinstance(value, str):
-        return value
-    return None
 
 
 def parse(graph: dict) -> FactGraph:
