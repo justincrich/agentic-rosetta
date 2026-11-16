@@ -77,7 +77,7 @@
           ]
         },
         "READERS-01": {
-          "status": "landed",
+          "status": "completed",
           "merge_sha": "162cf8f835cd62e8d287bf71357e09cdaa5b6f4c",
           "attempts": [
             {
@@ -110,8 +110,16 @@
           ]
         },
         "TECHFREE-01": {
-          "status": "pending",
-          "merge_sha": null
+          "status": "in_progress",
+          "merge_sha": null,
+          "attempts": [
+            {
+              "at": "2026-11-16T20:28:27.312603Z",
+              "kind": "implementer",
+              "ref": "ses_e19f47f9cffeWsEnOJpiAtxxyh",
+              "by": "sprint_handoff register-implementer"
+            }
+          ]
         },
         "HANDOFF-01": {
           "status": "pending",
