@@ -28,6 +28,18 @@ trap 'rm -rf "$TMP"' EXIT
 # --- build an isolated project root ---
 ROOT="$TMP/brain"
 mkdir -p "$ROOT/scripts/kb-delivery" "$ROOT/agents/cloudflare-workers-implementer" "$ROOT/.rosetta/docs/cloudflare-workers"
+# Every fixture repo carries the version 2 config Rosetta requires (see assets/rosetta_config.py).
+cat > "$ROOT/.rosetta/config.json" <<'JSON'
+{
+  "version": 2,
+  "paths": {
+    "docs": ".rosetta/docs",
+    "research": ".rosetta/research",
+    "probes": ".rosetta/probes",
+    "agents": "agents"
+  }
+}
+JSON
 cp "$HERE/generate_excerpt.py" "$ROOT/scripts/kb-delivery/"
 cp "$HERE/embed-graph.sh" "$ROOT/scripts/kb-delivery/"
 mkdir -p "$ROOT/scripts/rosetta"

@@ -62,6 +62,18 @@ def materialize(dest: Path) -> Path:
     (dest / "agents").mkdir(parents=True, exist_ok=True)
     (dest / ".git").mkdir(exist_ok=True)
 
+    # Every fixture project carries the version 2 config Rosetta requires. Without it the
+    # resolver refuses to run, so a fixture without one would test the refusal, not the tool.
+    (dest / ".rosetta" / "config.json").write_text(json.dumps({
+        "version": 2,
+        "paths": {
+            "docs": ".rosetta/docs",
+            "research": ".rosetta/research",
+            "probes": ".rosetta/probes",
+            "agents": "agents",
+        },
+    }, indent=2) + "\n", encoding="utf-8")
+
     # Real committed graphs.
     for slug, src_name in (
         ("cloudflare-workers", "cloudflare-workers.fact-graph.json"),

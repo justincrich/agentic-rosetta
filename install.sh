@@ -134,18 +134,12 @@ if [ -f "$SRC_ASSETS/rosetta_config.py" ]; then
     echo "  WARN: no engine/src/research.ts under $SCRIPT_DIR; plugin-root not recorded"
     echo "        /rosetta-research will STOP until the engine is present."
   fi
+  # Artifact locations come from the repo being worked on (<repo>/.rosetta/config.json), so
+  # install.sh must not write a device config: rosetta_config.py ignores device roots and warns.
   if [ -f "$ROSETTA_HOME_DIR/config.json" ]; then
-    echo "  config.json already present — left untouched"
+    echo "  config.json present — device roots are ignored; each repo declares its own"
   else
-    cat > "$ROSETTA_HOME_DIR/config.json" <<'JSON'
-{
-  "version": 1,
-  "roots": {
-    "default": "project"
-  }
-}
-JSON
-    echo "  created config.json (default: everything stays in the project)"
+    echo "  no device config written — each repo declares its own .rosetta/config.json"
   fi
   echo
 fi

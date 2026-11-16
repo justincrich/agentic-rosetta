@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -15,15 +16,47 @@ import provenance as P  # noqa: E402
 
 WG = HERE / "write-graph.py"
 
+STANDARD_CONFIG = {
+    "version": 2,
+    "paths": {
+        "docs": ".rosetta/docs",
+        "research": ".rosetta/research",
+        "probes": ".rosetta/probes",
+        "agents": "agents",
+    },
+}
+
+# A neutral empty device home: a fixture's layout comes from its own config, never from a
+# machine-wide file.
+DEVICE_HOME: Path | None = None
+
+
+def configure(root: Path) -> Path:
+    """Seed the version 2 config Rosetta requires. Every fixture repo carries one."""
+    (root / ".rosetta").mkdir(parents=True, exist_ok=True)
+    (root / ".rosetta" / "config.json").write_text(
+        json.dumps(STANDARD_CONFIG, indent=2) + "\n")
+    return root
+
+
+def _env() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in ("ROSETTA_PROJECT", "ROSETTA_CONFIG", "ROSETTA_PLUGIN"):
+        env.pop(key, None)
+    if DEVICE_HOME is not None:
+        env["ROSETTA_HOME"] = str(DEVICE_HOME)
+    return env
+
 
 def run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, str(WG), *args], capture_output=True, text=True)
+    return subprocess.run([sys.executable, str(WG), *args], capture_output=True, text=True,
+                          env=_env())
 
 
 def run_probe(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(HERE / "provenance.py"), *args],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=_env(),
     )
 
 
@@ -110,7 +143,10 @@ def main() -> int:
     check("never-000", P.derive_upstream_version()[0] is None)
     check("never-000-src", P.derive_upstream_version()[1] == "undetermined")
 
+    global DEVICE_HOME
     tmp = Path(__import__("tempfile").mkdtemp(prefix="rosetta-prov-"))
+    DEVICE_HOME = tmp / "device-home"
+    DEVICE_HOME.mkdir()
     # real git remote for ls-remote (no GitHub)
     remote = tmp / "remote.git"
     work = tmp / "work"
@@ -186,6 +222,7 @@ def main() -> int:
         check("repo-stale-names", any("moved" in x for x in (rr1.get("moved") or [])), str(rr1))
 
         # CLI twice current
+        configure(tmp / "proj")
         kb = tmp / "proj" / ".rosetta" / "docs" / "toy"
         kb.mkdir(parents=True)
         (kb / "provenance.json").write_text(json.dumps({"sources": [pin_docs]}, indent=2))
@@ -213,6 +250,7 @@ def main() -> int:
         check("engine-200-current-1", e1 == 0, str(er1))
         check("engine-200-current-2", e2 == 0 and er2 == er1, str(er2))
 
+        configure(tmp / "proj2")
         kb2 = tmp / "proj2" / ".rosetta" / "docs" / "eng"
         kb2.mkdir(parents=True)
         (kb2 / "provenance.json").write_text(json.dumps({"sources": [eng]}, indent=2))
