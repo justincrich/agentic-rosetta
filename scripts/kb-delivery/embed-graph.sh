@@ -32,11 +32,10 @@ set -u
 
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" >/dev/null 2>&1 && pwd)"
 
-# Resolve the target project. Never hardcodes ~/Projects/brain.
-# --root / $ROSETTA_PROJECT win; else a script-parent that already has agents/
+# Resolve the target project. Never hardcodes a checkout path.
+# --root / $ROSETTA_PROJECT win; else a script-parent that already declares a config
 # (isolated fixture / in-tree copy); else cwd's git root; else cwd.
-# The plugin repo itself has no agents/, so a run from the plugin falls through
-# to the caller's project.
+# The plugin repo itself declares none, so a run from the plugin falls through to the caller.
 resolve_project_root() {
   if [ -n "${ROSETTA_ROOT_FLAG:-}" ]; then
     cd -P "${ROSETTA_ROOT_FLAG}" >/dev/null 2>&1 && pwd && return
@@ -46,7 +45,7 @@ resolve_project_root() {
   fi
   local script_project
   script_project="$(cd -P "$SCRIPT_DIR/../.." >/dev/null 2>&1 && pwd)"
-  if [ -d "$script_project/agents" ]; then
+  if [ -f "$script_project/.rosetta/config.json" ]; then
     printf '%s' "$script_project"
     return
   fi
@@ -78,13 +77,28 @@ while [ $# -gt 0 ]; do
 done
 set -- "${_NEW_ARGS[@]+"${_NEW_ARGS[@]}"}"
 
-BRAIN_ROOT="$(resolve_project_root)"
-export ROSETTA_PROJECT="$BRAIN_ROOT"
+PROJECT_ROOT="$(resolve_project_root)"
+export ROSETTA_PROJECT="$PROJECT_ROOT"
 GEN="$SCRIPT_DIR/generate_excerpt.py"
+ROOTS="$SCRIPT_DIR/../rosetta/roots.py"
 BEGIN_RGX='<!-- rosetta-kb:begin'
 END_MARKER='<!-- rosetta-kb:end -->'
 
-# Resolve an agent argument to its absolute agent dir under BRAIN_ROOT/agents.
+# Where this repo keeps its prompts: DECLARED by <repo>/.rosetta/config.json (paths.agents).
+# A repo with no config is refused by the resolver, and its message is what the caller sees —
+# there is no fallback to a directory named `agents`.
+require_agents_dir() {
+  if ! AGENTS_DIR="$(python3 "$ROOTS" --class agents --project "$PROJECT_ROOT")"; then
+    return 2
+  fi
+  if [ -z "$AGENTS_DIR" ]; then
+    echo "embed-graph: could not resolve paths.agents for $PROJECT_ROOT" >&2
+    return 2
+  fi
+  return 0
+}
+
+# Resolve an agent argument to its absolute agent dir under the configured agents directory.
 resolve_agent_dir() {
   local a="$1" name
   # Accept a path or a bare name.
@@ -94,7 +108,7 @@ resolve_agent_dir() {
   esac
   # If they passed the agent.md filename, step up.
   [ "$name" = "agent.md" ] && name="$(basename "$(dirname "$a")")"
-  local dir="$BRAIN_ROOT/agents/$name"
+  local dir="$AGENTS_DIR/$name"
   [ -d "$dir" ] || { echo "embed-graph: no such agent dir: $dir" >&2; return 2; }
   printf '%s' "$dir"
 }
@@ -108,7 +122,7 @@ agent_has_graph() {
 # List every graph-blessed agent name under agents/.
 list_graph_agents() {
   local d name
-  for d in "$BRAIN_ROOT"/agents/*/; do
+  for d in "$AGENTS_DIR"/*/; do
     [ -d "$d" ] || continue
     name="$(basename "$d")"
     if agent_has_graph "$name"; then
@@ -164,7 +178,7 @@ resolve_sync_targets() {
     local name kept=0
     while IFS= read -r name; do
       [ -z "$name" ] && continue
-      if [ -d "$BRAIN_ROOT/agents/$name" ] && [ -f "$BRAIN_ROOT/agents/$name/agent.md" ]; then
+      if [ -d "$AGENTS_DIR/$name" ] && [ -f "$AGENTS_DIR/$name/agent.md" ]; then
         printf '%s\n' "$name"
         kept=1
       fi
@@ -175,7 +189,7 @@ EOF
   fi
 
   # 2) Bare agent name → single-agent target.
-  if [ -d "$BRAIN_ROOT/agents/$target" ] && [ -f "$BRAIN_ROOT/agents/$target/agent.md" ]; then
+  if [ -d "$AGENTS_DIR/$target" ] && [ -f "$AGENTS_DIR/$target/agent.md" ]; then
     if agent_has_graph "$target"; then
       printf '%s\n' "$target"
       return 0
@@ -191,7 +205,7 @@ EOF
 # Generate the fresh embed block for an agent name → stdout. Fail-closed on missing graph.
 generate_block() {
   local name="$1"
-  python3 "$GEN" --root "$BRAIN_ROOT" --agent "$name" --embed || {
+  python3 "$GEN" --root "$PROJECT_ROOT" --agent "$name" --embed || {
     echo "embed-graph: could not render block for $name (graph missing/unreadable)" >&2
     return 2
   }
@@ -291,6 +305,9 @@ check_one() {
 
 main() {
   local mode="${1:-}"
+  if [ "$mode" != "-h" ] && [ "$mode" != "--help" ]; then
+    require_agents_dir || return $?
+  fi
   case "$mode" in
     --list)
       list_graph_agents
@@ -298,7 +315,7 @@ main() {
       ;;
     --all)
       local d rc=0 name
-      for d in "$BRAIN_ROOT"/agents/*/; do
+      for d in "$AGENTS_DIR"/*/; do
         [ -d "$d" ] || continue
         name="$(basename "$d")"
         agent_has_graph "$name" || continue
@@ -322,7 +339,7 @@ main() {
       while IFS= read -r name; do
         [ -z "$name" ] && continue
         # Capture stdout+stderr separately so failures surface by agent name (AC5).
-        if out="$(embed_one "$BRAIN_ROOT/agents/$name" 2>&1)"; then
+        if out="$(embed_one "$AGENTS_DIR/$name" 2>&1)"; then
           case "$out" in *updated*) echo "$out";; esac
         else
           rc=1
@@ -342,7 +359,7 @@ EOF
       local target="${2:-}" agent_dir rc=0 name
       if [ "$target" = "--all" ] || [ -z "$target" ]; then
         for name in $(list_graph_agents); do
-          check_one "$BRAIN_ROOT/agents/$name" || rc=1
+          check_one "$AGENTS_DIR/$name" || rc=1
         done
       else
         agent_dir="$(resolve_agent_dir "$target")" || return $?

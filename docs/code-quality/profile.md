@@ -1,6 +1,6 @@
 # Code organization plan — agentic-rosetta
 
-Stack pages: `~/Projects/brain/docs/clean-code/stacks/node-typescript.md` (engine).
+Stack pages: `docs/clean-code/stacks/node-typescript.md` (engine).
 No `python-stdlib-cli` stack page exists yet, so the Python rules below are derived from the code's
 own evidence and from the shared principles page, and are marked **not researched**.
 Last reviewed: 2026-11-04.

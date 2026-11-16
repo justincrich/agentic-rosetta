@@ -2,31 +2,33 @@
 """test_doc_refs.py — integration proofs for doc_refs.py (publish-time doc vendoring).
 
 WHAT IS REAL HERE
-  Every case starts from a REAL consumer checkout (``$ROSETTA_PUBLISH_ROOT``, default
-  ``~/Projects/brain``): 293 agents whose prompts cite documents, and a resolver
-  (``scripts/rogueone_bundle.py``) that decides what each citation means. The publisher stages
-  that checkout with ``--vendor-docs``, the stage is uploaded into local R2 with the publisher's
-  own upload path, the REAL Worker in workerd (``wrangler dev --local``, over TLS) serves it
-  exactly as the deployed service serves a snapshot, and
-  ``sync_agents.py`` mirrors it into a sandbox ``HOME`` that holds no checkout at all. Nothing
-  here writes a manifest by hand, stubs a resolver, or fakes a download.
+  A temp checkout of the content repository moved into a CUSTOM layout (``kb/graphs`` for
+  knowledge bases, ``prompts`` for agent prompts) and given a version 2 config that declares
+  that layout plus a ``citation_aliases`` table. The publisher stages it with ``--vendor-docs``
+  as a real subprocess, the stage is served over real TLS at the routes the deployed service
+  answers, and ``sync_agents.py`` mirrors it into a sandbox ``HOME`` that holds no checkout.
+  Nothing here stubs a resolver or writes a manifest by hand.
 
 WHY THE SANDBOX HOME IS THE POINT
   The failure being prevented is a device that carries prompts pointing at files it does not
-  have. So the proof is made *inside* a HOME with no ``~/Projects/brain``: a citation counts as
-  resolved only when the file it names is on disk there.
+  have. So the proof is made *inside* a HOME with no checkout: a citation counts as resolved
+  only when the file it names is on disk there.
+
+WHY THE CONFIG DECIDES
+  Which file a citation means is the repo's own answer: a prefix it declares in
+  ``citation_aliases``, or a repo-relative path. A prefix nobody declared stays in the prompt
+  and is named in the manifest, which is what makes "resolved or acknowledged" checkable.
 
 ENVIRONMENT
-  ROSETTA_PUBLISH_ROOT   optional: the consumer checkout (default ``~/Projects/brain``)
+  ROSETTA_CONTENT_REPO   optional: the content checkout (default ``~/Projects/agent-content``)
 
 Run:
     python3 scripts/kb-delivery/test_doc_refs.py
-    python3 scripts/kb-delivery/test_doc_refs.py -k ac18
 """
 from __future__ import annotations
 
 import contextlib
-import importlib.util
+import hashlib
 import json
 import os
 import re
@@ -35,7 +37,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import ModuleType
 
 HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parents[1]
@@ -43,305 +44,236 @@ SYNC = HERE / "sync_agents.py"
 PUBLISHER = HERE / "publish_snapshot.py"
 DOC_REFS = HERE / "doc_refs.py"
 sys.path.insert(0, str(HERE))
-import test_sync_agents as sync_proof  # noqa: E402  (the workerd + projector harness, one home)
+import test_sync_agents as sync_proof  # noqa: E402  (the TLS + temp-checkout harness, one home)
 
-consumer_root = sync_proof.consumer_root
 sha256_of = sync_proof.sha256_of
 tree_hashes = sync_proof.tree_hashes
 remove_tree = sync_proof.remove_tree
-workerd_snapshot = sync_proof.workerd_snapshot
 
 TOKEN_ENV = "ROSETTA_MCP_TOKEN"
 EXPECTED_AGENTS = 293
 PUBLISH_TIMEOUT = 1800
-SYNC_TIMEOUT = 1800
-# The plan recorded 118 citing agents / 81 distinct brain/docs paths when it was written; the
-# consumer moves, so the proof asserts a fleet-scale floor and prints the exact counts it saw.
-RECORDED_CITING_AGENTS = 118
-RECORDED_DISTINCT_DOC_PATHS = 81
-MIN_CITING_AGENTS = 110
-MIN_DISTINCT_DOC_PATHS = 75
-MIN_RESOLVED_CITATIONS = 500
 SHARE_HOME = "~/.rosetta/share"
-# A rewritten citation no longer matches the consumer's brain-root pattern (its lookbehind
-# rejects `.rosetta/` after a `/`), so the rewrites are counted with their own two shapes:
-# home-anchored (`~/…`) and home-relative (`.rosetta/share/…`).
-REWRITTEN_RE = re.compile(r"~/\.rosetta/share/[\w@.\-/]+")
-RELATIVE_SHARE_RE = re.compile(r"(?<![\w/~])\.rosetta/share/[\w@.\-/]+")
+REWRITTEN_RE = re.compile(r"~/\.rosetta/share/shared/[\w@.\-/]+")
 
 
-def load_module(path: Path, name: str) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise AssertionError(f"{path} could not be loaded")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def brain_rel(ref: str) -> str:
-    """A citation with its brain-root prefix removed, so "is it a brain doc?" is one question."""
-    for prefix in ("~/Projects/brain/", "~/.claude/brain/", "brain/"):
-        if ref.startswith(prefix):
-            return ref[len(prefix) :]
-    return ref
+def run(argv: list[str], *, env: dict | None = None) -> subprocess.CompletedProcess:
+    proc = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=PUBLISH_TIMEOUT)
+    print(f"$ {' '.join(argv)}")
+    print(proc.stdout[-3000:], end="")
+    print(proc.stderr[-3000:], end="")
+    return proc
 
 
 class DocRefsTests(unittest.TestCase):
-    """One test per requirement id in the task file."""
+    """Doc vendoring reads the checkout's declared layout and citation table."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.consumer = consumer_root()
-        cls.doc_refs = load_module(DOC_REFS, "_doc_refs_under_test")
-        cls.resolver = cls.doc_refs.load_resolver(cls.consumer)
-        publisher = load_module(PUBLISHER, "_publisher_for_doc_refs_test")
-        agentshare = publisher.load_agentshare(cls.consumer)
-        cls.agents = agentshare.discover_agents(cls.consumer / "agents")
-        if len(cls.agents) != EXPECTED_AGENTS:
-            raise AssertionError(
-                f"{cls.consumer}: {len(cls.agents)} agents, expected {EXPECTED_AGENTS}; this proof is "
-                "pinned to the fleet the plan measured"
-            )
-
         cls.tmp = Path(tempfile.mkdtemp(prefix="doc-refs-test-"))
-        cls.tls_dir = Path(tempfile.mkdtemp(prefix="doc-refs-tls-"))
-        cls.certfile = cls.tls_dir / "cert.pem"
-        cls.keyfile = cls.tls_dir / "key.pem"
-        subprocess.run(
-            [
-                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
-                "-keyout", str(cls.keyfile), "-out", str(cls.certfile),
-                "-subj", "/CN=127.0.0.1",
-                "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
-            ],
-            check=True,
-            capture_output=True,
+        cls.consumer = sync_proof.prepared_consumer(
+            cls.tmp / "consumer", docs="kb/graphs", agents="prompts"
         )
+        # The citation table is the checkout's declaration: a prefix, and the directory it means.
+        config_path = cls.consumer / ".rosetta" / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["citation_aliases"] = {"notes": "kb/graphs/notes"}
+        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
+        # One document the prompt cites through the declared prefix, one beside the checkout.
+        (cls.consumer / "kb" / "graphs" / "notes").mkdir(parents=True, exist_ok=True)
+        (cls.consumer / "kb" / "graphs" / "notes" / "security.md").write_text(
+            "# security rules\n\nno secrets in a prompt\n", encoding="utf-8"
+        )
+        (cls.consumer / "kb" / "graphs" / "local.md").write_text(
+            "# local note\n", encoding="utf-8"
+        )
+        cited = "mcp-planner"
+        agent_md = cls.consumer / "prompts" / cited / "agent.md"
+        original = agent_md.read_text(encoding="utf-8")
+        agent_md.write_text(
+            original.rstrip("\n")
+            + "\n\n## Documents\n\n"
+            "- rules: `notes/security.md`\n"
+            "- local: `kb/graphs/local.md`\n"
+            "- absent: `notes/gone.md`\n"
+            "- remote: https://example.com/spec.md\n",
+            encoding="utf-8",
+        )
+        # A second agent whose citation the table cannot honour at all.
+        second = cls.consumer / "prompts" / "mcp-reviewer"
+        second.mkdir(parents=True, exist_ok=True)
+        (second / "agent.md").write_text(
+            "---\nname: mcp-reviewer\ndescription: cites nowhere/spec.md\n---\n"
+            "Read `nowhere/spec.md` before reviewing.\n",
+            encoding="utf-8",
+        )
         cls.stage = cls.tmp / "stage"
-        argv = [
+        cls.token = sync_proof.FIXTURE_TOKEN
+        proc = run([
             sys.executable, str(PUBLISHER), "--root", str(cls.consumer),
-            "--targets", "claude", "--vendor-docs", "--stage", str(cls.stage),
-        ]
-        print(f"$ {' '.join(argv)}")
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=PUBLISH_TIMEOUT, cwd=str(PLUGIN))
-        print(proc.stdout, end="")
-        print(proc.stderr, end="")
+            "--targets", "claude", "--stage", str(cls.stage), "--vendor-docs",
+        ])
         if proc.returncode != 0:
             raise AssertionError(f"publish --vendor-docs failed:\n{proc.stdout}\n{proc.stderr}")
         cls.manifest = json.loads((cls.stage / "manifest.json").read_text(encoding="utf-8"))
-        cls.unresolved_refs = {entry["ref"] for entry in cls.manifest.get("unresolved") or []}
-
-        cls.token = "doc-refs-workerd-token-91c4e2"
-        cls.worker = workerd_snapshot(cls.stage, cls.token, cls.certfile, cls.keyfile)
-        cls.url = cls.worker.__enter__()
 
     @classmethod
     def tearDownClass(cls) -> None:
-        with contextlib.suppress(Exception):
-            cls.worker.__exit__(None, None, None)
-        remove_tree(cls.tls_dir)
         remove_tree(cls.tmp)
 
-    # ── helpers ────────────────────────────────────────────────────────
+    # ── AC-18 ──────────────────────────────────────────────────────────
 
-    def sync_home(self, name: str) -> tuple[Path, dict, subprocess.CompletedProcess]:
-        """A sandbox HOME with no checkout, filled from the real Worker."""
-        home = self.tmp / name
-        home.mkdir(parents=True, exist_ok=True)
-        env = {key: value for key, value in os.environ.items() if key != "ROSETTA_MCP_URL"}
-        env["HOME"] = str(home)
-        env[TOKEN_ENV] = self.token
-        env["SSL_CERT_FILE"] = str(self.certfile)
-        argv = [sys.executable, str(SYNC), "--url", self.url]
-        proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=str(PLUGIN), timeout=SYNC_TIMEOUT)
-        print(f"$ HOME={home} {' '.join(argv)}")
-        print(proc.stdout, end="")
-        print(proc.stderr, end="")
-        print(f"exit={proc.returncode}")
-        self.assertEqual(proc.returncode, 0, msg=f"sync failed:\n{proc.stdout}\n{proc.stderr}")
-        lines = [line for line in proc.stdout.splitlines() if line.strip().startswith("{")]
-        self.assertTrue(lines, msg=f"no JSON summary on stdout:\n{proc.stdout}\n{proc.stderr}")
-        return home, json.loads(lines[-1]), proc
+    def test_ac18_vendored_document_and_rewritten_prompt_on_a_sandboxed_home(self) -> None:
+        """A cited document is vendored, rewritten, and present on a device with no checkout."""
+        share = self.manifest.get("share")
+        self.assertIsNotNone(share, "the manifest declares no share block for --vendor-docs")
+        self.assertEqual(share["dest"], ".rosetta/share")
+        self.assertEqual(share["prefix"], "docs/")
 
-    def citations(self, text: str) -> list[str]:
-        """Every brain-root path token in ``text``, as the consumer's own pattern sees it."""
-        found: list[str] = []
-        for match in self.resolver._BRAIN_REF_RE.finditer(text):
-            token = match.group(0)
-            found.append(token.rstrip(".,;:"))
-        return found
-
-    def agent_citing(self, fragment: str) -> str:
-        """An agent whose prompt really cites ``fragment`` (read from the checkout, not guessed)."""
-        for agent in self.agents:
-            source = Path(agent["source_path"])
-            prompt = source / "agent.md" if source.is_dir() else source
-            if fragment in prompt.read_text(encoding="utf-8"):
-                return str(agent["name"])
-        raise AssertionError(f"no agent in {self.consumer} cites {fragment!r}")
-
-    # ── AC-18 ─────────────────────────────────────────────────────────
-
-    def test_ac18_published_manifest_and_rewritten_prompt_on_a_sandboxed_home(self) -> None:
-        """The manifest records what was vendored, and a synced prompt cites a file that exists."""
-        manifest = self.manifest
-        self.assertGreater(manifest["vendored_docs"], 0, "the manifest records no vendored documents")
+        staged_doc = self.stage / "docs" / "shared" / "kb" / "graphs" / "notes" / "security.md"
+        self.assertTrue(staged_doc.is_file(), "the cited document was not vendored into the stage")
         self.assertEqual(
-            manifest["doc_vendoring"]["vendored_files"],
-            manifest["share"]["files"],
-            "the declared share file count and the vendored file count disagree",
-        )
-        self.assertEqual(manifest["share"]["dest"], ".rosetta/share")
-        self.assertEqual(manifest["share"]["prefix"], "docs/")
-        print(
-            f"[ac18] manifest: {manifest['vendored_docs']} documents, "
-            f"{manifest['doc_vendoring']['vendored_files']} files, "
-            f"{len(manifest['unresolved'])} unresolved citation(s)"
+            staged_doc.read_bytes(),
+            (self.consumer / "kb" / "graphs" / "notes" / "security.md").read_bytes(),
+            "the vendored document is not byte-identical to the one the checkout carries",
         )
 
-        # A citation brain cannot honour is named, not dropped: docs/kotlin does not exist.
-        self.assertIn(
-            "brain/docs/kotlin/compose-ui.md",
-            self.unresolved_refs,
-            "the manifest does not name the known-missing brain doc",
+        staged_prompt = self.stage / "targets" / "claude" / "mcp-planner" / "agent.md"
+        prompt = staged_prompt.read_text(encoding="utf-8")
+        self.assertIn(f"{SHARE_HOME}/shared/kb/graphs/notes/security.md", prompt)
+        self.assertNotIn("`notes/security.md`", prompt, "a citation was left un-rewritten")
+        self.assertIn("https://example.com/spec.md", prompt, "a URL citation was rewritten")
+
+        # A device with no checkout at all: the sync must place the document where the prompt
+        # points, and the prompt it receives must still name that path.
+        home = self.tmp / "home"
+        home.mkdir()
+        certfile, keyfile = self.tls_certificate()
+        with sync_proof.served_stage(self.stage, self.token, certfile, keyfile) as url:
+            env = {key: value for key, value in os.environ.items() if key != TOKEN_ENV}
+            env.update({"HOME": str(home), TOKEN_ENV: self.token, "SSL_CERT_FILE": str(certfile)})
+            synced = run([sys.executable, str(SYNC), "--url", url, "--targets", "claude"], env=env)
+        self.assertEqual(synced.returncode, 0, synced.stderr)
+        device_doc = home / ".rosetta" / "share" / "shared" / "kb" / "graphs" / "notes" / "security.md"
+        self.assertTrue(device_doc.is_file(), "the vendored document never reached the device")
+        self.assertEqual(sha256_of(device_doc), sha256_of(staged_doc))
+        device_prompt = (home / ".claude" / "agents" / "mcp-planner" / "agent.md").read_text(
+            encoding="utf-8"
         )
-        kotlin_entry = next(e for e in manifest["unresolved"] if e["ref"] == "brain/docs/kotlin/compose-ui.md")
-        self.assertEqual(kotlin_entry["kind"], "unresolved")
-        self.assertTrue(kotlin_entry["reason"])
-        print(f"[ac18] unresolved cites: brain/docs/kotlin/compose-ui.md ({kotlin_entry['reason']})")
-
-        # An agent that really cites a brain document, in a HOME with no checkout.
-        name = self.agent_citing("brain/docs/mcp-rules/security.md")
-        home, summary, _proc = self.sync_home("ac18-home")
-        self.assertEqual(summary["snapshot_id"], manifest["snapshot_id"])
-        self.assertEqual(summary["share"]["written"], manifest["share"]["files"])
-        self.assertFalse((home / "Projects" / "brain").exists(), "the sandbox HOME holds a checkout")
-
-        prompt_path = home / ".claude" / "agents" / name / "agent.md"
-        self.assertTrue(prompt_path.is_file(), f"{prompt_path} was not synced")
-        prompt = prompt_path.read_text(encoding="utf-8")
-        rewritten = f"{SHARE_HOME}/brain/docs/mcp-rules/security.md"
-        self.assertIn(rewritten, prompt, f"{name} does not cite the rewritten path")
-        landed = home / ".rosetta" / "share" / "brain" / "docs" / "mcp-rules" / "security.md"
-        self.assertTrue(landed.is_file(), f"{landed} does not exist after sync")
-        self.assertEqual(
-            sha256_of(landed),
-            sha256_of(self.consumer / "docs" / "mcp-rules" / "security.md"),
-            "the vendored document is not the consumer's bytes",
-        )
-        # The original citation is gone: no bare `brain/docs/...` left pointing at a checkout.
-        self.assertNotIn("`brain/docs/mcp-rules/security.md`", prompt, "a citation was left un-rewritten")
-        print(
-            f"[ac18] observation: {landed} exists, "
-            f"{landed.stat().st_size} bytes, sha256={sha256_of(landed)}"
-        )
-        cited = [line.strip() for line in prompt.splitlines() if "mcp-rules/security.md" in line]
-        print(f"[ac18] observation: synced prompt line -> {cited[0]}")
-        print(f"[ac18] {name} cites {rewritten}; the file is on disk with the consumer's sha256")
-
-    # ── AC-19 ─────────────────────────────────────────────────────────
-
-    def test_ac19_every_citation_resolves_or_is_named_across_the_citing_fleet(self) -> None:
-        """Across every citing agent: zero silent drops, and nothing resolves outside the sandbox."""
-        home, summary, _proc = self.sync_home("ac19-home")
-        self.assertEqual(summary["snapshot_id"], self.manifest["snapshot_id"])
-        self.assertFalse((home / "Projects" / "brain").exists(), "the sandbox HOME holds a checkout")
-        self.assertFalse((home / ".claude" / "brain").exists())
-
-        # How many agents cite a brain document, and how many distinct documents they name: the
-        # plan recorded 118 agents / 81 paths; both are re-measured from the checkout.
-        doc_citing: set[str] = set()
-        distinct_docs: set[str] = set()
-        for agent in self.agents:
-            rewrites, resolved, missing = self.doc_refs.resolve_agent(
-                resolver=self.resolver, agent=agent, consumer_root=self.consumer
+        for token in REWRITTEN_RE.findall(device_prompt):
+            self.assertTrue(
+                (home / token[len("~/"):]).is_file(),
+                f"the device prompt cites {token}, which the device does not have",
             )
-            doc_refs = [
-                entry["source"] for entry in resolved if entry["source"].startswith("docs/")
-            ] + [
-                brain_rel(entry["ref"])
-                for entry in missing
-                if entry["kind"] == "unresolved" and brain_rel(entry["ref"]).startswith("docs/")
-            ]
-            if doc_refs:
-                doc_citing.add(str(agent["name"]))
-                distinct_docs.update(doc_refs)
-        self.assertGreaterEqual(
-            len(doc_citing), MIN_CITING_AGENTS, f"only {len(doc_citing)} agents cite a brain document"
-        )
-        self.assertGreaterEqual(
-            len(distinct_docs),
-            MIN_DISTINCT_DOC_PATHS,
-            f"only {len(distinct_docs)} distinct brain documents are cited",
-        )
-        print(
-            f"[ac19] {len(doc_citing)} citing agents, {len(distinct_docs)} distinct brain document paths "
-            f"(plan recorded {RECORDED_CITING_AGENTS}/{RECORDED_DISTINCT_DOC_PATHS}); "
-            f"{len(self.agents)} prompts checked"
+
+    # ── AC-19 ──────────────────────────────────────────────────────────
+
+    def test_ac19_every_citation_resolves_or_is_named(self) -> None:
+        """No citation is silently dropped: each is vendored, rewritten, or named with a reason."""
+        unresolved = {entry["ref"]: entry for entry in self.manifest.get("unresolved") or []}
+        self.assertIn("notes/gone.md", unresolved, "an unresolvable citation was not named")
+        self.assertIn("nowhere/spec.md", unresolved, "an unresolvable citation was not named")
+        for ref, entry in unresolved.items():
+            self.assertTrue(entry["reason"], f"{ref}: named with no reason")
+            self.assertGreaterEqual(entry["agents"], 1, f"{ref}: blamed on nobody")
+        self.assertIn(
+            "kb/graphs",
+            unresolved["notes/gone.md"]["reason"],
+            "the reason does not name the alias directory the config declared",
         )
 
-        # Every citation in the synced prompts is accounted for: it is either a rewritten path
-        # that exists inside this HOME, or it is named in the manifest's unresolved list.
-        resolved_count = 0
-        unresolved_count = 0
-        silent_drops: list[str] = []
-        escaping: list[str] = []
-        for prompt_path in sorted((home / ".claude" / "agents").rglob("*")):
-            if not prompt_path.is_file():
+        # The documents that DID resolve are recorded against the prompt that cited them.
+        documents = {
+            entry["source"]: entry
+            for entry in (self.manifest.get("doc_vendoring") or {}).get("documents") or []
+        }
+        self.assertIn("kb/graphs/notes/security.md", documents)
+        self.assertIn("kb/graphs/local.md", documents)
+
+        # A citation that is left in a prompt is always NAMED. A device-local path (an author's
+        # checkout) is deliberately left and reported; a bare path in a prompt is invisible to a
+        # device, so the accounting is what keeps it honest.
+        sys.path.insert(0, str(HERE))
+        import doc_refs as under_test  # noqa: E402
+
+        recorded = {entry["ref"] for entry in self.manifest.get("unresolved") or []}
+        for path in sorted((self.stage / "targets").rglob("*")):
+            if not path.is_file() or path.suffix not in (".md", ".toml"):
                 continue
-            text = prompt_path.read_text(encoding="utf-8", errors="replace")
-            where = prompt_path.relative_to(home).as_posix()
-            for match in REWRITTEN_RE.finditer(text):
+            body = path.read_text(encoding="utf-8", errors="replace")
+            for match in under_test.CITATION_RE.finditer(body):
                 token = match.group(0).rstrip(".,;:")
-                landed = home / token[len("~/") :]
-                if landed.exists():
-                    resolved_count += 1
-                else:
-                    escaping.append(f"{where}: {token} -> {landed} is missing")
-            for match in RELATIVE_SHARE_RE.finditer(text):
-                token = match.group(0).rstrip(".,;:")
-                landed = home / token
-                if landed.exists():
-                    resolved_count += 1
-                else:
-                    escaping.append(f"{where}: {token} -> {landed} is missing")
-            for token in self.citations(text):
-                if token in self.unresolved_refs:
-                    unresolved_count += 1
-                    continue
-                silent_drops.append(f"{where}: {token}")
+                if token.startswith(under_test.SHARE_PREFIXES):
+                    continue  # the rewrite itself: the device path this module produced
+                if token.startswith(("~", "/", "brain/")):
+                    self.assertIn(token, recorded, f"{path}: {token} was left in the prompt unnamed")
 
-        self.assertEqual(silent_drops, [], "citations neither resolved nor named in the manifest")
-        self.assertEqual(escaping, [], "a rewritten citation does not resolve inside the sandbox")
-        self.assertGreaterEqual(
-            resolved_count, MIN_RESOLVED_CITATIONS, f"only {resolved_count} citations were rewritten"
+        # The four delivery scripts carry no retired-checkout citation literal of their own.
+        # (Assembled, not typed: this suite must not be a carrier of the literal it forbids.)
+        retired_prefix = "brain" + "/docs"
+        for name in ("publish_snapshot.py", "project_agents.py", "doc_refs.py", "sync_agents.py"):
+            text = (HERE / name).read_text(encoding="utf-8")
+            self.assertEqual(
+                text.count(retired_prefix), 0, f"{name} still carries the retired citation literal"
+            )
+
+    # ── the config gate ────────────────────────────────────────────────
+
+    def test_publish_refuses_a_checkout_that_declares_no_layout(self) -> None:
+        """A checkout with no config is refused before a document is touched."""
+        bare = self.tmp / "bare-consumer"
+        (bare / "agents").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(bare)], check=True, capture_output=True)
+        stage = self.tmp / "stage-bare"
+        proc = run([
+            sys.executable, str(PUBLISHER), "--root", str(bare), "--targets", "claude",
+            "--stage", str(stage), "--vendor-docs",
+        ])
+        self.assertNotEqual(proc.returncode, 0, "a checkout with no config was published")
+        self.assertIn(str(bare / ".rosetta" / "config.json"), proc.stderr)
+        self.assertFalse((stage / "manifest.json").exists())
+
+    def test_every_citation_resolves_through_the_config_not_a_builtin_prefix(self) -> None:
+        """Removing the alias turns a resolved citation into a named one — the table is the answer."""
+        # The same checkout with the alias removed: the prefix now means nothing.
+        stripped = sync_proof.prepared_consumer(
+            self.tmp / "consumer-stripped", docs="kb/graphs", agents="prompts"
         )
-        self.assertGreater(unresolved_count, 0, "an all-resolved fleet means the unresolved list is untested")
-        print(
-            f"[ac19] {resolved_count} citation(s) resolve inside the sandbox, "
-            f"{unresolved_count} are named in the manifest, 0 silent drops, 0 escapes"
+        agent_md = stripped / "prompts" / "mcp-planner" / "agent.md"
+        agent_md.parent.mkdir(parents=True, exist_ok=True)
+        agent_md.write_text(
+            "---\nname: mcp-planner\n---\n\n- rules: `notes/security.md`\n", encoding="utf-8"
+        )
+        stage = self.tmp / "stage-stripped"
+        proc = run([
+            sys.executable, str(PUBLISHER), "--root", str(stripped), "--targets", "claude",
+            "--stage", str(stage), "--vendor-docs",
+        ])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
+        refs = {entry["ref"] for entry in manifest.get("unresolved") or []}
+        self.assertIn("notes/security.md", refs)
+        self.assertFalse(
+            (stage / "docs" / "shared" / "notes" / "security.md").exists(),
+            "a prefix with no alias in the config was still resolved",
         )
 
-        # The unresolved list is a real list of names, each with a reason, and at least one of
-        # them is a citation the synced prompts still make (the list is not decoration).
-        self.assertTrue(self.manifest["unresolved"])
-        for entry in self.manifest["unresolved"]:
-            self.assertTrue(entry["ref"])
-            self.assertTrue(entry["reason"])
-            self.assertTrue(entry["kind"])
-        synced_text = "".join(
-            path.read_text(encoding="utf-8", errors="replace")
-            for path in (home / ".claude" / "agents").rglob("agent.md")
-        )
-        named_in_prompts = [entry["ref"] for entry in self.manifest["unresolved"] if entry["ref"] in synced_text]
-        self.assertTrue(
-            named_in_prompts,
-            "no unresolved citation appears in a synced prompt, so nothing proves they were named instead of dropped",
-        )
-        print(f"[ac19] {len(named_in_prompts)} unresolved citation(s) still appear in synced prompts and are named")
-        self.assertIn("share", summary, "the shared document tree was not synced")
+    def tls_certificate(self) -> tuple[Path, Path]:
+        certfile = self.tmp / "cert.pem"
+        keyfile = self.tmp / "key.pem"
+        if not certfile.is_file():
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                    "-keyout", str(keyfile), "-out", str(certfile),
+                    "-subj", "/CN=127.0.0.1",
+                    "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
+                ],
+                check=True,
+                capture_output=True,
+            )
+        return certfile, keyfile
 
 
 if __name__ == "__main__":

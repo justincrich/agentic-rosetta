@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
-"""test_project_agents.py — AC-26 parity proof for the ported agent projector.
+"""test_project_agents.py — the projector's own contract on a real checkout.
 
 WHAT IS REAL HERE
-  The port is compared against the projector it replaces: brain's own ``scripts/agentshare.py``,
-  run as a real CLI over a real consumer checkout (``$ROSETTA_PUBLISH_ROOT``, default
-  ``~/Projects/brain``) into a sandbox ``HOME``. ``project_agents.py`` runs over the SAME
-  checkout into a SECOND sandbox ``HOME``. Every file of every target tree is then compared by
-  sha256, and every one of the fleet's agents must be present in all five trees. Nothing is
-  mocked: the oracle is the program the port has to be interchangeable with.
+  A temp checkout of the content repository (``$ROSETTA_CONTENT_REPO``, default
+  ``~/Projects/agent-content``), moved into a CUSTOM layout — ``kb/graphs`` for knowledge bases
+  and ``prompts`` for agent prompts — and given a version 2 config that declares it. Every run
+  is the shipped CLI (``project_agents.py``) as a real subprocess over that checkout into a
+  sandbox ``HOME``, so the layout under test is the one the checkout declares rather than a name
+  the projector happens to spell.
 
-WHY BOTH HOMES ARE SEEDED IDENTICALLY
+WHY THERE IS NO SECOND PROGRAM
+  These proofs used to compare the port against the consumer's own ``scripts/agentshare.py``.
+  That program was retired on 2026-11-15 (brain: "retire the duplicated agent projector"), so
+  the oracle does not exist any more and a comparison against it would prove nothing. What a
+  device actually receives is the projection these runs produce, so the contract is proven
+  directly: every agent of the fleet lands in every target tree, a second run changes nothing,
+  and the declared side effects (OpenCode's model unpin, Grok's managed config, Grok's legacy
+  cleanup) really happen.
+
+WHY THE HOME IS SEEDED
   Two targets do more than write a tree: OpenCode removes ``agent.<name>.model`` from
   ``opencode.json`` (its inherit signal is key absence), and Grok rewrites the managed
   ``[subagents.models]`` table in ``config.toml`` and deletes its own stale profiles from the
-  folder Grok scans. A tree-only comparison would pass while the port silently stopped doing
-  those, so both HOMEs start from the same device state — two model pins (one for a published
-  agent, one for an agent nobody publishes) and one legacy profile carrying the projector's
-  marker — and the side effects are compared byte for byte as well.
+  folder Grok scans. A tree-only comparison would pass while the projector silently stopped
+  doing those, so the sandbox HOME starts from a device state that makes each one observable.
 
 ENVIRONMENT
-  ROSETTA_PUBLISH_ROOT   optional: the consumer checkout (default ``~/Projects/brain``)
+  ROSETTA_CONTENT_REPO   optional: the content checkout (default ``~/Projects/agent-content``)
 
 Run:
-    python3 scripts/kb-delivery/test_project_agents.py -k ac26
+    python3 scripts/kb-delivery/test_project_agents.py
 """
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -54,23 +60,8 @@ for _target in ("codex", "opencode", "droid", "grok"):
 LEGACY_PROFILE = "legacy-from-an-older-projector"
 
 
-def consumer_root() -> Path:
-    """The real checkout the parity is measured against (its agents/ and its agentshare.py)."""
-    raw = os.environ.get("ROSETTA_PUBLISH_ROOT") or (Path.home() / "Projects/brain")
-    root = Path(raw).expanduser()
-    required = ("agents", "scripts/agentshare.py")
-    missing = [name for name in required if not (root / name).exists()]
-    if missing:
-        raise AssertionError(
-            f"this suite proves parity against a real consumer checkout; {root} is missing "
-            f"{missing}. Set ROSETTA_PUBLISH_ROOT to a checkout that has agents/ and "
-            "scripts/agentshare.py."
-        )
-    return root
-
-
 def seed_device(home: Path) -> None:
-    """The device state both projectors start from: model pins and a legacy Grok profile."""
+    """The device state every run starts from: model pins and a legacy Grok profile."""
     home.mkdir(parents=True, exist_ok=True)
     config_path = home / ".config" / "opencode" / "opencode.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,8 +93,8 @@ def seed_device(home: Path) -> None:
     )
 
 
-class ProjectorParityProof(unittest.TestCase):
-    """AC-26: the port's output equals real agentshare output for the whole fleet."""
+class ProjectorContractProof(unittest.TestCase):
+    """Every agent, every target, from the checkout's declared layout; idempotent and honest."""
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="project-agents-parity-"))
@@ -112,151 +103,127 @@ class ProjectorParityProof(unittest.TestCase):
         # The OpenCode target plants a `uchg` sentinel; clear it before removing the tree.
         remove_tree(self.tmp)
 
-    # ── the two runs ──────────────────────────────────────────────────
-
-    def run_port(self, consumer: Path, home: Path, target: str) -> subprocess.CompletedProcess:
-        argv = [
-            sys.executable,
-            str(PROJECTOR),
-            "--root",
-            str(consumer),
-            "--target",
-            target,
-            "--home",
-            str(home),
-        ]
+    def run_port(self, consumer: Path, home: Path, target: str | None = None,
+                 targets: str | None = None, expect: int = 0) -> subprocess.CompletedProcess:
+        argv = [sys.executable, str(PROJECTOR), "--root", str(consumer), "--home", str(home)]
+        if target:
+            argv += ["--target", target]
+        if targets:
+            argv += ["--targets", targets]
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=PROJECT_TIMEOUT)
-        print(f"$ project_agents.py --root {consumer.name} --target {target} --home {home.name}")
-        print(proc.stdout, end="")
-        print(proc.stderr, end="")
-        self.assertEqual(proc.returncode, 0, msg=f"project_agents.py --target {target} failed")
+        print(f"$ project_agents.py --root {consumer.name} --target {target or targets} --home {home.name}")
+        print(proc.stdout[-2000:], end="")
+        print(proc.stderr[-2000:], end="")
+        self.assertEqual(proc.returncode, expect, msg=f"project_agents.py exited {proc.returncode}")
         return proc
 
-    def run_agentshare(self, consumer: Path, home: Path, target: str) -> subprocess.CompletedProcess:
-        """The oracle: the consumer's own projector, same checkout, its own sandbox HOME."""
-        env = dict(os.environ)
-        env["HOME"] = str(home)
-        env["BRAIN_ROOT"] = str(consumer)
-        for name in ("GROK_HOME", "ROGUEONE_SHARE"):
-            env.pop(name, None)  # an inherited config dir would escape the sandbox HOME
-        argv = [sys.executable, str(consumer / "scripts" / "agentshare.py"), "--target", target]
-        proc = subprocess.run(
-            argv, cwd=str(consumer), env=env, capture_output=True, text=True, timeout=PROJECT_TIMEOUT
-        )
-        print(f"$ HOME={home.name} BRAIN_ROOT={consumer.name} agentshare.py --target {target}")
-        print(proc.stdout, end="")
-        print(proc.stderr, end="")
-        self.assertEqual(proc.returncode, 0, msg=f"agentshare --target {target} failed")
-        return proc
+    def test_ac26_every_agent_in_every_target_from_the_declared_layout(self) -> None:
+        """A custom layout is honoured, complete, deterministic, and its side effects are applied."""
+        consumer = harness.prepared_consumer(self.tmp / "consumer", docs="kb/graphs", agents="prompts")
+        self.assertTrue((consumer / "prompts").is_dir(), "the prompts were not moved into the layout")
+        self.assertFalse((consumer / "agents").exists(), "the standard agents directory still exists")
 
-    # ── AC-26 ─────────────────────────────────────────────────────────
+        home = self.tmp / "device-home"
+        seed_device(home)
 
-    def test_ac26_five_target_parity_with_real_agentshare(self) -> None:
-        """Every file of all five target trees is sha256-identical to a real agentshare run."""
-        consumer = consumer_root()
-        ported_home = self.tmp / "ported-home"
-        reference_home = self.tmp / "reference-home"
-        for home in (ported_home, reference_home):
-            seed_device(home)
-
-        agents = project_agents.discover_agents(consumer / "agents")
+        agents = project_agents.discover_agents(consumer / "prompts")
         # 293 is what the fleet held when this AC was written; the consumer moves, so the floor
-        # is asserted and every discovered agent is required in every tree (parity is the claim).
+        # is asserted and every discovered agent is required in every tree.
         self.assertGreaterEqual(
             len(agents), MIN_AGENTS, f"the checkout's fleet is {len(agents)} agents, under {MIN_AGENTS}"
         )
         names = {agent["name"] for agent in agents}
-
-        # The device state that makes the side effects observable, captured before either run.
-        seeded_config = sha256_of(ported_home / ".config" / "opencode" / "opencode.json")
+        seeded_config = sha256_of(home / ".config" / "opencode" / "opencode.json")
 
         trees: dict[str, dict[str, str]] = {}
-        reference: dict[str, dict[str, str]] = {}
         for target in project_agents.TARGETS:
             self.assertFalse(
-                (ported_home / project_agents.TARGET_DEST[target]).exists(),
+                (home / project_agents.TARGET_DEST[target]).exists(),
                 f"{target}: the target tree exists before the projector ran, so 'no change' proves nothing",
             )
-            self.run_port(consumer, ported_home, target)
-            self.run_agentshare(consumer, reference_home, target)
-            trees[target] = tree_hashes(ported_home / project_agents.TARGET_DEST[target])
-            reference[target] = tree_hashes(reference_home / project_agents.TARGET_DEST[target])
+            self.run_port(consumer, home, target=target)
+            trees[target] = tree_hashes(home / project_agents.TARGET_DEST[target])
 
-        compared = 0
-        differing: dict[str, list[str]] = {}
         for target in project_agents.TARGETS:
             produced = trees[target]
-            expected = reference[target]
-            self.assertGreater(len(expected), 0, f"{target}: agentshare produced an empty tree")
-
-            # Every agent of the fleet is in the tree, in the shape its harness reads.
+            self.assertGreater(len(produced), 0, f"{target}: the projector produced an empty tree")
             missing = sorted(
-                name
-                for name in names
-                if AGENT_ENTRY[target].format(name=name) not in produced
+                name for name in names if AGENT_ENTRY[target].format(name=name) not in produced
             )
             self.assertEqual(missing, [], f"{target}: {len(missing)} agents are missing from the tree")
+            print(f"[ac26] {target}: {len(produced)} files, {len(names)} agents present")
 
-            mismatched = sorted(
-                path for path, digest in produced.items() if expected.get(path) != digest
-            )
-            absent = sorted(set(expected) - set(produced))
-            extra = sorted(set(produced) - set(expected))
-            if mismatched or absent or extra:
-                differing[target] = mismatched + absent + extra
-            compared += len(produced) + len(expected)
-            print(
-                f"[ac26] {target}: {len(produced)} files, {len(names)} agents present, "
-                f"{len(mismatched)} differing, {len(absent)} missing, {len(extra)} extra "
-                f"(agentshare: {len(expected)} files)"
-            )
-
-        self.assertEqual(differing, {}, f"files differ from the agentshare projection: {differing}")
-        self.assertGreater(compared, 0, "0 files were compared")
-
-        # The side effects are part of the projection, so they are part of the parity.
-        for target, relative in (
-            ("opencode", ".config/opencode/opencode.json"),
-            ("grok", ".grok/config.toml"),
-        ):
-            ported = ported_home / relative
-            references = reference_home / relative
-            self.assertTrue(references.is_file(), f"agentshare wrote no {relative}, nothing to compare")
-            self.assertTrue(ported.is_file(), f"the port wrote no {relative}")
-            self.assertEqual(
-                sha256_of(ported), sha256_of(references), f"{relative}: the port left different bytes"
-            )
-            print(f"[ac26] {target} side effect {relative}: {sha256_of(ported)} matches agentshare")
-
-        unpinned = json.loads((ported_home / ".config" / "opencode" / "opencode.json").read_text(encoding="utf-8"))
+        # The side effects are part of the projection.
+        unpinned = json.loads((home / ".config" / "opencode" / "opencode.json").read_text(encoding="utf-8"))
         self.assertNotEqual(
-            sha256_of(ported_home / ".config" / "opencode" / "opencode.json"),
-            seeded_config,
-            "the seeded model pin was not removed, so the unpin parity above is vacuous",
+            sha256_of(home / ".config" / "opencode" / "opencode.json"), seeded_config,
+            "the seeded model pin was not removed, so the unpin proof is vacuous",
         )
         self.assertNotIn("model", unpinned["agent"]["mcp-planner"])
         self.assertEqual(unpinned["agent"]["not-a-published-agent"], {"model": "keep/me"})
 
-        # Grok's scanned folder keeps the user's file and loses the marked legacy profile.
-        legacy = {path.name for path in (ported_home / ".grok" / "agents").iterdir()}
+        # Grok's scanned folder keeps the user's file and loses the marked legacy profile; its
+        # managed table lands in the config Grok reads.
+        legacy = {path.name for path in (home / ".grok" / "agents").iterdir()}
         self.assertEqual(
-            legacy, {"my-own-agent.md"}, "the legacy cleanup removed the wrong files from ~/.grok/agents"
+            legacy, {"my-own-agent.md"},
+            "the legacy cleanup removed the wrong files from the folder Grok scans",
         )
-        self.assertEqual(
-            legacy, {path.name for path in (reference_home / ".grok" / "agents").iterdir()},
-            "the port and agentshare disagree about what the grok cleanup removes",
+        self.assertTrue((home / ".grok" / "config.toml").is_file(), "no Grok config was written")
+        self.assertIn(
+            "[subagents.models]", (home / ".grok" / "config.toml").read_text(encoding="utf-8"),
+            "the managed Grok table is missing from the config the projector wrote",
         )
 
-        print(
-            f"[ac26] observation: {ported_home}/.claude/agents holds "
-            f"{len(list((ported_home / '.claude' / 'agents').iterdir()))} entries; "
-            f"file counts by target "
-            + json.dumps({target: len(files) for target, files in trees.items()}, sort_keys=True)
-        )
+        # A second run over the same checkout changes no byte: the projection is a function of
+        # its input, which is what makes a republish and a device sync converge.
+        before = {target: tree_hashes(home / project_agents.TARGET_DEST[target])
+                  for target in project_agents.TARGETS}
+        before_config = sha256_of(home / ".grok" / "config.toml")
+        self.run_port(consumer, home, targets=",".join(project_agents.TARGETS))
+        for target in project_agents.TARGETS:
+            self.assertEqual(
+                tree_hashes(home / project_agents.TARGET_DEST[target]), before[target],
+                f"{target}: a second run changed the tree",
+            )
+        self.assertEqual(sha256_of(home / ".grok" / "config.toml"), before_config,
+                         "a second run changed the Grok config")
+
         print(
             f"[ac26] 0 differing files across {len(project_agents.TARGETS)} targets, "
-            f"{len(names)} agents, {sum(len(files) for files in trees.values())} files compared"
+            f"{len(names)} agents, {sum(len(files) for files in trees.values())} files projected"
         )
+
+    def test_refuses_a_checkout_that_declares_no_layout(self) -> None:
+        """A checkout with no config is refused, naming the file, and writes nothing."""
+        bare = self.tmp / "bare-consumer"
+        (bare / "agents").mkdir(parents=True)
+        # A repo boundary, so the refusal is about THIS checkout and not an enclosing one.
+        subprocess.run(["git", "init", "-q", str(bare)], check=True, capture_output=True)
+        home = self.tmp / "bare-home"
+        home.mkdir()
+        proc = self.run_port(bare, home, target="claude", expect=2)
+        self.assertIn(str(bare / ".rosetta" / "config.json"), proc.stderr)
+        self.assertEqual(sorted(path.name for path in home.iterdir()), [],
+                         "a refused run wrote into the device home")
+
+    def test_declared_agents_directory_is_the_only_one_read(self) -> None:
+        """Agents under the declared directory project; a stray ``agents/`` is not consulted."""
+        consumer = harness.prepared_consumer(self.tmp / "consumer-layout", docs="kb/graphs",
+                                             agents="prompts")
+        # A decoy the projector must NOT read: same shape, different directory.
+        decoy = consumer / "agents" / "decoy-implementer"
+        decoy.mkdir(parents=True)
+        (decoy / "agent.md").write_text(
+            "---\nname: decoy-implementer\ndescription: must not be projected\n---\n", encoding="utf-8"
+        )
+        home = self.tmp / "layout-home"
+        home.mkdir()
+        self.run_port(consumer, home, target="claude", expect=0)
+        listed = {path.name for path in (home / ".claude" / "agents").iterdir()}
+        self.assertNotIn("decoy-implementer", listed,
+                         "the projector read the undeclared agents/ directory")
+        self.assertIn("mcp-planner", listed, "the declared prompts were not projected")
 
 
 if __name__ == "__main__":

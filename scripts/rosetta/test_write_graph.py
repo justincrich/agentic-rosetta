@@ -28,11 +28,16 @@ DEVICE_HOME: Path | None = None
 
 
 def configure(root: Path, **paths: str) -> Path:
-    """Seed the version 2 config Rosetta requires. Every fixture repo carries one."""
+    """Seed the version 2 config Rosetta requires. Every fixture repo carries one.
+
+    ``citation_aliases`` is declared here too: a local citation in a fixture graph is written
+    with the neutral prefix ``notes/``, and only the config says where that prefix points.
+    """
     values = dict(STANDARD_CONFIG["paths"], **paths)
     (root / ".rosetta").mkdir(parents=True, exist_ok=True)
     (root / ".rosetta" / "config.json").write_text(
-        json.dumps({"version": 2, "paths": values}, indent=2) + "\n")
+        json.dumps({"version": 2, "paths": values,
+                    "citation_aliases": {"notes": values["docs"]}}, indent=2) + "\n")
     return root
 
 
@@ -931,6 +936,12 @@ def main() -> int:
         (docs_kb / "README.md").write_text("# Docsish\n\n- **KB version**: 1.0.0 · **corpus**: 4f53cda1\n")
         bf = run("--root", str(bf_root), "--backfill", "docsish")
         check("backfill-docs-cli", bf.returncode == 0, bf.stdout + bf.stderr)
+        # AC-13: the seed table is gone from the plugin, so a slug with no --sources overlay
+        # reports ZERO seed sources — never an invented URL.
+        check("backfill-seeds-file-absent",
+              (HERE / "backfill-seeds.json").exists() is False,
+              str(HERE / "backfill-seeds.json"))
+        check("backfill-reports-zero-seeds", "seeds=0" in bf.stdout, bf.stdout)
         if not (docs_kb / "provenance.json").is_file():
             check("backfill-docs-wrote", False, bf.stdout + bf.stderr)
             httpd.shutdown()
@@ -1002,14 +1013,15 @@ def main() -> int:
         repo_pins = [p for p in (rprov.get("sources") or []) if p.get("kind") == "repo"]
         check("backfill-repo-commit", any(p.get("commit") == head for p in repo_pins), str(repo_pins))
 
-        # local-only graph
+        # local-only graph: the citation is written with the config's neutral prefix, and only
+        # the config's citation_aliases table says where that prefix points.
         local_kb = bf_root / ".rosetta" / "docs" / "localish"
         local_kb.mkdir(parents=True)
         local_doc = local_kb / "concept.md"
         local_doc.write_text("local concept v1\n")
         (local_kb / "fact-graph.json").write_text(json.dumps({
             "v": {"pkg": "localish", "kb_version": "1.0.0"},
-            "w": {"Thing": {"t": "sl", "i": "x", "src": "brain/docs/localish/concept.md"}},
+            "w": {"Thing": {"t": "sl", "i": "x", "src": "notes/localish/concept.md"}},
             "r": {}, "a": {}, "x": {}, "t": {},
         }))
         bl = run("--root", str(bf_root), "--backfill", "localish")
@@ -1153,6 +1165,37 @@ def main() -> int:
     check("cfg-missing-prints-json", '"version": 2' in r.stderr, r.stderr)
     check("cfg-missing-writes-nothing", not (bare_repo / ".rosetta").exists(),
           str(list(bare_repo.rglob("*"))))
+
+    # A custom layout named only by the config: the graph lands under paths.docs, nothing is
+    # created in the old layout, and the registry lists it at that path. (AC-8)
+    ac8 = configure(tmp / "ac8-custom", docs="kb/graphs", research="kb/research",
+                    probes="kb/probes", agents="prompts")
+    r = run_in(ac8, {}, "--create", "x", "--nrra", str(nrra), "--ledger", str(ledger))
+    check("ac8-create-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("ac8-graph-at-configured-docs",
+          (ac8 / "kb" / "graphs" / "x" / "fact-graph.json").is_file(), r.stdout + r.stderr)
+    check("ac8-no-legacy-docs", (ac8 / ".rosetta" / "docs").exists() is False,
+          str(sorted(p.name for p in (ac8 / ".rosetta").iterdir())))
+    check("ac8-no-agents-dir", (ac8 / "agents").exists() is False,
+          str(sorted(p.name for p in ac8.iterdir())))
+
+    # AC-9: changing ONLY paths.docs moves where the writer writes; the old directory is never
+    # touched again.
+    cfg_path = ac8 / ".rosetta" / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    before_graphs = sorted(p.relative_to(ac8).as_posix()
+                           for p in (ac8 / "kb" / "graphs").rglob("*"))
+    cfg["paths"]["docs"] = "kb/other"
+    cfg["citation_aliases"] = {"notes": "kb/other"}
+    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+    r = run_in(ac8, {}, "--create", "y", "--nrra", str(nrra), "--ledger", str(ledger))
+    check("ac9-create-exit0", r.returncode == 0, r.stdout + r.stderr)
+    check("ac9-goes-to-new-root",
+          (ac8 / "kb" / "other" / "y" / "fact-graph.json").is_file(), r.stdout + r.stderr)
+    check("ac9-does-not-touch-old-root",
+          sorted(p.relative_to(ac8).as_posix() for p in (ac8 / "kb" / "graphs").rglob("*"))
+          == before_graphs, r.stdout + r.stderr)
+    check("ac9-no-stray-old-graph", (ac8 / "kb" / "graphs" / "y").exists() is False)
 
     if failures:
         for f in failures:

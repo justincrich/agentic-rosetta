@@ -314,7 +314,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def resolve_local_path(src: str, root: Path | None, kb_dir: Path) -> Path | None:
+def resolve_local_path(
+    src: str,
+    root: Path | None,
+    kb_dir: Path,
+    aliases: dict[str, Path] | None = None,
+) -> Path | None:
+    """Resolve a local citation: the config's prefix table first, then the plain readings.
+
+    A citation is written the way the citing project spells it (``notes/widgets/vm.md``). Only
+    the project's own config says what that prefix means, so the table is data — there is no
+    built-in prefix in this module. The generic readings that follow (repo-relative,
+    kb-relative, basename) are how a citation beside the graph resolves; they never claim a
+    prefix.
+    """
     text = (src or "").strip()
     if not text or text.startswith(("http://", "https://", "file:")):
         return None
@@ -324,15 +337,14 @@ def resolve_local_path(src: str, root: Path | None, kb_dir: Path) -> Path | None
     if abs_p.is_file():
         return abs_p.resolve()
     if root:
+        for prefix in sorted(aliases or {}, key=len, reverse=True):
+            if text == prefix:
+                candidates.append(Path(aliases[prefix]))
+            elif text.startswith(prefix + "/"):
+                candidates.append(Path(aliases[prefix]) / text[len(prefix) + 1:])
         candidates.append(root / text)
-        if text.startswith("brain/docs/"):
-            candidates.append(root / ".rosetta" / "docs" / text[len("brain/docs/"):])
-        if text.startswith("docs/"):
-            candidates.append(root / ".rosetta" / "docs" / text[len("docs/"):])
     candidates.append(kb_dir / text)
     candidates.append(kb_dir / Path(text).name)
-    if text.startswith("docs/"):
-        candidates.append(kb_dir / text[len("docs/"):])
     for cand in candidates:
         try:
             if cand.is_file():
@@ -355,7 +367,12 @@ def _rel_locator(path: Path, root: Path | None, kb_dir: Path) -> str:
         return str(resolved)
 
 
-def harvest_locators(kb_dir: Path, graph: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
+def harvest_locators(
+    kb_dir: Path,
+    graph: dict[str, Any],
+    root: Path | None = None,
+    aliases: dict[str, Path] | None = None,
+) -> dict[str, Any]:
     """Collect locators from on-disk graph / README / history. No network."""
     docs: list[str] = []
     repos: list[str] = []
@@ -383,7 +400,7 @@ def harvest_locators(kb_dir: Path, graph: dict[str, Any], root: Path | None = No
 
     def add_fact(key: str, src: str) -> None:
         fact_sources[key] = src
-        resolved = resolve_local_path(src, root, kb_dir)
+        resolved = resolve_local_path(src, root, kb_dir, aliases)
         if not resolved:
             return
         loc = _rel_locator(resolved, root, kb_dir)
@@ -644,11 +661,15 @@ def plan_backfill(
     root: Path | None,
     seeds: dict[str, list[str]] | None = None,
     overlay: dict[str, Any] | None = None,
+    aliases: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
-    harvested = harvest_locators(kb_dir, graph, root)
+    harvested = harvest_locators(kb_dir, graph, root, aliases)
     docs = list(harvested["docs"])
     repos = list(harvested["repos"])
     local = list(harvested["local"])
+    # Seed sources come from an optional committed seeds file; with none, this is 0 and the
+    # report says so. The writer never invents a URL to fill the gap.
+    seed_urls: list[str] = []
     over_docs, over_repos = _split_overlay_urls((overlay or {}).get(kb_dir.name) or {})
     docs = over_docs + [u for u in docs if u not in over_docs]
     repos = over_repos + [u for u in repos if u not in over_repos]
@@ -657,6 +678,7 @@ def plan_backfill(
             url = sanitize_url(raw)
             if not url:
                 continue
+            seed_urls.append(url)
             if classify_locator(url) == "repo":
                 repos.append(url)
             else:
@@ -682,6 +704,7 @@ def plan_backfill(
     status = "backfill-now" if pins else "undeterminable"
     return {
         "pins": pins,
+        "seeds": seed_urls,
         "fact_sources": harvested["fact_sources"],
         "status": status,
         "failures": failures,
@@ -855,6 +878,13 @@ def load_provenance(root: Path, tech: str, docs_override: Path | None = None) ->
     if not path.is_file():
         raise FileNotFoundError(str(path))
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def citation_aliases(root: Path | None) -> dict[str, Path]:
+    """The repo's citation prefix table. Empty when the config declares none."""
+    if root is None:
+        return {}
+    return _roots().resolved_citation_aliases(root)
 
 
 def main(argv: list[str]) -> int:

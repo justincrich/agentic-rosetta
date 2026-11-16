@@ -20,13 +20,21 @@ THE CONTRACT
           "research": ".rosetta/research",
           "probes": ".rosetta/probes",
           "agents": "agents"
-        }
+        },
+        "citation_aliases": {"notes/": ".rosetta/docs/"}
       }
 
   All four path keys are required. Every value is a REPO-RELATIVE path: no absolute path, no
   `~` expansion, no `device`, no `..`, nothing that leaves the repo through a symlink.
   `paths.docs` may not pass through a name the registry prunes (tmp, research, sandbox,
   .history) — a knowledge base there is invisible to `registry.py`.
+
+  `citation_aliases` is optional. Each entry maps a citation PREFIX as it is written inside a
+  graph (``notes/widgets/vm.md``) to the repo-relative directory it really lives in
+  (``.rosetta/docs``). It is the only way a local citation resolves: the prefix table is data,
+  so a project that spells its citations differently declares it instead of patching code. The
+  value obeys the same rules as a path — absolute, `~`, `..` and a symlink escape are refused,
+  naming ``citation_aliases.<prefix>``.
 
   There is NO built-in default and NO device root. A missing or invalid config is a refusal
   (exit 2) that names the file and prints the JSON to create, never a silent fallback. A
@@ -224,6 +232,12 @@ def read_config(path: Path) -> dict:
 def _validate_path(key: str, value, repo: Path, config_path: Path) -> str:
     """One `paths.<key>` value: repo-relative, inside the repo, and visible to the registry."""
     label = f"paths.{key}"
+    return _repo_relative_value(label, value, repo, config_path, prune=key == "docs")
+
+
+def _repo_relative_value(label: str, value, repo: Path, config_path: Path,
+                         prune: bool = False) -> str:
+    """Shared rule for `paths.<key>` and `citation_aliases.<prefix>`. Names ``label`` on refusal."""
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{config_path}: {label} must be a non-empty string, got {value!r}")
     raw = value.strip()
@@ -247,7 +261,7 @@ def _validate_path(key: str, value, repo: Path, config_path: Path) -> str:
             f"{config_path}: {label} must be a path inside {repo}, got {raw!r} "
             f"('..' leaves the repo)"
         )
-    if key == "docs":
+    if prune:
         pruned = [part for part in Path(raw).parts if part in PRUNED_DOC_SEGMENTS]
         if pruned:
             raise ConfigError(
@@ -295,6 +309,43 @@ def validate_config(cfg: dict, config_path: Path, repo: Path) -> dict[str, str]:
     return resolved
 
 
+def validate_citation_aliases(cfg: dict, config_path: Path, repo: Path) -> dict[str, str]:
+    """Return {citation prefix: repo-relative dir}. Absent is fine; a bad entry is a refusal.
+
+    A prefix is matched against the start of a citation as written in a graph, so it keeps its
+    spelling (a trailing slash is dropped and re-added by the reader). The value is a directory
+    inside the repo, validated exactly like ``paths.<key>``.
+    """
+    aliases = cfg.get("citation_aliases")
+    if aliases is None:
+        return {}
+    if not isinstance(aliases, dict):
+        raise ConfigError(
+            f"{config_path}: citation_aliases must be an object mapping a citation prefix to a "
+            f"repo-relative directory\nUse:\n{suggested_config()}"
+        )
+    resolved: dict[str, str] = {}
+    for prefix, value in aliases.items():
+        label = f"citation_aliases.{prefix}"
+        if not isinstance(prefix, str) or not prefix.strip():
+            raise ConfigError(f"{config_path}: {label} must be a non-empty citation prefix")
+        raw_prefix = prefix.strip()
+        if raw_prefix.startswith("~") or Path(raw_prefix).is_absolute():
+            raise ConfigError(
+                f"{config_path}: {label} must be a citation prefix as written in a graph, "
+                f"not a path ({raw_prefix!r})"
+            )
+        if ".." in Path(raw_prefix).parts:
+            raise ConfigError(
+                f"{config_path}: {label} must not contain '..' ({raw_prefix!r})"
+            )
+        key = raw_prefix.rstrip("/")
+        if key in resolved:
+            raise ConfigError(f"{config_path}: {label} is declared twice")
+        resolved[key] = _repo_relative_value(label, value, repo, config_path)
+    return resolved
+
+
 def device_declares_roots(path: Path) -> bool:
     """True when the device file still tries to decide a location (the removed design)."""
     if not path.is_file():
@@ -329,6 +380,8 @@ class Resolver:
         # under an unrelated warning.
         self.project_cfg = read_config(self.project_cfg_path)
         self.paths = validate_config(self.project_cfg, self.project_cfg_path, self.project)
+        self.citation_aliases = validate_citation_aliases(
+            self.project_cfg, self.project_cfg_path, self.project)
 
         if device_declares_roots(self.device_cfg_path):
             msg = (f"{self.device_cfg_path} declares roots; device roots are ignored — only "
@@ -363,6 +416,11 @@ class Resolver:
             "config_file": str(self.project_cfg_path) if decision["tier"] == "config" else None,
             "config_key": decision["config_key"],
         }
+
+    # ---- citation aliases ------------------------------------------
+    def aliases(self) -> dict[str, str]:
+        """{citation prefix: absolute directory}. The reader matches the longest prefix first."""
+        return {prefix: str((self.project / value)) for prefix, value in self.citation_aliases.items()}
 
     # ---- artifact paths --------------------------------------------
     def artifact(self, cls: str, slug: str, filename: str | None = None) -> dict:
@@ -403,6 +461,7 @@ class Resolver:
             "config_file": str(self.project_cfg_path),
             "config_present": self.project_cfg_path.is_file(),
             "paths": dict(self.paths),
+            "citation_aliases": dict(self.citation_aliases),
             "roots": {c: self.resolve(c) for c in CLASSES},
             "warnings": self.warnings,
         }
@@ -584,6 +643,35 @@ def selftest() -> int:
         bad("pruned", dict(base, docs="tmp/graphs"), "paths.docs")
         (proj / "escape").symlink_to("/tmp")
         bad("symlink escape", dict(base, docs="escape/graphs"), "paths.docs")
+        (proj / "escape").unlink()
+
+        print("── a citation alias is validated like a path, and named on refusal ──")
+        _write(proj / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS),
+                                       "citation_aliases": {"notes": ".rosetta/docs"}})
+        r = Resolver(proj, home)
+        check("alias resolves", r.aliases(), {"notes": str(proj / ".rosetta" / "docs")})
+        _write(proj / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS)})
+        check("no aliases is fine", Resolver(proj, home).aliases(), {})
+        for alias_name, alias_value in (
+            ("absolute", "/tmp/outside"),
+            ("tilde", "~/outside"),
+            ("dotdot", "../outside"),
+        ):
+            _write(proj / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS),
+                                           "citation_aliases": {alias_name: alias_value}})
+            try:
+                Resolver(proj, home)
+                check(f"alias {alias_name} refused", "accepted", "ConfigError")
+            except ConfigError as exc:
+                check(f"alias {alias_name} names key", alias_name in str(exc), True)
+        (proj / "escape").symlink_to("/tmp")
+        _write(proj / CONFIG_RELPATH, {"version": 2, "paths": dict(STANDARD_PATHS),
+                                       "citation_aliases": {"escape/graphs": "escape/graphs"}})
+        try:
+            Resolver(proj, home)
+            check("alias symlink escape refused", "accepted", "ConfigError")
+        except ConfigError as exc:
+            check("alias symlink escape names key", "escape/graphs" in str(exc), True)
         (proj / "escape").unlink()
 
         print("── a version 1 config is refused with the equivalent version 2 ──")
@@ -784,6 +872,11 @@ def main(argv: list[str]) -> int:
 
     sub.add_parser("init", help="create $ROSETTA_HOME (device home + bin/; declares no roots)")
 
+    p_alias = sub.add_parser(
+        "citation-aliases",
+        help="print the config's citation prefix table as JSON {prefix: absolute dir}")
+    p_alias.add_argument("--project", default=None)
+
     p_plug = sub.add_parser("plugin", help="absolute path of the plugin checkout that owns engine/")
     p_plug.add_argument("--why", action="store_true", help="also print which tier resolved it")
 
@@ -847,6 +940,10 @@ def main(argv: list[str]) -> int:
         if args.ensure:
             Path(r["dir"]).mkdir(parents=True, exist_ok=True)
         print(r["dir"])
+        return 0
+
+    if args.verb == "citation-aliases":
+        print(json.dumps(res.aliases(), indent=2, sort_keys=True))
         return 0
 
     if args.verb == "path":

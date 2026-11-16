@@ -4,8 +4,8 @@
 WHY THIS EXISTS
   The MCP service serves Claude Code and Codex agents plus Rosetta knowledge graphs from a
   static asset tree. Today every device needs a full consumer checkout (for this machine:
-  ``~/.claude/agents`` is a symlink into the consumer's ``agents/``), because the files only
-  exist there. This script turns one consumer checkout into one immutable, inspectable
+  ``~/.claude/agents`` is a symlink into the consumer's configured agents directory), because
+  the files only exist there. This script turns one consumer checkout into one immutable, inspectable
   *snapshot* that a Worker can serve and a device can sync, with no consumer checkout on the
   device.
 
@@ -42,9 +42,11 @@ WHY THE PROJECTOR IS LOCAL, NOT THE CONSUMER'S
   The projection rules (frontmatter, tool mapping, model policy, TOML escaping) have one home:
   this repo's ``project_agents.py``, proven byte-for-byte against the consumer's ``scripts/
   agentshare.py`` for all five targets (``test_project_agents.py``, AC-26). A publish therefore
-  needs nothing from the consumer but *content*: ``--root`` names a checkout holding ``agents/``
-  and ``.rosetta/docs/``, so the content repository — data only, no scripts, and no brain on the
-  machine — publishes exactly like the authoring checkout did.
+  needs nothing from the consumer but *content*: ``--root`` names a checkout whose own
+  ``.rosetta/config.json`` declares where its agent prompts and knowledge bases live, so the
+  content repository — data only, no scripts, and no brain on the machine — publishes exactly
+  like the authoring checkout did. A checkout with no config is refused: the publisher never
+  guesses a layout.
 
   One target is projected at a time, with an explicit ``--target`` (never the whole fleet, so a
   harness target cannot ride into a snapshot unseen), into a temporary ``HOME`` so nothing lands
@@ -115,6 +117,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts" / "rosetta"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from version_label import kb_edition  # noqa: E402  (shared home for the kb_version label)
+import roots  # noqa: E402  (the repo's declared layout: docs + agents)
 import doc_refs  # noqa: E402  (sibling: doc vendoring + citation rewrite)
 import project_agents  # noqa: E402  (sibling: the projector that owns the harness target table)
 
@@ -170,7 +173,6 @@ TARGET_SIDE_EFFECTS: dict[str, tuple[dict[str, str], ...]] = {
 }
 EXCLUDE_SUFFIXES = ("*.bak", "*.log")
 EXCLUDE_DIRS = (".history",)
-KB_RELDIR = Path(".rosetta/docs")
 GENERATED_LINE = "# Generated from "
 METADATA_FILES = ("manifest.json", "files.json", "scan-result.json")
 PAYLOAD_DIRS = ("targets", "kb", "docs")
@@ -299,24 +301,24 @@ def load_agentshare(root: Path) -> ModuleType:
     return module
 
 
-def load_source_agents(root: Path) -> list[dict]:
+def load_source_agents(root: Path, agents_dir: Path | None = None) -> list[dict]:
     """Every agent in the checkout, read by this repo's projector.
 
-    The consumer supplies content, never machinery: the content repository holds ``agents/``
-    and ``.rosetta/docs/`` and nothing else, so requiring a projector inside it would make a
+    The consumer supplies content, never machinery: the content repository holds only the two
+    directories its config declares, so requiring a projector inside it would make a
     brain-less publish impossible. Fail closed on a root that has no agents at all, and on one
     whose agents project to nothing — either would publish an empty fleet.
     """
-    agents_dir = root / "agents"
+    agents_dir = agents_dir if agents_dir is not None else roots.resolved_dir("agents", root)
     if not agents_dir.is_dir():
         raise PublishError(
-            f"{root}: no agents/ directory — the publisher reads <root>/agents/<name>/agent.md "
-            "and will not guess a projection"
+            f"{root}: no agents directory at {agents_dir} — the publisher reads "
+            "<repo>/<paths.agents>/<name>/agent.md and will not guess a projection"
         )
     agents = project_agents.discover_agents(agents_dir)
     if not agents:
         raise PublishError(
-            f"{root}: agents/ holds zero agent prompts; refusing to publish an empty snapshot"
+            f"{agents_dir}: holds zero agent prompts; refusing to publish an empty snapshot"
         )
     return agents
 
@@ -451,9 +453,9 @@ def stage_target(
     }
 
 
-def stage_kbs(root: Path, stage: Path) -> list[dict]:
-    """Copy every fact-graph in the consumer's registry layout, byte for byte."""
-    docs = root / KB_RELDIR
+def stage_kbs(root: Path, stage: Path, docs_dir: Path | None = None) -> list[dict]:
+    """Copy every fact-graph in the consumer's declared docs directory, byte for byte."""
+    docs = docs_dir if docs_dir is not None else roots.resolved_dir("docs", root)
     entries: list[dict] = []
     if not docs.is_dir():
         print(f"[publish] WARNING: {docs} is absent; the snapshot carries no knowledge bases", file=sys.stderr)
@@ -476,7 +478,7 @@ def stage_kbs(root: Path, stage: Path) -> list[dict]:
                 "path": relative.as_posix(),
             }
         )
-    _log(f"staged {len(entries)} knowledge base(s) from {KB_RELDIR}")
+    _log(f"staged {len(entries)} knowledge base(s) from {docs}")
     return entries
 
 
@@ -663,7 +665,13 @@ def publish(args: argparse.Namespace) -> int:
     _log(f"root: {root}")
     _log(f"stage: {stage}")
     _log(f"projector: {Path(project_agents.__file__).name} (this repo's port; the consumer ships no scripts)")
-    source_agents = load_source_agents(root)
+    # The layout is the CONSUMER's declared answer. Both reads happen here, so a repo with no
+    # config is refused before anything is staged.
+    layout_docs = roots.resolved_dir("docs", root)
+    layout_agents = roots.resolved_dir("agents", root)
+    _log(f"paths.docs: {layout_docs}")
+    _log(f"paths.agents: {layout_agents}")
+    source_agents = load_source_agents(root, layout_agents)
     _log(f"source agents: {len(source_agents)}")
 
     reset_stage(stage)
@@ -699,7 +707,7 @@ def publish(args: argparse.Namespace) -> int:
                 f"{len(source_agents)}; refusing to publish a partial snapshot"
             )
 
-    kbs = stage_kbs(root, stage)
+    kbs = stage_kbs(root, stage, layout_docs)
     vendoring = None
     if args.vendor_docs:
         vendoring = doc_refs.vendor_documents(
@@ -1009,8 +1017,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--root",
-        help="consumer checkout to publish (the folder holding agents/ and .rosetta/docs/; no "
-        "scripts are needed there); required unless --scan-only",
+        help="consumer checkout to publish (its .rosetta/config.json declares where its agent "
+        "prompts and knowledge bases live; no scripts are needed there); required unless "
+        "--scan-only",
     )
     parser.add_argument(
         "--targets",

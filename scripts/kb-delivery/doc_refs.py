@@ -2,119 +2,125 @@
 """doc_refs.py — vendor the documents a prompt cites, and rewrite the citations.
 
 WHY THIS EXISTS
-  Agent prompts cite documents: ``brain/docs/mcp-rules/security.md``,
-  ``~/Projects/brain/docs/kotlin/compose-ui.md``, ``.rosetta/docs/n8n/…``, ``kb/…``. On a
-  machine that syncs its agents from the hosted service there is no consumer checkout, so every
-  one of those citations dangles. At publish time this module
+  Agent prompts cite documents: ``notes/mcp-rules/security.md``, ``~/checkout/notes/x.md``,
+  ``<paths.docs>/n8n/…``, ``kb/…``. On a machine that syncs its agents from the hosted service
+  there is no consumer checkout, so every one of those citations dangles. At publish time this
+  module
 
   1. resolves each citation against the consumer checkout the publisher was pointed at,
   2. copies the cited document (or the cited directory) into the snapshot's ``docs/`` tree, and
-  3. rewrites the citation in the staged prompt to ``~/.rosetta/share/brain/<path>``, which
-     ``sync_agents.py`` writes to ``$HOME/.rosetta/share/brain/<path>`` on the device.
+  3. rewrites the citation in the staged prompt to ``~/.rosetta/share/<share>/<path>``, which
+     ``sync_agents.py`` writes to ``$HOME/.rosetta/share/<share>/<path>`` on the device.
 
   A citation that cannot be honoured is never dropped: it stays in the prompt and is listed by
   name in the manifest's ``unresolved`` list, with the reason. Silence is the failure mode this
   module exists to prevent.
 
-WHY THE CONSUMER'S RESOLVER DECIDES
-  Which file a citation means — absolute-home aliases (``~/Projects/brain``,
-  ``~/.claude/brain``), repo-relative forms, stale-root fixups (``.rosetta/docs/convex`` →
-  ``docs/convex-rules``), agent-relative fallback for ``kb/…`` — already has one home: the
-  consumer's ``scripts/rogueone_bundle.py`` (``transform_body``). This module imports that file
-  by path (never a hardcoded checkout) and fails closed when its signature or its output shape is
-  not the one the plan documents: a private function that moved is a fact nobody here guessed.
+WHY THE PROJECT CONFIG DECIDES
+  Which file a citation means is a property of the repo that wrote it, so the repo declares it:
+  ``citation_aliases`` in ``<repo>/.rosetta/config.json`` maps a citation prefix to the
+  directory it really lives in, and ``paths.docs`` names the knowledge-base directory. This
+  module resolves every citation through that table and the repo-relative reading, in that
+  order, and it never consults a second resolver: a prefix nobody declared is an unresolved
+  citation with a reason, not a guess.
 
-WHAT IT DELIBERATELY DOES NOT DO
-  ``transform_body`` also rewrites the body for the rogueone profile: it strips foreign
-  orchestrator sections, detunes shouted headers, drops stale "Source of Truth" pointer lines and
-  rewrites bare ``Read foo.md`` filenames. A hosted prompt must stay the prompt the device's own
-  projector produced, apart from citations that now resolve, so this module keeps only the
-  *decisions* (``meta["docs"]`` / ``meta["unresolved"]`` / ``meta["unbundlable"]``) and re-applies
-  them to the staged text token by token. It uses the consumer's own reference pattern, so what
-  counts as a citation is not a second opinion either.
+  (Until 2026-11-15 this delegated to the consumer's ``scripts/rogueone_bundle.py``. That
+  resolver was retired by its own repo, which named this module as the owner of the job — so the
+  table moved here, into the config, where a repo can change it without editing code.)
 
 WHERE THE DOCUMENTS LAND
-  stage:   ``<stage>/docs/brain/<consumer-relative path>``
-  device:  ``$HOME/.rosetta/share/brain/<consumer-relative path>``
-  prompt:  ``~/.rosetta/share/brain/<consumer-relative path>``
+  stage:   ``<stage>/docs/<share>/<consumer-relative path>``
+  device:  ``$HOME/.rosetta/share/<share>/<consumer-relative path>``
+  prompt:  ``~/.rosetta/share/<share>/<consumer-relative path>``
+
+  ``<share>`` is the device-side root the consumer's resolver names; this module only moves the
+  bytes and records where they went, so nothing here has to know its spelling.
 
   The publisher writes the mapping into ``manifest.json`` as ``share`` (``dest`` +
   ``prefix``), which is how a device knows where to put them without knowing this module.
 """
 from __future__ import annotations
 
-import importlib.util
-import inspect
+import re
 import shutil
 import sys
 from pathlib import Path
-from types import ModuleType
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PLUGIN_ROOT / "scripts" / "rosetta"))
+import roots  # noqa: E402  (the consumer's declared layout)
 
 # The device-side share root a rewritten citation points at, and where the sync puts it.
 SHARE_HOME = "~/.rosetta/share"
 SHARE_DEST = ".rosetta/share"
 STAGE_DIR = "docs"
+#: The folder inside the share that vendored documents live in. One name, used by the stage
+#: tree, the device path and the rewritten citation, so a device needs no table of its own.
+SHARE_SUBDIR = "shared"
 # A citation that already names the device share root (ours, or one a prompt was written with).
 SHARE_PREFIXES = (f"{SHARE_HOME}/", f"{SHARE_DEST}/")
 
-RESOLVER_RELPATH = Path("scripts") / "rogueone_bundle.py"
-# The private contract this adapter depends on. Anything else fails closed.
-RESOLVER_SIGNATURE = ("agent", "vendor_jobs", "base", "brain_root")
-RESOLVER_PATTERN_ATTR = "_BRAIN_REF_RE"
-RESOLVER_META_KEYS = ("docs", "unresolved", "unbundlable")
+#: A path-shaped citation: at least one '/', and a document-ish extension. A bare filename
+#: ("Read foo.md") is not a path this module rewrites — it resolves beside the prompt it is in.
+CITATION_RE = re.compile(
+    r"(?<![\w/])[~/@.\w][\w./~@-]*/[\w./~@-]*\.(?:md|markdown|json|ya?ml|toml|txt|py|ts|tsx|js|sh)\b"
+)
+UNRESOLVABLE_REASON = (
+    "the project config declares no citation alias for this prefix and the file is not "
+    "repo-relative, so it was left in the prompt"
+)
+DEVICE_LOCAL_REASON = "an absolute or home-relative path on the author's machine; a file bundle cannot carry it"
 
 
 class DocRefsError(RuntimeError):
     """A failure this module reports and refuses to work around."""
 
 
-# ── the consumer's resolver, imported by path ──────────────────────────
+# ── one citation's meaning ─────────────────────────────────────────────
 
 
-def load_resolver(consumer_root: Path) -> ModuleType:
-    """Import the consumer's ``scripts/rogueone_bundle.py`` or refuse to continue."""
-    path = consumer_root / RESOLVER_RELPATH
-    if not path.is_file():
-        raise DocRefsError(
-            f"{path}: doc vendoring resolves citations with the consumer's own resolver "
-            f"({RESOLVER_RELPATH}) and will not guess a resolution"
-        )
-    spec = importlib.util.spec_from_file_location("_consumer_rogueone_bundle", path)
-    if spec is None or spec.loader is None:
-        raise DocRefsError(f"{path}: cannot be imported as a module")
-    module = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:  # noqa: BLE001 - any import failure is the same refusal
-        raise DocRefsError(f"{path}: import failed ({type(exc).__name__}: {exc})") from exc
+class Citations:
+    """The project's citation table: alias prefixes, docs directory, and the repo they sit in."""
 
-    transform = getattr(module, "transform_body", None)
-    if not callable(transform):
-        raise DocRefsError(f"{path}: has no transform_body(), so citations cannot be resolved")
-    parameters = tuple(inspect.signature(transform).parameters)
-    if parameters != RESOLVER_SIGNATURE:
-        raise DocRefsError(
-            f"{path}: transform_body{parameters} is not the documented "
-            f"({', '.join(RESOLVER_SIGNATURE)}); this adapter fails closed rather than guess"
-        )
-    pattern = getattr(module, RESOLVER_PATTERN_ATTR, None)
-    if not hasattr(pattern, "sub") or not hasattr(pattern, "fullmatch"):
-        raise DocRefsError(
-            f"{path}: {RESOLVER_PATTERN_ATTR} is missing or is not a compiled pattern, so this "
-            "module cannot recognise a citation"
-        )
-    return module
+    def __init__(self, consumer_root: Path) -> None:
+        self.root = consumer_root
+        # Both raise SystemExit(2) with the resolver's message when the repo declares no layout.
+        self.docs_dir = roots.resolved_dir("docs", consumer_root)
+        self.agents_dir = roots.resolved_dir("agents", consumer_root)
+        self.aliases = roots.resolved_citation_aliases(consumer_root)
 
+    def resolve(self, token: str) -> tuple[str, str] | tuple[None, str]:
+        """``(repo-relative path, "")`` for a citation this project carries, else ``(None, why)``."""
+        clean = token.strip()
+        if clean.startswith(SHARE_PREFIXES):
+            return None, "already points at the device share root"
+        if clean.startswith(("http://", "https://", "file:", "//")):
+            return None, "a URL, not a local document"
+        if clean.startswith(("~", "/")):
+            return None, DEVICE_LOCAL_REASON
+        for prefix in sorted(self.aliases, key=len, reverse=True):
+            if clean == prefix or clean.startswith(prefix + "/"):
+                rest = clean[len(prefix):].lstrip("/")
+                candidate = self.aliases[prefix] / rest
+                if candidate.is_file() or candidate.is_dir():
+                    return self._relative(candidate), ""
+                return None, (
+                    f"the config maps {prefix!r} to {self.aliases[prefix]} but {rest!r} is not there"
+                )
+        candidate = self.root / clean
+        if candidate.is_file() or candidate.is_dir():
+            return self._relative(candidate), ""
+        return None, UNRESOLVABLE_REASON
 
-# ── one agent's decisions ──────────────────────────────────────────────
+    def _relative(self, path: Path) -> str:
+        return path.resolve().relative_to(self.root.resolve()).as_posix()
 
 
 def source_text(agent: dict) -> str:
     """The agent's source file as written: frontmatter included.
 
-    ``transform_body`` sees only the body, but a prompt ships its frontmatter too — a
-    ``description`` that names a brain document is a citation a device will try to follow — so
-    resolution reads the whole file and the rewrite is applied to the staged text.
+    A prompt ships its frontmatter too — a ``description`` that names a document is a citation a
+    device will try to follow — so resolution reads the whole file.
     """
     source = Path(agent["source_path"])
     path = source / "agent.md" if source.is_dir() else source
@@ -124,59 +130,39 @@ def source_text(agent: dict) -> str:
         raise DocRefsError(f"{path}: cannot be read as UTF-8 text ({exc})") from exc
 
 
+def vendored_relative(relative: str) -> str:
+    """Where a repo-relative document lands inside the share."""
+    return f"{SHARE_SUBDIR}/{relative}"
+
+
 def resolve_agent(
     *,
-    resolver: ModuleType,
+    citations: Citations,
     agent: dict,
-    consumer_root: Path,
     base: str = SHARE_HOME,
 ) -> tuple[dict[str, str], list[dict], list[dict]]:
     """``(rewrites, resolved, unresolved)`` for one agent.
 
-    ``rewrites``  ``{citation as written: vendored path}`` for citations that resolve.
-    ``resolved``  the same, with the consumer-relative source, for the manifest.
+    ``rewrites``  ``{citation as written: the path it becomes in the prompt}``.
+    ``resolved``  the same, with the repo-relative source, for the manifest.
     ``unresolved`` every citation that stays in the prompt, by name, with a reason.
-
-    Only path-shaped citations are handled: the consumer's pattern decides what that is, and a
-    bare filename ("Read foo.md") is not a path this module rewrites.
     """
-    pattern = resolver._BRAIN_REF_RE  # noqa: SLF001 - the consumer's own definition
-    jobs: dict[str, Path] = {}
-    subject = dict(agent)
-    subject["body"] = source_text(agent)
-    _body, meta = resolver.transform_body(subject, jobs, base, consumer_root)
-    if not isinstance(meta, dict) or any(key not in meta for key in RESOLVER_META_KEYS):
-        raise DocRefsError(
-            f"{agent.get('name')!r}: transform_body returned meta without "
-            f"{'/'.join(RESOLVER_META_KEYS)}; the adapter cannot tell a resolved citation from a "
-            "dropped one"
-        )
-
+    text = source_text(agent)
     rewrites: dict[str, str] = {}
     resolved: list[dict] = []
-    for entry in meta["docs"]:
-        ref = str(entry.get("ref") or "")
-        if not pattern.fullmatch(ref):
-            continue  # a bare filename: vendored by the consumer's plan, not a citation we rewrite
-        rewrites[ref] = str(entry["vendored"])
-        resolved.append({"ref": ref, "source": str(entry["source"]), "vendored": str(entry["vendored"])})
-
     unresolved: list[dict] = []
-    for entry in meta["unresolved"]:
-        ref = str(entry.get("ref") or "")
-        if not pattern.fullmatch(ref):
+    for match in CITATION_RE.finditer(text):
+        token = match.group(0).rstrip(".,;:")
+        if token in rewrites or any(entry["ref"] == token for entry in unresolved):
             continue
-        unresolved.append({"ref": ref, "kind": "unresolved", "reason": str(entry.get("reason") or "")})
-    for entry in meta["unbundlable"]:
-        # Agent self-references, holocron ids and device-local home paths: real citations that a
-        # file bundle cannot carry. They stay in the prompt and are named, never dropped.
-        unresolved.append(
-            {
-                "ref": str(entry.get("ref") or ""),
-                "kind": str(entry.get("kind") or "unbundlable"),
-                "reason": str(entry.get("reason") or ""),
-            }
-        )
+        relative, reason = citations.resolve(token)
+        if relative is None:
+            kind = "unbundlable" if reason == DEVICE_LOCAL_REASON else "unresolved"
+            unresolved.append({"ref": token, "kind": kind, "reason": reason})
+            continue
+        target = f"{base}/{vendored_relative(relative)}"
+        rewrites[token] = target
+        resolved.append({"ref": token, "source": relative, "vendored": target})
     return rewrites, resolved, unresolved
 
 
@@ -290,9 +276,12 @@ def vendor_documents(
 
     Runs after the target trees are staged and before the inventory is hashed, so the credential
     scan sees the vendored documents too (they are payload files like any other).
+
+    A checkout that declares no layout is refused before anything is vendored: the docs and
+    agents locations, and the citation table, are the checkout's own answer.
     """
-    resolver = load_resolver(consumer_root)
-    pattern = resolver._BRAIN_REF_RE  # noqa: SLF001
+    citations = Citations(consumer_root)
+    pattern = CITATION_RE
 
     per_agent: dict[str, dict[str, str]] = {}
     known_refs: dict[str, set[str]] = {}
@@ -303,7 +292,7 @@ def vendor_documents(
     for agent in agents:
         name = str(agent["name"])
         rewrites, resolved, missing = resolve_agent(
-            resolver=resolver, agent=agent, consumer_root=consumer_root, base=base
+            citations=citations, agent=agent, base=base
         )
         per_agent[name] = rewrites
         known_refs[name] = set(rewrites) | {entry["ref"] for entry in missing}
@@ -331,7 +320,9 @@ def vendor_documents(
             raise DocRefsError(
                 f"{source_rel}: the resolver reported it as cited and resolvable, but it is not on disk"
             )
-        files, size = _copy_document(src, stage / STAGE_DIR / "brain" / Path(*parts), seen=written)
+        files, size = _copy_document(
+            src, stage / STAGE_DIR / SHARE_SUBDIR / Path(*parts), seen=written
+        )
         vendored_files += files
         vendored_bytes += size
         document["files"] = files

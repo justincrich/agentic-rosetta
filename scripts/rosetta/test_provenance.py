@@ -24,6 +24,8 @@ STANDARD_CONFIG = {
         "probes": ".rosetta/probes",
         "agents": "agents",
     },
+    # A local citation carries a neutral prefix; only this table says where it points.
+    "citation_aliases": {"notes": ".rosetta/docs"},
 }
 
 # A neutral empty device home: a fixture's layout comes from its own config, never from a
@@ -315,6 +317,12 @@ def main() -> int:
 
         hdir = tmp / "harvest-kb"
         hdir.mkdir()
+        # The citation carries the fixture config's neutral prefix, so the prefix's meaning
+        # comes from the config and nowhere else.
+        configure(tmp)
+        alias_target = tmp / ".rosetta" / "docs" / "toy" / "widget.md"
+        alias_target.parent.mkdir(parents=True)
+        alias_target.write_text("# widget\n")
         graph = {
             "v": {
                 "repo": "github.com/acme/toy",
@@ -325,7 +333,7 @@ def main() -> int:
             "w": {
                 "Widget": {
                     "t": "sl", "i": "toy",
-                    "src": "brain/docs/toy/widget.md",
+                    "src": "notes/toy/widget.md",
                 }
             },
         }
@@ -337,7 +345,9 @@ def main() -> int:
             "refreshes": [{"source_urls": ["https://example.com/history-src.md"]}],
         }))
         (hdir / "widget.md").write_text("# widget\n")
-        harvested = P.harvest_locators(hdir, graph, root=tmp)
+        aliases = P.citation_aliases(tmp)
+        check("harvest-aliases-from-config", aliases.get("notes"), tmp / ".rosetta" / "docs")
+        harvested = P.harvest_locators(hdir, graph, root=tmp, aliases=aliases)
         docs = set(harvested.get("docs") or [])
         repos = set(harvested.get("repos") or [])
         local = harvested.get("local") or []
@@ -349,8 +359,80 @@ def main() -> int:
         check("harvest-no-localhost", not any("localhost" in d for d in docs))
         check("harvest-no-https-x", "https://x" not in docs)
         check("harvest-local-exists", len(local) >= 1, str(local))
+        check("harvest-local-through-alias",
+              [entry["locator"] for entry in local], [".rosetta/docs/toy/widget.md"])
         fs = harvested.get("fact_sources") or {}
         check("harvest-fact-src", "w:Widget" in fs, str(fs))
+
+        # The prefix means NOTHING without the config: remove every candidate a built-in rule
+        # could have guessed (the file beside the graph) and the citation is not resolved.
+        (hdir / "widget.md").unlink()
+        unaliased = P.harvest_locators(hdir, graph, root=tmp)
+        check("harvest-prefix-needs-the-config", unaliased.get("local") == [],
+              str(unaliased.get("local")))
+        with_alias = P.harvest_locators(hdir, graph, root=tmp, aliases=aliases)
+        check("harvest-prefix-resolves-with-the-config", len(with_alias.get("local") or []), 1)
+
+    # ── the config decides the layout, and a bad citation alias is refused (AC-2 / AC-9 / AC-12)
+    ac9 = configure(tmp / "ac9-prov")
+    kb = ac9 / ".rosetta" / "docs" / "toy"
+    kb.mkdir(parents=True)
+    (kb / "widget.md").write_text("widget v1\n")
+    widget_digest = _sha(b"widget v1\n")
+    (kb / "provenance.json").write_text(json.dumps({"sources": [{
+        "kind": "local",
+        "unitPins": [{"locator": ".rosetta/docs/toy/widget.md", "sha256": widget_digest}],
+    }]}, indent=2))
+    first = run_probe("--root", str(ac9), "--check-stale", "toy")
+    check("ac9-prov-current", first.returncode == 0, first.stdout + first.stderr)
+
+    # Change ONLY paths.docs, move the KB, and the same citation locator moves with it.
+    cfg_path = ac9 / ".rosetta" / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["paths"]["docs"] = "kb/other"
+    cfg["citation_aliases"] = {"notes": "kb/other"}
+    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+    (ac9 / "kb" / "other").mkdir(parents=True)
+    (ac9 / ".rosetta" / "docs" / "toy").rename(ac9 / "kb" / "other" / "toy")
+    (ac9 / "kb" / "other" / "toy" / "provenance.json").write_text(json.dumps({"sources": [{
+        "kind": "local",
+        "unitPins": [{"locator": "kb/other/toy/widget.md", "sha256": widget_digest}],
+    }]}, indent=2))
+    moved = run_probe("--root", str(ac9), "--check-stale", "toy")
+    check("ac9-prov-reads-new-root", moved.returncode == 0, moved.stdout + moved.stderr)
+    check("ac9-prov-old-root-gone",
+          (ac9 / ".rosetta" / "docs" / "toy" / "provenance.json").exists() is False,
+          str(sorted(p.as_posix() for p in (ac9 / ".rosetta").rglob("*"))))
+
+    # AC-2: an unconfigured repo is refused, naming the file, and nothing is created.
+    bare = tmp / "bare-prov"
+    (bare / ".git").mkdir(parents=True)
+    refused = run_probe("--root", str(bare), "--check-stale", "toy")
+    check("prov-bare-nonzero", refused.returncode != 0, f"(rc={refused.returncode})")
+    check("prov-bare-names-config",
+          str(bare / ".rosetta" / "config.json") in refused.stderr, refused.stderr)
+    check("prov-bare-creates-nothing", (bare / ".rosetta").exists() is False,
+          str(sorted(p.name for p in bare.iterdir())))
+
+    # AC-12: a citation alias that leaves the repo is refused, naming its key — for every kind.
+    outside = tmp / "outside-the-repo"
+    outside.mkdir()
+    (ac9 / "escape").symlink_to(outside)
+    for alias_key, alias_value in (
+        ("old/docs", "../outside"),
+        ("old/abs", str(outside)),
+        ("old/home", "~/outside"),
+        ("old/link", "escape/graphs"),
+    ):
+        cfg = json.loads(cfg_path.read_text())
+        cfg["citation_aliases"] = {alias_key: alias_value}
+        cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+        bad = run_probe("--root", str(ac9), "--check-stale", "toy")
+        check(f"alias-refused[{alias_key}]", bad.returncode != 0, f"(rc={bad.returncode})")
+        check(f"alias-names-key[{alias_key}]", alias_key in bad.stderr, bad.stderr)
+        check(f"alias-prints-no-path[{alias_key}]", outside.as_posix() not in bad.stdout,
+              bad.stdout)
+    (ac9 / "escape").unlink()
 
     if failures:
         for f in failures:

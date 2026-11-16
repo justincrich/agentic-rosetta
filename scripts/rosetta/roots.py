@@ -23,6 +23,9 @@ THE CONTRACT
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -87,6 +90,53 @@ def resolved_docs_dir(project: Path | None = None, warn: bool = True) -> Path:
     return resolved_dir("docs", project or _cwd_logical(), warn=warn)
 
 
+def resolved_agents_dir(project: Path | None = None, warn: bool = True) -> Path:
+    """The agents (prompt) directory for `project` (default: cwd).
+
+    Agents are a declared location like any other: a repo whose config says ``prompts`` keeps
+    its prompts there, so every reader of ``agents/`` asks this instead of spelling the name.
+    """
+    return resolved_dir("agents", project or _cwd_logical(), warn=warn)
+
+
+def resolved_citation_aliases(project: Path | None = None) -> dict[str, Path]:
+    """{citation prefix: absolute directory} from the repo's config. Empty when none declared.
+
+    A citation in a graph (``notes/widgets/vm.md``) resolves ONLY through this table, so the
+    spelling a project uses is data in its own config. A repo with a bad alias is refused here,
+    with the resolver's message naming the key.
+    """
+    r = resolver_path()
+    if r is None:
+        print("rosetta-roots: ERROR: rosetta_config.py not found. Re-run install.sh from the "
+              "plugin checkout, or set $ROSETTA_CONFIG.", file=sys.stderr)
+        raise SystemExit(2)
+    repo = project or _cwd_logical()
+    try:
+        out = subprocess.run(
+            [sys.executable, str(r), "citation-aliases", "--project", str(repo)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"rosetta-roots: ERROR: resolver failed ({exc})", file=sys.stderr)
+        raise SystemExit(2) from None
+    if out.returncode != 0:
+        print((out.stderr or "").strip() or f"rosetta_config.py citation-aliases exited "
+              f"{out.returncode}", file=sys.stderr)
+        raise SystemExit(out.returncode if out.returncode > 0 else 2)
+    if (out.stderr or "").strip():
+        print(out.stderr.strip(), file=sys.stderr)
+    try:
+        data = json.loads(out.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        print(f"rosetta-roots: ERROR: citation-aliases printed invalid JSON ({exc})",
+              file=sys.stderr)
+        raise SystemExit(2) from None
+    if not isinstance(data, dict):
+        raise SystemExit(2)
+    return {str(k): Path(v) for k, v in data.items()}
+
+
 def _cwd_logical() -> Path:
     """cwd in the spelling the caller used ($PWD) — os.getcwd() resolves symlinks.
 
@@ -121,7 +171,28 @@ def choose(explicit_root: str | Path | None, warn: bool = True) -> tuple[Path, P
 
 
 def docs_dir(root: Path, override: Path | None) -> Path:
-    return override if override is not None else root / ".rosetta" / "docs"
+    """The docs directory named by the override, else by the repo's config. Never a guess."""
+    return override if override is not None else resolved_docs_dir(root)
+
+
+#: One resolver call per class per repo VERSION of its config. Keyed by the config's own bytes,
+#: so an edit is seen on the next call while a scan over 300 graphs still costs two calls.
+_LAYOUT_CACHE: dict[tuple[str, str], tuple[Path, Path]] = {}
+
+
+def layout(project: Path, warn: bool = False) -> tuple[Path, Path]:
+    """``(docs_dir, agents_dir)`` for a repo. Refuses, exit 2, when the repo has no config."""
+    repo = Path(project)
+    cfg = repo / ".rosetta" / "config.json"
+    try:
+        stamp = hashlib.sha256(cfg.read_bytes()).hexdigest()
+    except OSError:
+        stamp = "absent"
+    key = (str(repo), stamp)
+    if key not in _LAYOUT_CACHE:
+        _LAYOUT_CACHE[key] = (resolved_dir("docs", repo, warn=warn),
+                              resolved_dir("agents", repo, warn=warn))
+    return _LAYOUT_CACHE[key]
 
 
 def base_of(docs: Path) -> Path:
@@ -129,9 +200,21 @@ def base_of(docs: Path) -> Path:
     return docs.parent.parent if docs.parent.name == ".rosetta" else docs.parent
 
 
-def warn_if_orphaned(docs: Path) -> None:
-    """The embed pipeline finds fact-graphs by walking the repo that owns agents/. A KB written
-    outside that repo is invisible to it — say so loudly instead of failing silently later."""
-    if not (base_of(docs) / "agents").is_dir():
-        print(f"rosetta-roots: WARN: {docs} has no sibling agents/ directory; an embed pipeline "
-              f"rooted elsewhere will not see this KB", file=sys.stderr)
+def main(argv: list[str]) -> int:
+    """CLI bridge for shell callers: print one resolved directory, or exit non-zero refusing.
+
+    ``embed-graph.sh`` is bash, so it cannot import this module; it asks the real resolver
+    through here rather than spelling a hardcoded ``agents/``. The refusal comes out of
+    rosetta_config.py unchanged, so a shell caller reports exactly what the Python callers do.
+    """
+    p = argparse.ArgumentParser(description="print a resolved artifact directory")
+    p.add_argument("--class", dest="cls", required=True,
+                   choices=("docs", "research", "probes", "agents"))
+    p.add_argument("--project", default=None, help="target project (default: cwd)")
+    args = p.parse_args(argv)
+    print(resolved_dir(args.cls, Path(args.project) if args.project else _cwd_logical()))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

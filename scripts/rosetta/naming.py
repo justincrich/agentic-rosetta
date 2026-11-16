@@ -21,10 +21,11 @@ WHAT WAS MERGED, AND WHAT WAS NOT — read before "finishing the DRY job"
   (``cloudflare-rust`` -> ``cloudflare-workers``), so one name serves both layouts.
 
   NOT MERGED: the two prefix tables. They are not the same decision. One resolves a slug
-  under the ``.rosetta/docs/<slug>`` layout; the other resolves a slug under the LEGACY
-  ``docs/<slug>`` layout. Registry only ever looks in ``.rosetta/docs``; generate_excerpt
-  tries ``docs/<domain>`` first. Collapsing them would silently start pointing one module
-  at the other's directory. They live side by side, each documented, sharing one shape.
+  under the docs directory the repo's config declares; the other resolves a slug under the
+  LEGACY ``docs/<slug>`` layout. Registry only ever looks under the configured docs
+  directory; generate_excerpt tries the legacy ``docs/<domain>`` first. Collapsing them would
+  silently start pointing one module at the other's directory. They live side by side, each
+  documented, sharing one shape.
 
 THE ROLE DEFAULT
   ``split_agent_name`` takes ``default_role`` explicitly. There is no correct global
@@ -72,10 +73,10 @@ LEGACY_DOCS_DOMAIN_BY_PREFIX = {
     "cmux": "cmux",
 }
 
-#: Directory names that hold a canonical fact-graph, in resolution order, with the index
-#: of the path segment that carries the slug.
+#: Legacy layouts still READ (a graph written before the repo declared its config). The
+#: configured docs directory is checked FIRST and is the only one a writer targets; these two
+#: stay so an unmigrated tree is still indexable. Held as data so the rule has one home.
 GRAPH_LAYOUTS: tuple[tuple[tuple[str, ...], int], ...] = (
-    ((".rosetta", "docs"), 2),
     (("docs",), 1),
     (("agents",), -2),
 )
@@ -139,17 +140,39 @@ def legacy_docs_domain(stem: str) -> str | None:
     return _longest_prefix_match(stem, LEGACY_DOCS_DOMAIN_BY_PREFIX)
 
 
-def slug_from_graph_path(path: Path, repo_root: Path) -> str | None:
+def slug_from_graph_path(
+    path: Path,
+    repo_root: Path,
+    docs_dir: Path | None = None,
+    agents_dir: Path | None = None,
+) -> str | None:
     """Derive the graph slug from a ``fact-graph.json`` path, or ``None`` if unrecognized.
 
-    Recognizes the three layouts (pre- and post-consolidation):
-      ``.rosetta/docs/<slug>/fact-graph.json``  → slug
+    The repo's CONFIG decides first: a graph under the configured docs directory is named by
+    its first segment relative to that directory (``kb/graphs/x/fact-graph.json`` → ``x``),
+    and one under the configured agents directory by the agent that owns it
+    (``prompts/x-implementer/kb/fact-graph.json`` → ``x``).
+
+    Two legacy layouts stay readable, so an unmigrated tree is still indexed:
       ``docs/<slug>/fact-graph.json``           → slug
       ``agents/<name>/kb/fact-graph.json``      → stem of ``<name>``
+    Neither is a writer target any more; the configured directory is.
     """
     parts = path.relative_to(repo_root).parts
-    if len(parts) >= 3 and parts[0] == ".rosetta" and parts[1] == "docs":
-        return parts[2]
+    if docs_dir is not None:
+        try:
+            rel = path.relative_to(docs_dir).parts
+        except ValueError:
+            rel = ()
+        if rel and len(rel) >= 2 and rel[-1] == "fact-graph.json":
+            return rel[0]
+    if agents_dir is not None:
+        try:
+            rel = path.relative_to(agents_dir).parts
+        except ValueError:
+            rel = ()
+        if rel and len(rel) >= 3 and rel[-2] == "kb":
+            return split_agent_name(rel[0], default_role="specialist")[0]
     if len(parts) >= 2 and parts[0] == "docs":
         return parts[1]
     if len(parts) >= 3 and parts[0] == "agents" and parts[-2] == "kb":
@@ -157,6 +180,7 @@ def slug_from_graph_path(path: Path, repo_root: Path) -> str | None:
     return None
 
 
-def graph_path_for(repo_root: Path, slug: str) -> Path:
-    """The canonical graph path for a slug in the modern layout."""
-    return repo_root / ".rosetta" / "docs" / slug / "fact-graph.json"
+def graph_path_for(repo_root: Path, slug: str, docs_dir: Path | None = None) -> Path:
+    """The canonical graph path for a slug: the configured docs directory, else the legacy one."""
+    base = docs_dir if docs_dir is not None else repo_root / "docs"
+    return base / slug / "fact-graph.json"

@@ -119,7 +119,11 @@ def main() -> int:
     )
 
     # ── graph layout → slug ────────────────────────────────────────
+    # The configured docs/agents directories are the FIRST layout; the two legacy layouts are
+    # still read so an unmigrated tree stays indexable. Both sides are pinned below.
     root = Path("/tmp/does-not-need-to-exist")
+    docs = root / ".rosetta" / "docs"
+    agents = root / "agents"
     for rel, want in [
         (".rosetta/docs/rust/fact-graph.json", "rust"),
         ("docs/kotlin/fact-graph.json", "kotlin"),
@@ -128,19 +132,71 @@ def main() -> int:
         ("somewhere/else/fact-graph.json", None),
         (".rosetta/research/x.json", None),
     ]:
-        check(f"slug_from_graph_path[{rel}]", N.slug_from_graph_path(root / rel, root), want)
         check(
-            f"slug_from_graph_path-provenance[{rel}]",
-            _registry_slug(rel),
+            f"slug_from_graph_path[{rel}]",
+            N.slug_from_graph_path(root / rel, root, docs_dir=docs, agents_dir=agents),
             want,
         )
+    # A configured layout that is neither of the legacy names still names its graphs.
+    custom_docs = root / "kb" / "graphs"
+    custom_agents = root / "prompts"
+    for rel, want in [
+        ("kb/graphs/x/fact-graph.json", "x"),
+        ("prompts/x-implementer/kb/fact-graph.json", "x"),
+        ("kb/graphs/nested/deep/fact-graph.json", "nested"),
+        ("docs/kotlin/fact-graph.json", "kotlin"),
+    ]:
+        check(
+            f"slug_from_graph_path-custom[{rel}]",
+            N.slug_from_graph_path(root / rel, root, docs_dir=custom_docs, agents_dir=custom_agents),
+            want,
+        )
+    check(
+        "slug_from_graph_path-no-config-dirs",
+        N.slug_from_graph_path(root / "kb/graphs/x/fact-graph.json", root),
+        None,
+    )
 
     # ── graph_path_for ─────────────────────────────────────────────
     check(
         "graph_path_for",
-        N.graph_path_for(root, "rust"),
+        N.graph_path_for(root, "rust", docs_dir=docs),
         root / ".rosetta" / "docs" / "rust" / "fact-graph.json",
     )
+    check(
+        "graph_path_for-custom",
+        N.graph_path_for(root, "rust", docs_dir=custom_docs),
+        root / "kb" / "graphs" / "rust" / "fact-graph.json",
+    )
+
+    # registry's delegating alias answers with the repo's resolved layout. Point it at a temp
+    # repo that declares the standard layout, so the check needs no machine-wide config.
+    import json
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="rosetta-naming-"))
+    try:
+        import os
+        # A neutral device home: a fixture's layout comes from its own config, never from this
+        # machine's device file.
+        os.environ["ROSETTA_HOME"] = str(tmp / "device-home")
+        (tmp / "device-home").mkdir()
+        (tmp / ".rosetta").mkdir(parents=True)
+        (tmp / ".rosetta" / "config.json").write_text(json.dumps({
+            "version": 2,
+            "paths": {"docs": ".rosetta/docs", "research": ".rosetta/research",
+                      "probes": ".rosetta/probes", "agents": "agents"},
+        }))
+        R.set_repo_root(tmp)
+        for rel, want in [
+            (".rosetta/docs/rust/fact-graph.json", "rust"),
+            ("agents/morph-cloud-implementer/kb/fact-graph.json", "morph-cloud"),
+            ("somewhere/else/fact-graph.json", None),
+        ]:
+            check(f"registry_slug[{rel}]", _registry_slug(rel), want)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
         print(f"FAILED — {len(failures)} case(s):")

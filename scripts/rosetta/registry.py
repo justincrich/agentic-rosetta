@@ -37,6 +37,7 @@ from pathlib import Path
 
 from naming import slug_for_agent, slug_from_graph_path, split_agent_name
 from resolve import project_root as discover_repo_root
+import roots
 from version_label import format_kb_version, kb_edition
 from versions import composed_entries, composed_freshness, declared_composed_slugs
 
@@ -48,6 +49,10 @@ class Paths:
     Replaces three independently-rebound globals (_paths.root, _paths.registry,
     _paths.agents). One object, one rebinding point, so the three can no longer disagree
     about which project a scan is about.
+
+    ``docs`` and ``agents`` are DECLARED, not spelled: the repo's version 2 config answers
+    both, so a repo that keeps its prompts in ``prompts/`` and its graphs in ``kb/graphs/``
+    is indexed where they are. A repo with no valid config is refused by the resolver.
     """
 
     root: Path
@@ -57,8 +62,18 @@ class Paths:
         return self.root / ".rosetta" / "registry.json"
 
     @property
+    def docs(self) -> Path:
+        return _layout(self.root)[0]
+
+    @property
     def agents(self) -> Path:
-        return self.root / "agents"
+        return _layout(self.root)[1]
+
+
+# One resolver call per class per repo per process: a scan asks for the layout for every graph
+# file it finds, and each ask used to be a subprocess.
+def _layout(root: Path) -> tuple[Path, Path]:
+    return roots.layout(root)
 
 
 _paths = Paths(discover_repo_root())
@@ -89,13 +104,14 @@ EXCLUDE_DIR_NAMES = {
 def _iter_fact_graphs(root: Path | None = None):
     """Yield (absolute_path, slug) for every fact-graph.json in the repo (exhaustive)."""
     base = Path(root).expanduser().resolve() if root is not None else _paths.root
+    docs, agents = _layout(base)
     for dirpath, dirnames, filenames in os.walk(base):
         # prune excluded dirs in-place so os.walk doesn't descend
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR_NAMES]
         for fn in filenames:
             if fn == "fact-graph.json":
                 p = Path(dirpath) / fn
-                slug = slug_from_graph_path(p, base)
+                slug = slug_from_graph_path(p, base, docs_dir=docs, agents_dir=agents)
                 if slug:
                     yield p, slug
     return
@@ -107,8 +123,8 @@ def _split_name_role(name: str) -> tuple[str, str]:
 
 
 def _slug_for_graph(path: Path) -> str | None:
-    """Delegating alias: the three graph layouts are described in ``naming``."""
-    return slug_from_graph_path(path, _paths.root)
+    """Delegating alias: the graph layouts are described in ``naming``."""
+    return slug_from_graph_path(path, _paths.root, docs_dir=_paths.docs, agents_dir=_paths.agents)
 
 
 def _slug_for_agent(name: str, known_slugs: set[str] | None = None) -> str | None:
