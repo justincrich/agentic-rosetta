@@ -20,7 +20,15 @@ WHAT A RUN DOES
      ``--adopt``, to ``<dest>.bak-<timestamp>``.
   4. Verifies each file's sha256 *before* writing it (download → hash → compare →
      atomic replace). A mismatch refuses the run and leaves the device untouched.
-  5. Never deletes a file it did not create: the paths it wrote are recorded in
+  5. Mirrors the snapshot's shared documents (``manifest.json``'s ``share`` block) into
+     ``$HOME/.rosetta/share`` whenever the snapshot publishes them. This is not optional and
+     not target-scoped: the prompts cite those files, so a run that skipped them would hand the
+     device a prompt pointing at nothing.
+  6. Repeats, or reports, the harness side effects the snapshot declares per target: the device
+     sync applies ``opencode-agent-model-unpin`` to the device's own ``opencode.json`` (the same
+     key removal agentshare does), and reports every ``not-applied`` effect with its reason. A
+     side effect is never silently ignored.
+  7. Never deletes a file it did not create: the paths it wrote are recorded in
      ``~/.rosetta/sync-state.json`` and only a recorded path that is gone from the new
      snapshot *and* still holds the recorded bytes is removed.
 
@@ -66,6 +74,7 @@ MANIFEST_PATH = "/manifest.json"
 INVENTORY_PATHS = ("/files/files.json", "/files.json")
 STATE_RELPATH = Path(".rosetta") / "sync-state.json"
 STATE_SCHEMA = 1
+SHARE_STATE_KEY = "share"
 READ_TIMEOUT_SECONDS = 120
 DOWNLOAD_WORKERS = 8
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -266,6 +275,28 @@ def load_manifest(client: SnapshotClient) -> dict:
             _field(kb, "path", label=f"manifest.json kbs[{index}]"),
             label=f"manifest.json kbs[{index}].path",
         )
+    if "share" in manifest:
+        share = manifest["share"]
+        validate_relative_path(_field(share, "dest", label="manifest.json share"), label="manifest.json share.dest")
+        prefix = _field(share, "prefix", label="manifest.json share")
+        if not isinstance(prefix, str) or not prefix.endswith("/"):
+            raise Refused(f"manifest.json share.prefix {prefix!r} must be a directory prefix ending in '/'")
+        validate_relative_path(prefix.rstrip("/"), label="manifest.json share.prefix")
+    if "targets" in manifest:
+        for name, entry in manifest["targets"].items():
+            effects = entry.get("side_effects") if isinstance(entry, dict) else None
+            if effects is None:
+                continue
+            if not isinstance(effects, list):
+                raise Refused(f"manifest.json targets.{name}.side_effects: expected a list")
+            for index, effect in enumerate(effects):
+                label = f"manifest.json targets.{name}.side_effects[{index}]"
+                validate_relative_path(_field(effect, "path", label=label), label=f"{label}.path")
+                handling = _field(effect, "handling", label=label)
+                if handling not in ("sync-applies", "not-applied"):
+                    raise Refused(
+                        f"{label}.handling {handling!r} is neither 'sync-applies' nor 'not-applied'"
+                    )
     return manifest
 
 
@@ -337,6 +368,34 @@ def plan_for_targets(manifest: dict, inventory: dict[str, dict], requested: list
             )
         plan[name] = {"dest": dest, "files": files}
     return plan
+
+
+def plan_share(manifest: dict, inventory: dict[str, dict]) -> dict | None:
+    """The snapshot's shared documents: ``docs/…`` assets and where they land on the device."""
+    block = manifest.get("share")
+    if block is None:
+        return None
+    dest = block["dest"]
+    prefix = block["prefix"]
+    files: dict[str, dict] = {}
+    for asset_path, entry in inventory.items():
+        if not asset_path.startswith(prefix):
+            continue
+        relative = asset_path[len(prefix) :]
+        validate_relative_path(relative, label="share file")
+        files[relative] = {"asset": asset_path, "sha256": entry["sha256"], "bytes": entry["bytes"]}
+    if not files:
+        raise Refused(
+            f"the manifest publishes a share section ({prefix} -> {dest}) but the inventory lists "
+            "no file under it; the publish is inconsistent"
+        )
+    declared = block.get("files")
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared != len(files):
+        raise Refused(
+            f"the snapshot says the share section has {declared} files but the inventory lists "
+            f"{len(files)}; the publish is inconsistent"
+        )
+    return {"dest": dest, "files": files}
 
 
 # ── the device tree ────────────────────────────────────────────────────
@@ -456,11 +515,98 @@ def prune_target(destination: Path, previous: dict, planned: dict[str, dict]) ->
     return pruned
 
 
+def _agent_names_for_target(plan: dict) -> set[str]:
+    """The agent names a target's planned files belong to (``<name>.md`` / ``<name>/...``)."""
+    names: set[str] = set()
+    for relative in plan["files"]:
+        if "/" in relative:
+            names.add(relative.split("/", 1)[0])
+        else:
+            names.add(relative.rsplit(".", 1)[0])
+    return names
+
+
+def unpin_opencode_models(*, home: Path, path: str, names: set[str]) -> dict:
+    """Remove ``agent.<name>.model`` from the device's ``opencode.json``.
+
+    This is agentshare's OpenCode side effect, repeated on the device: OpenCode's inherit
+    signal is key absence, so a pinned model in the config beats the profile that has none.
+    Only the published agents are touched, an entry left empty is dropped (as agentshare does),
+    and a file that is not readable JSON is left exactly as it is and reported.
+    """
+    result = {"applied": False, "pins_removed": 0, "detail": ""}
+    parts = validate_relative_path(path, label="side effect path")
+    config = join_under(home, parts, label="side effect path")
+    if _symlink_at(config):
+        result["detail"] = f"{config} is a symlink; refusing to rewrite it"
+        return result
+    if not config.is_file():
+        result["applied"] = True
+        result["detail"] = f"{path}: absent on this device, so there is no agent model pin to remove"
+        return result
+    try:
+        document = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        result["detail"] = f"{path}: not readable as JSON ({error}); its agent model pins were left alone"
+        return result
+    if not isinstance(document, dict):
+        result["detail"] = f"{path}: not a JSON object; its agent model pins were left alone"
+        return result
+    agents = document.get("agent")
+    if not isinstance(agents, dict):
+        result["applied"] = True
+        result["detail"] = f"{path}: no agent section, so there is no agent model pin to remove"
+        return result
+    pinned = sorted(name for name in names if isinstance(agents.get(name), dict) and "model" in agents[name])
+    if not pinned:
+        result["applied"] = True
+        result["detail"] = f"{path}: no published agent has a model pin"
+        return result
+    for name in pinned:
+        del agents[name]["model"]
+        if not agents[name]:
+            del agents[name]
+    # Same serialisation agentshare writes, so a device and a local projector run agree byte for byte.
+    write_file_atomically(config, json.dumps(document, indent=2, ensure_ascii=False).encode("utf-8"))
+    result["applied"] = True
+    result["pins_removed"] = len(pinned)
+    result["detail"] = f"{path}: removed agent.<name>.model for {len(pinned)} agent(s)"
+    return result
+
+
+def apply_side_effects(*, home: Path, target: str, plan: dict, entry: dict) -> list[dict]:
+    """Repeat or report every harness side effect the snapshot declares for this target."""
+    records: list[dict] = []
+    for effect in entry.get("side_effects") or []:
+        record = {
+            "name": effect["name"],
+            "path": effect["path"],
+            "handling": effect["handling"],
+            "applied": False,
+            "pins_removed": 0,
+            "detail": str(effect.get("reason") or ""),
+        }
+        if effect["handling"] == "sync-applies":
+            if effect["name"] == "opencode-agent-model-unpin":
+                record.update(
+                    unpin_opencode_models(home=home, path=effect["path"], names=_agent_names_for_target(plan))
+                )
+            else:
+                record["detail"] = (
+                    f"{effect['name']}: this sync has no implementation for it, so it was not applied"
+                )
+        records.append(record)
+        state = "applied" if record["applied"] else "NOT applied"
+        print(f"[sync] {target} side effect {effect['name']}: {state} — {record['detail']}", file=sys.stderr)
+    return records
+
+
 def sync_target(
     *,
     home: Path,
     name: str,
     plan: dict,
+    target_entry: dict,
     snapshot_id: str,
     state: dict,
     client: SnapshotClient,
@@ -527,6 +673,9 @@ def sync_target(
         "snapshot_id": snapshot_id,
         "files": written_now,
     }
+    side_effects = apply_side_effects(
+        home=home, target=name, plan=plan, entry=target_entry
+    )
     return {
         "dest": plan["dest"],
         "written": written,
@@ -534,6 +683,7 @@ def sync_target(
         "pruned": pruned,
         "files": len(plan["files"]),
         "adopted": str(adopted) if adopted else None,
+        "side_effects": side_effects,
     }
 
 
@@ -554,6 +704,7 @@ def run(args: argparse.Namespace) -> int:
     manifest = load_manifest(client)
     inventory = load_inventory(client, manifest)
     plan = plan_for_targets(manifest, inventory, requested)
+    share = plan_share(manifest, inventory)
 
     home = Path.home()
     state_path = home / STATE_RELPATH
@@ -565,6 +716,21 @@ def run(args: argparse.Namespace) -> int:
             home=home,
             name=name,
             plan=plan[name],
+            target_entry=manifest["targets"][name],
+            snapshot_id=manifest["snapshot_id"],
+            state=state,
+            client=client,
+            adopt=args.adopt,
+        )
+    share_result = None
+    if share is not None:
+        # The prompts cite these documents, so the shared tree is synced whatever targets the
+        # caller asked for; skipping it would hand the device a prompt that points at nothing.
+        share_result = sync_target(
+            home=home,
+            name=SHARE_STATE_KEY,
+            plan=share,
+            target_entry={},
             snapshot_id=manifest["snapshot_id"],
             state=state,
             client=client,
@@ -573,6 +739,9 @@ def run(args: argparse.Namespace) -> int:
     write_state(state_path, state)
 
     totals = {key: sum(result[key] for result in results.values()) for key in ("written", "skipped", "pruned")}
+    if share_result is not None:
+        for key in ("written", "skipped", "pruned"):
+            totals[key] += share_result[key]
     summary = {
         "event": "sync.done",
         "url": base_url,
@@ -580,11 +749,19 @@ def run(args: argparse.Namespace) -> int:
         "targets": results,
         **totals,
     }
+    if share_result is not None:
+        summary["share"] = share_result
     print(json.dumps(summary, sort_keys=True))
     for name, result in sorted(results.items()):
         print(
             f"[sync] {name}: {result['written']} written, {result['skipped']} unchanged, "
             f"{result['pruned']} pruned -> {home / result['dest']}",
+            file=sys.stderr,
+        )
+    if share_result is not None:
+        print(
+            f"[sync] share: {share_result['written']} written, {share_result['skipped']} unchanged, "
+            f"{share_result['pruned']} pruned -> {home / share_result['dest']}",
             file=sys.stderr,
         )
     return EXIT_OK

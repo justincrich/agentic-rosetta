@@ -8,7 +8,16 @@ WHAT IS REAL HERE
   ``agentshare.py`` run of the consumer checkout (projected by the publisher's own
   ``--copy``/normalisation rules, so the exclusion list has one home). The republish case
   stands up the real Worker in workerd (``wrangler dev --local``) over TLS on a freshly
-  published stage — no hand-written manifest, no fake transport.
+  published stage, uploaded into the LOCAL R2 store the Worker reads — no hand-written
+  manifest, no fake transport.
+
+  AC-21 publishes OpenCode, Grok and Droid with the publisher, uploads that stage into local
+  R2, serves it from the real Worker in workerd, syncs it into a sandbox ``HOME``, and compares
+  every file's sha256 with a real ``agentshare --target`` run of the same checkout. It also
+  checks the two things a file mirror cannot carry: Grok's profiles must land in
+  ``.grok/agent-library`` and never in the folder Grok scans, and the OpenCode ``opencode.json``
+  model unpin must be reproduced on the device (byte-for-byte the same result as the projector)
+  or reported as not applied.
 
   AC-1's hostile inputs cannot come from the real service (it will never publish
   ``../escape.md`` or a wrong sha256), so this suite serves them from a real HTTPS origin it
@@ -16,13 +25,14 @@ WHAT IS REAL HERE
   client under test is the shipped one: real TLS, real redirects, real bytes.
 
 ENVIRONMENT
-  ROSETTA_MCP_TOKEN   required: the service's shared bearer token (never printed)
+  ROSETTA_MCP_TOKEN   required for AC-15/AC-20: the service's shared bearer token (never printed)
   ROSETTA_MCP_URL     optional: another deployment of the same Worker
   ROSETTA_PUBLISH_ROOT  optional: the consumer checkout (default ``~/Projects/brain``)
 
 Run:
     ROSETTA_MCP_TOKEN=… python3 scripts/kb-delivery/test_sync_agents.py
     ROSETTA_MCP_TOKEN=… python3 scripts/kb-delivery/test_sync_agents.py -k ac20
+    python3 scripts/kb-delivery/test_sync_agents.py -k ac21      # no deployed token needed
 """
 from __future__ import annotations
 
@@ -53,13 +63,22 @@ SYNC = HERE / "sync_agents.py"
 PUBLISHER = HERE / "publish_snapshot.py"
 WRANGLER = PLUGIN / "worker" / "node_modules" / ".bin" / "wrangler"
 WORKER_DIR = PLUGIN / "worker"
+# The bucket the Worker binds in worker/wrangler.jsonc; local R2 storage is keyed by that name,
+# so the publisher's upload and the dev server must name the same one.
+R2_BUCKET = "rosetta-kb-mcp-snapshots"
 
 SERVICE_URL = os.environ.get("ROSETTA_MCP_URL") or "https://rosetta-kb-mcp.justin-d51.workers.dev"
 TOKEN_ENV = "ROSETTA_MCP_TOKEN"
 EXPECTED_AGENTS = 293
 EXPECTED_CLAUDE_FILES = 336
 EXPECTED_CODEX_FILES = 293
-TARGET_DEST = {"claude": ".claude/agents", "codex": ".codex/agents"}
+TARGET_DEST = {
+    "claude": ".claude/agents",
+    "codex": ".codex/agents",
+    "opencode": ".config/opencode/agents",
+    "droid": ".factory/droids",
+    "grok": ".grok/agent-library",
+}
 TARGET_FILES = {"claude": EXPECTED_CLAUDE_FILES, "codex": EXPECTED_CODEX_FILES}
 BACKUP_RE = re.compile(r"^agents\.bak-\d{8}-\d{6}$")
 WRANGLER_START_TIMEOUT = 120
@@ -79,6 +98,17 @@ def sha256_of(path: Path) -> str:
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def remove_tree(path: Path) -> None:
+    """Remove a temporary tree, clearing the immutable flags the OpenCode target plants.
+
+    agentshare marks ``<opencode target>/agents`` as ``uchg`` so other tools cannot recreate a
+    symlink over it. That is correct on a device and fatal to ``rmtree`` on our throwaway copy,
+    so the flag is cleared here rather than leaving every run's tree behind in the temp folder.
+    """
+    subprocess.run(["chflags", "-R", "nouchg", str(path)], check=False, capture_output=True)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def tree_hashes(root: Path) -> dict[str, str]:
@@ -112,6 +142,98 @@ def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def publish_stage_to_local_r2(stage: Path, persist: Path) -> None:
+    """Upload an already-staged snapshot into local R2 through the publisher's own path.
+
+    The Worker reads snapshots from R2 (``SNAPSHOT`` binding, ``current.json`` pointer), so a
+    ``wrangler dev --local`` server serves the stage only after this: ``--upload-only`` runs the
+    real upload (blobs, snapshot metadata, pointer last) against the same ``--persist-to``
+    storage the dev server reads. Nothing here writes a manifest or an object by hand.
+    """
+    if not WRANGLER.is_file():
+        raise AssertionError(
+            f"{WRANGLER} is missing; run `bun install` in {WORKER_DIR} (the Worker's real "
+            "runtime, and its R2 CLI, is what these proofs drive)."
+        )
+    argv = [
+        sys.executable, str(PUBLISHER), "--stage", str(stage), "--upload-only",
+        "--r2-bucket", R2_BUCKET, "--r2-local", "--persist-to", str(persist),
+        "--r2-jobs", "8", "--wrangler", str(WRANGLER),
+    ]
+    proc = subprocess.run(argv, capture_output=True, text=True, cwd=str(PLUGIN), timeout=SYNC_TIMEOUT)
+    print(f"$ {' '.join(argv)}")
+    print(proc.stdout, end="")
+    print(proc.stderr, end="")
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"the snapshot upload into local R2 exited {proc.returncode}:\n{proc.stdout}\n{proc.stderr}"
+        )
+    for line in proc.stdout.splitlines():
+        if "current.json" in line:
+            print(f"[r2] {line.strip()}")
+
+
+@contextlib.contextmanager
+def workerd_snapshot(stage: Path, token: str, certfile: Path, keyfile: Path):
+    """The real Worker in workerd, over TLS, serving ``stage`` from local R2 as its snapshot.
+
+    One home for both suites that need a published snapshot served the way the deployed
+    service serves it: the stage is uploaded into local R2 with the publisher's own upload path,
+    ``wrangler dev --local --persist-to`` reads that same storage, and the sync talks to it over
+    real TLS with the real bearer check.
+    """
+    persist = stage.parent / f"{stage.name}-r2-state"
+    publish_stage_to_local_r2(stage, persist)
+    port = free_port()
+    argv = [
+        str(WRANGLER), "dev", "--local", "--ip", "127.0.0.1", "--port", str(port),
+        "--persist-to", str(persist),
+        "--local-protocol", "https",
+        "--https-cert-path", str(certfile), "--https-key-path", str(keyfile),
+        "--var", f"{TOKEN_ENV}:{token}",
+    ]
+    env = {**os.environ, "CI": "1", "NO_COLOR": "1", "FORCE_COLOR": "0", "WRANGLER_SEND_METRICS": "false"}
+    child = subprocess.Popen(
+        argv, cwd=str(WORKER_DIR), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+    log: list[str] = []
+    reader = threading.Thread(target=lambda: [log.append(line) for line in child.stdout], daemon=True)
+    reader.start()
+    url = f"https://127.0.0.1:{port}"
+    probe_context = ssl.create_default_context(cafile=str(certfile))
+    try:
+        deadline = time.time() + WRANGLER_START_TIMEOUT
+        ready = False
+        while time.time() < deadline:
+            if child.poll() is not None:
+                raise AssertionError("wrangler dev exited before it was ready:\n" + "".join(log))
+            try:
+                urllib.request.urlopen(
+                    urllib.request.Request(url + "/manifest.json"), timeout=2, context=probe_context
+                )
+                ready = True
+                break
+            except urllib.error.HTTPError:
+                # Any HTTP answer means workerd is up: 401 is the bearer gate and 404/500 is the
+                # store, both of which only the running Worker can produce.
+                ready = True
+                break
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                pass
+            time.sleep(0.25)
+        if not ready:
+            raise AssertionError(f"wrangler dev was not ready within {WRANGLER_START_TIMEOUT}s:\n{''.join(log)}")
+        print(f"[workerd] {url} persist-to={persist}")
+        yield url
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                child.kill()
 
 
 def payload_files(stage: Path) -> dict[str, str]:
@@ -281,9 +403,11 @@ class SyncAgentsTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="sync-agents-test-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(remove_tree, self.tmp)
         self.origins: list[LocalOrigin] = []
         self.addCleanup(self._stop_origins)
+        # Which entries `_copy_projection` dropped for each reference target (AC-15 reports them).
+        self.reference_excluded: dict[str, dict[str, int]] = {}
 
     def _stop_origins(self) -> None:
         for origin in self.origins:
@@ -367,18 +491,55 @@ class SyncAgentsTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             return json.loads(response.read().decode("utf-8"))
 
-    def publish(self, root: Path, stage: Path) -> None:
+    def publish(self, root: Path, stage: Path, *, targets: str = "claude,codex") -> None:
         proc = subprocess.run(
-            [sys.executable, str(PUBLISHER), "--root", str(root), "--targets", "claude,codex", "--stage", str(stage)],
+            [sys.executable, str(PUBLISHER), "--root", str(root), "--targets", targets, "--stage", str(stage)],
             capture_output=True,
             text=True,
             timeout=SYNC_TIMEOUT,
             cwd=str(PLUGIN),
         )
-        print(f"$ python3 {PUBLISHER.name} --root {root} --stage {stage}")
+        print(f"$ python3 {PUBLISHER.name} --root {root} --targets {targets} --stage {stage}")
         print(proc.stdout, end="")
         print(proc.stderr, end="")
         self.assertEqual(proc.returncode, 0, msg=f"publish failed:\n{proc.stdout}\n{proc.stderr}")
+
+    def reference_target(self, consumer: Path, target: str, home: Path) -> dict[str, str]:
+        """One target's tree as the consumer's projector really writes it, keyed by sha256.
+
+        The publisher's own exclusion rule is applied to the projector's output (taken from
+        ``publish_snapshot`` rather than reproduced here), so the two sides cannot drift on which
+        files are dropped. For these three targets nothing is excluded: the comparison is a plain
+        per-file sha256 equality with a real ``agentshare --target`` run.
+        """
+        publisher = load_publisher()
+        home.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["BRAIN_ROOT"] = str(consumer)
+        for name in ("GROK_HOME", "ROGUEONE_SHARE"):
+            env.pop(name, None)
+        proc = subprocess.run(
+            [sys.executable, str(consumer / "scripts" / "agentshare.py"), "--target", target],
+            env=env,
+            cwd=str(consumer),
+            capture_output=True,
+            text=True,
+            timeout=SYNC_TIMEOUT,
+        )
+        print(f"$ HOME={home} BRAIN_ROOT={consumer} agentshare.py --target {target}")
+        print(proc.stdout, end="")
+        print(proc.stderr, end="")
+        self.assertEqual(proc.returncode, 0, msg=f"agentshare --target {target} failed")
+        produced = home / TARGET_DEST[target]
+        self.assertTrue(produced.is_dir(), f"agentshare wrote no tree at {produced}")
+        staged = self.tmp / f"reference-{target}"
+        copied, excluded = publisher._copy_projection(produced, staged)
+        self.assertGreater(copied, 0)
+        if target == "codex":
+            publisher.normalize_generated_paths(staged, consumer)
+        self.reference_excluded[target] = excluded
+        return tree_hashes(staged)
 
     def consumer_checkout(self, dest: Path) -> Path:
         """A real checkout of the consumer's HEAD, so a republish cannot touch the real tree."""
@@ -394,93 +555,19 @@ class SyncAgentsTests(unittest.TestCase):
 
         ``agentshare.py`` writes both trees into $HOME; the publisher then drops the entries
         it excludes (*.bak, *.log, .history/) and normalises the Codex provenance line. Both
-        rules are taken from ``publish_snapshot.py`` rather than reproduced here, so the
+        rules come from ``publish_snapshot.py`` rather than being reproduced here, so the
         exclusion list keeps one home.
         """
-        publisher = load_publisher()
-        reference: dict[str, dict[str, str]] = {}
-        for target in ("claude", "codex"):
-            home = self.tmp / f"projector-home-{target}"
-            home.mkdir(parents=True, exist_ok=True)
-            env = dict(os.environ)
-            env["HOME"] = str(home)
-            env["BRAIN_ROOT"] = str(consumer)
-            proc = subprocess.run(
-                [sys.executable, str(consumer / "scripts" / "agentshare.py"), "--target", target],
-                env=env,
-                cwd=str(consumer),
-                capture_output=True,
-                text=True,
-                timeout=SYNC_TIMEOUT,
-            )
-            print(f"$ HOME={home} BRAIN_ROOT={consumer} agentshare.py --target {target}")
-            print(proc.stdout, end="")
-            print(proc.stderr, end="")
-            self.assertEqual(proc.returncode, 0, msg=f"agentshare --target {target} failed")
-            produced = home / TARGET_DEST[target]
-            self.assertTrue(produced.is_dir(), f"agentshare wrote no tree at {produced}")
-            staged = self.tmp / f"projected-{target}"
-            copied, _ = publisher._copy_projection(produced, staged)
-            self.assertGreater(copied, 0)
-            if target == "codex":
-                publisher.normalize_generated_paths(staged, consumer)
-            reference[target] = tree_hashes(staged)
-        return reference
+        return {
+            target: self.reference_target(consumer, target, self.tmp / f"projector-home-{target}")
+            for target in ("claude", "codex")
+        }
 
     @contextlib.contextmanager
     def dev_worker(self, stage: Path, token: str):
         """The real Worker in workerd, over TLS, serving ``stage`` as its snapshot."""
-        if not WRANGLER.is_file():
-            raise AssertionError(
-                f"{WRANGLER} is missing; run `bun install` in {WORKER_DIR} (the Worker's real "
-                "runtime is what these proofs drive)."
-            )
-        port = free_port()
-        argv = [
-            str(WRANGLER), "dev", "--local", "--ip", "127.0.0.1", "--port", str(port),
-            "--local-protocol", "https",
-            "--https-cert-path", str(self.certfile), "--https-key-path", str(self.keyfile),
-            "--assets", str(stage), "--var", f"{TOKEN_ENV}:{token}",
-        ]
-        env = {**os.environ, "CI": "1", "NO_COLOR": "1", "FORCE_COLOR": "0", "WRANGLER_SEND_METRICS": "false"}
-        child = subprocess.Popen(
-            argv, cwd=str(WORKER_DIR), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
-        log: list[str] = []
-        reader = threading.Thread(target=lambda: [log.append(line) for line in child.stdout], daemon=True)
-        reader.start()
-        url = f"https://127.0.0.1:{port}"
-        probe_context = ssl.create_default_context(cafile=str(self.certfile))
-        try:
-            deadline = time.time() + WRANGLER_START_TIMEOUT
-            ready = False
-            while time.time() < deadline:
-                if child.poll() is not None:
-                    raise AssertionError("wrangler dev exited before it was ready:\n" + "".join(log))
-                try:
-                    urllib.request.urlopen(
-                        urllib.request.Request(url + "/manifest.json"), timeout=2, context=probe_context
-                    )
-                    ready = True
-                    break
-                except urllib.error.HTTPError as error:
-                    if error.code == 401:
-                        ready = True
-                        break
-                except (urllib.error.URLError, TimeoutError, ConnectionError):
-                    pass
-                time.sleep(0.25)
-            if not ready:
-                raise AssertionError(f"wrangler dev was not ready within {WRANGLER_START_TIMEOUT}s:\n{''.join(log)}")
-            print(f"[workerd] {url} assets={stage}")
+        with workerd_snapshot(stage, token, self.certfile, self.keyfile) as url:
             yield url
-        finally:
-            if child.poll() is None:
-                child.terminate()
-                try:
-                    child.wait(timeout=20)
-                except subprocess.TimeoutExpired:
-                    child.kill()
 
     # ── AC-1 ───────────────────────────────────────────────────────────
 
@@ -841,6 +928,144 @@ class SyncAgentsTests(unittest.TestCase):
         self.assertEqual(len(agent_dirs), EXPECTED_AGENTS, "a real directory with 293 agent folders was expected")
         self.assertTrue((real / "mcp-planner" / "agent.md").is_file())
         self.assertEqual(tree_digest(fixture), fixture_digest, "the fixture directory changed during --adopt")
+
+    # ── AC-21 ──────────────────────────────────────────────────────────
+
+    def test_ac21_opencode_grok_droid_parity_and_side_effects(self) -> None:
+        """OpenCode, Grok and Droid sync to the projector's own bytes, with declared side effects."""
+        consumer = self.consumer_checkout(self.tmp / "consumer")
+        stage = self.tmp / "stage-targets"
+        self.publish(consumer, stage, targets="opencode,grok,droid")
+        manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
+
+        # (a) The snapshot publishes the three new targets, each into the folder its harness reads.
+        self.assertEqual(sorted(manifest["targets"]), ["droid", "grok", "opencode"])
+        for target in ("opencode", "grok", "droid"):
+            self.assertEqual(manifest["targets"][target]["dest"], TARGET_DEST[target])
+            self.assertEqual(manifest["targets"][target]["files"], EXPECTED_AGENTS + (1 if target == "opencode" else 0))
+        print(
+            f"[ac21] staged targets: "
+            + ", ".join(f"{name} -> {manifest['targets'][name]['dest']}" for name in sorted(manifest["targets"]))
+        )
+
+        # (b) Grok is staged into the library folder and NOWHERE in the folder Grok scans.
+        staged_grok = sorted(
+            path.relative_to(stage).as_posix() for path in (stage / "targets" / "grok").rglob("*") if path.is_file()
+        )
+        self.assertEqual(len(staged_grok), EXPECTED_AGENTS)
+        self.assertEqual(
+            [path for path in staged_grok if path.startswith("targets/grok/agents/")],
+            [],
+            "a Grok profile was staged into the folder Grok scans (~/.grok/agents)",
+        )
+        self.assertEqual(
+            manifest["targets"]["grok"]["side_effects"][0]["path"],
+            ".grok/config.toml",
+            "the grok side effect list no longer names the config the projector rewrites",
+        )
+
+        # (c) A device state the unpin can be observed in: the same opencode.json on both sides,
+        # with model pins for two published agents, one agent nobody publishes, and other keys.
+        seeded_config = {
+            "theme": "system",
+            "provider": {"local": {"options": {"baseURL": "http://127.0.0.1:4545/v1"}}},
+            "agent": {
+                "mcp-planner": {"model": "zai/glm-5.3", "description": "pinned by hand"},
+                "nextjs-reviewer": {"model": "openai/gpt-6.1-sol"},
+                "not-a-published-agent": {"model": "keep/me"},
+            },
+        }
+        home = self.sandbox_home("ac21-home")
+        reference_home = self.tmp / "ac21-reference-home"
+        for root in (home, reference_home):
+            config = root / ".config" / "opencode" / "opencode.json"
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(json.dumps(seeded_config, indent=2, ensure_ascii=False), encoding="utf-8")
+        seeded_sha = sha256_of(home / ".config" / "opencode" / "opencode.json")
+
+        # (d) The reference: a real agentshare run for each target, into its own sandbox HOME.
+        reference = {
+            target: self.reference_target(consumer, target, reference_home)
+            for target in ("opencode", "grok", "droid")
+        }
+        for target, excluded in self.reference_excluded.items():
+            self.assertEqual(sum(excluded.values()), 0, f"{target}: the projector produced excluded entries")
+
+        reference_config = reference_home / ".config" / "opencode" / "opencode.json"
+        self.assertNotEqual(sha256_of(reference_config), seeded_sha, "agentshare did not unpin the seeded models")
+        reference_agents_config = json.loads(reference_config.read_text(encoding="utf-8"))
+        self.assertEqual(
+            reference_agents_config["agent"]["not-a-published-agent"], {"model": "keep/me"},
+            "agentshare touched an agent it does not publish",
+        )
+        print(f"[ac21] agentshare unpinned the seeded models in {reference_config}")
+
+        # (e) The real Worker serves the published stage; the device sync pulls it into a HOME
+        # that holds no checkout at all.
+        local_token = "ac21-workerd-token-7d3b1f"
+        with self.dev_worker(stage, local_token) as url:
+            proc = self.run_sync(
+                home, "--targets", "opencode,grok,droid", url=url, token=local_token, ca=self.certfile, expect=0
+            )
+        summary = self.summary(proc)
+        self.assertEqual(summary["snapshot_id"], manifest["snapshot_id"])
+        self.assertEqual(summary["written"], EXPECTED_AGENTS * 3 + 1)
+        self.assertNotIn("share", summary, "a plain publish carries no shared documents")
+
+        # (f) Per-file sha256 parity with the projector's own output.
+        for target in ("opencode", "grok", "droid"):
+            synced = tree_hashes(home / TARGET_DEST[target])
+            self.assertEqual(
+                sorted(synced), sorted(reference[target]), f"{target}: the synced file set differs from agentshare's"
+            )
+            mismatched = {path for path, digest in synced.items() if reference[target][path] != digest}
+            self.assertEqual(mismatched, set(), f"{target}: files differ from the agentshare run")
+            print(f"[ac21] {target}: {len(synced)} files sha256-identical to agentshare's projection")
+
+        # (g) Grok files land only in the library: the scanned folder stays empty, and the config
+        # the projector rewrites is reported as NOT applied rather than silently skipped.
+        self.assertFalse((home / ".grok" / "agents").exists(), "a Grok file landed in the folder Grok scans")
+        self.assertFalse((home / ".grok" / "config.toml").exists(), "the sync wrote the device's grok config")
+        self.assertTrue(
+            (reference_home / ".grok" / "config.toml").is_file(),
+            "the projector wrote no grok config, so the 'not applied' report proves nothing",
+        )
+        grok_effects = {effect["name"]: effect for effect in summary["targets"]["grok"]["side_effects"]}
+        for name in ("grok-subagents-models-table", "grok-legacy-agents-cleanup"):
+            effect = grok_effects[name]
+            self.assertEqual(effect["handling"], "not-applied")
+            self.assertFalse(effect["applied"])
+            self.assertTrue(effect["detail"], f"{name}: not applied but with no reason")
+            self.assertIn(name, proc.stderr, f"{name}: not reported on stderr")
+        print(f"[ac21] grok side effects reported: {sorted(grok_effects)}")
+
+        # (h) The OpenCode model unpin is REPRODUCED, byte for byte the same result as agentshare.
+        synced_config = home / ".config" / "opencode" / "opencode.json"
+        self.assertEqual(
+            sha256_of(synced_config),
+            sha256_of(reference_config),
+            "the sync's opencode.json does not match what the projector leaves behind",
+        )
+        synced_agents_config = json.loads(synced_config.read_text(encoding="utf-8"))
+        self.assertNotIn("model", synced_agents_config["agent"]["mcp-planner"])
+        self.assertEqual(synced_agents_config["agent"]["not-a-published-agent"], {"model": "keep/me"})
+        self.assertEqual(synced_agents_config["theme"], "system")
+        self.assertEqual(synced_agents_config["provider"], seeded_config["provider"])
+        opencode_effects = {effect["name"]: effect for effect in summary["targets"]["opencode"]["side_effects"]}
+        unpin = opencode_effects["opencode-agent-model-unpin"]
+        self.assertEqual(unpin["handling"], "sync-applies")
+        self.assertTrue(unpin["applied"], f"the unpin was not applied: {unpin['detail']}")
+        self.assertEqual(unpin["pins_removed"], 2, unpin["detail"])
+        print(
+            f"[ac21] observation: {synced_config} -> agent keys "
+            f"{sorted(synced_agents_config['agent'])}, mcp-planner entry "
+            f"{json.dumps(synced_agents_config['agent']['mcp-planner'], sort_keys=True)}"
+        )
+        print(f"[ac21] opencode unpin reproduced: {unpin['detail']}")
+
+        # (i) Droid has no side effect and none is invented for it.
+        self.assertEqual(summary["targets"]["droid"]["side_effects"], [])
+        self.assertIn("droid", summary["targets"])
 
 
 if __name__ == "__main__":
