@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Removed
+- **The MCP service and the snapshot delivery path.** `worker/` (the read-only
+  `rosetta-kb-mcp` Cloudflare Worker), `publish_snapshot.py`, `sync_agents.py`,
+  `doc_refs.py`, `project_agents.py` and their four test suites are gone. The
+  service is being rebuilt in `hackerpug-ai/agent-content`, which already holds
+  the agents and knowledge graphs it serves. This repo is machinery only: the
+  skills, the fanout engine, and the graph writers. `scripts/kb-delivery/` keeps
+  `embed-graph.sh`, `generate_excerpt.py` and `assign.py`, which the skills use.
+
 ## [0.4.6] — 2026-08-25
 
 ### Changed
