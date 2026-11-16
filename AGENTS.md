@@ -45,7 +45,7 @@ in skill prose.
 
 | Artifact | Only writer | Gate |
 |---|---|---|
-| `fact-graph.json` | `scripts/rosetta/write-graph.py` | schema gate in `scripts/rosetta/factgraph.py`; ledger closed + matching `run_id` + `decoder_ring_hash`; `--create` refuses if the graph exists |
+| `fact-graph.json` | `scripts/rosetta/write-graph.py` | schema gate in `scripts/rosetta/factgraph.py`; ledger closed + matching `run_id` + `decoder_ring_hash` before `--create` / `--update` / `--apply-nrra` — the ledger-free `--compose` / `--propagate` take none (see [`scripts/AGENTS.md`](scripts/AGENTS.md)); `--create` refuses if the graph exists |
 | Agent `<!-- rosetta-kb -->` block | `scripts/kb-delivery/embed-graph.sh` (via `generate_excerpt.py`) | `--check` must match the render; prose outside the sentinels is never touched |
 | Storage path | `assets/rosetta_config.py` | CODE, not skill prose. Three *locations* kept byte-identical by `./sync-assets.sh`: repo `assets/`, each `skills/*/assets/` copy, and `$ROSETTA_HOME/bin/` |
 | Research facts (NRRA + ledger) | `engine/` | fail closed; no serial crawl |
