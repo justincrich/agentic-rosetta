@@ -72,6 +72,7 @@ from version_label import kb_edition
 from versions import (
     COMPOSED_DIVERGED,
     COMPOSED_FRESH,
+    SECTIONS,
     bump_kb_version,
     composed_freshness,
     composed_slugs,
@@ -389,7 +390,7 @@ def cmd_update(
             fact_sources = {}
     fact_sources.update(extra_sources)
 
-    for section in ("v", "w", "r", "a", "x", "t"):
+    for section in SECTIONS:
         added = (cs.get("added") or {}).get(section) or {}
         changed = (cs.get("changed") or {}).get(section) or {}
         deprecated = (cs.get("deprecated") or {}).get(section) or {}
@@ -500,7 +501,7 @@ def cmd_apply_nrra(
     fact_sources.update(extra_sources)
 
     pin_reports: list[str] = []
-    for section in ("v", "w", "r", "a", "x", "t"):
+    for section in SECTIONS:
         incoming = seed.get(section) or {}
         if not isinstance(incoming, dict):
             continue

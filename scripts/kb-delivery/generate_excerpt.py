@@ -54,6 +54,7 @@ from resolve import project_root  # noqa: E402
 from version_label import format_kb_version  # noqa: E402
 from versions import (  # noqa: E402
     COMPOSED_KEY,
+    SECTIONS,
     composed_entries,
     declared_composed_slugs,
 )
@@ -389,7 +390,7 @@ def composed_excerpt(graph: dict, role: str) -> list[str]:
         lines.append("")
         # Only the six fact sections, so the borrowed render cannot recurse into its own
         # composition (facts carry no _meta, hence no declaration).
-        borrowed = {section: facts.get(section) or {} for section in ("v", "w", "r", "a", "x", "t")}
+        borrowed = {section: facts.get(section) or {} for section in SECTIONS}
         lines.append(full_excerpt(borrowed, f"composed:{slug}", role).rstrip())
     return lines
 

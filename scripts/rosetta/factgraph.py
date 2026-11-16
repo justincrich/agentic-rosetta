@@ -51,7 +51,7 @@ import json
 from enum import Enum
 from typing import Any
 
-from versions import COMPOSED_KEY, fact_fingerprint
+from versions import COMPOSED_KEY, SECTIONS, fact_fingerprint
 from version_label import kb_edition
 
 try:
@@ -72,10 +72,6 @@ VERDICTS = frozenset({"r", "nr", "REJECT"})
 
 #: Present in a graph that must never be written: it would truncate the embed region.
 END_SENTINEL = "rosetta-kb:end"
-
-#: Graph sections, in writer iteration order.
-SECTIONS = ("v", "w", "r", "a", "x", "t")
-
 
 class SchemaError(Exception):
     """A graph that must not be written. ``check`` names the failed gate."""
