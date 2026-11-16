@@ -8,14 +8,16 @@ WHAT IS REAL HERE
   ``agentshare.py`` run of the consumer checkout (projected by the publisher's own
   ``--copy``/normalisation rules, so the exclusion list has one home). The republish case
   stands up the real Worker in workerd (``wrangler dev --local``) over TLS on a freshly
-  published stage — no hand-written manifest, no fake transport.
+  published stage, uploaded into the LOCAL R2 store the Worker reads — no hand-written
+  manifest, no fake transport.
 
-  AC-21 publishes OpenCode, Grok and Droid with the publisher, serves that stage from the real
-  Worker in workerd, syncs it into a sandbox ``HOME``, and compares every file's sha256 with a
-  real ``agentshare --target`` run of the same checkout. It also checks the two things a file
-  mirror cannot carry: Grok's profiles must land in ``.grok/agent-library`` and never in the
-  folder Grok scans, and the OpenCode ``opencode.json`` model unpin must be reproduced on the
-  device (byte-for-byte the same result as the projector) or reported as not applied.
+  AC-21 publishes OpenCode, Grok and Droid with the publisher, uploads that stage into local
+  R2, serves it from the real Worker in workerd, syncs it into a sandbox ``HOME``, and compares
+  every file's sha256 with a real ``agentshare --target`` run of the same checkout. It also
+  checks the two things a file mirror cannot carry: Grok's profiles must land in
+  ``.grok/agent-library`` and never in the folder Grok scans, and the OpenCode ``opencode.json``
+  model unpin must be reproduced on the device (byte-for-byte the same result as the projector)
+  or reported as not applied.
 
   AC-1's hostile inputs cannot come from the real service (it will never publish
   ``../escape.md`` or a wrong sha256), so this suite serves them from a real HTTPS origin it
@@ -61,6 +63,9 @@ SYNC = HERE / "sync_agents.py"
 PUBLISHER = HERE / "publish_snapshot.py"
 WRANGLER = PLUGIN / "worker" / "node_modules" / ".bin" / "wrangler"
 WORKER_DIR = PLUGIN / "worker"
+# The bucket the Worker binds in worker/wrangler.jsonc; local R2 storage is keyed by that name,
+# so the publisher's upload and the dev server must name the same one.
+R2_BUCKET = "rosetta-kb-mcp-snapshots"
 
 SERVICE_URL = os.environ.get("ROSETTA_MCP_URL") or "https://rosetta-kb-mcp.justin-d51.workers.dev"
 TOKEN_ENV = "ROSETTA_MCP_TOKEN"
@@ -139,25 +144,55 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-@contextlib.contextmanager
-def workerd_snapshot(stage: Path, token: str, certfile: Path, keyfile: Path):
-    """The real Worker in workerd, over TLS, serving ``stage`` as its snapshot.
+def publish_stage_to_local_r2(stage: Path, persist: Path) -> None:
+    """Upload an already-staged snapshot into local R2 through the publisher's own path.
 
-    One home for both suites that need a published snapshot served the way the deployed
-    service serves it: ``wrangler dev --local`` binds the stage as Static Assets and the sync
-    talks to it over real TLS with the real bearer check.
+    The Worker reads snapshots from R2 (``SNAPSHOT`` binding, ``current.json`` pointer), so a
+    ``wrangler dev --local`` server serves the stage only after this: ``--upload-only`` runs the
+    real upload (blobs, snapshot metadata, pointer last) against the same ``--persist-to``
+    storage the dev server reads. Nothing here writes a manifest or an object by hand.
     """
     if not WRANGLER.is_file():
         raise AssertionError(
             f"{WRANGLER} is missing; run `bun install` in {WORKER_DIR} (the Worker's real "
-            "runtime is what these proofs drive)."
+            "runtime, and its R2 CLI, is what these proofs drive)."
         )
+    argv = [
+        sys.executable, str(PUBLISHER), "--stage", str(stage), "--upload-only",
+        "--r2-bucket", R2_BUCKET, "--r2-local", "--persist-to", str(persist),
+        "--r2-jobs", "8", "--wrangler", str(WRANGLER),
+    ]
+    proc = subprocess.run(argv, capture_output=True, text=True, cwd=str(PLUGIN), timeout=SYNC_TIMEOUT)
+    print(f"$ {' '.join(argv)}")
+    print(proc.stdout, end="")
+    print(proc.stderr, end="")
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"the snapshot upload into local R2 exited {proc.returncode}:\n{proc.stdout}\n{proc.stderr}"
+        )
+    for line in proc.stdout.splitlines():
+        if "current.json" in line:
+            print(f"[r2] {line.strip()}")
+
+
+@contextlib.contextmanager
+def workerd_snapshot(stage: Path, token: str, certfile: Path, keyfile: Path):
+    """The real Worker in workerd, over TLS, serving ``stage`` from local R2 as its snapshot.
+
+    One home for both suites that need a published snapshot served the way the deployed
+    service serves it: the stage is uploaded into local R2 with the publisher's own upload path,
+    ``wrangler dev --local --persist-to`` reads that same storage, and the sync talks to it over
+    real TLS with the real bearer check.
+    """
+    persist = stage.parent / f"{stage.name}-r2-state"
+    publish_stage_to_local_r2(stage, persist)
     port = free_port()
     argv = [
         str(WRANGLER), "dev", "--local", "--ip", "127.0.0.1", "--port", str(port),
+        "--persist-to", str(persist),
         "--local-protocol", "https",
         "--https-cert-path", str(certfile), "--https-key-path", str(keyfile),
-        "--assets", str(stage), "--var", f"{TOKEN_ENV}:{token}",
+        "--var", f"{TOKEN_ENV}:{token}",
     ]
     env = {**os.environ, "CI": "1", "NO_COLOR": "1", "FORCE_COLOR": "0", "WRANGLER_SEND_METRICS": "false"}
     child = subprocess.Popen(
@@ -180,16 +215,17 @@ def workerd_snapshot(stage: Path, token: str, certfile: Path, keyfile: Path):
                 )
                 ready = True
                 break
-            except urllib.error.HTTPError as error:
-                if error.code == 401:
-                    ready = True
-                    break
+            except urllib.error.HTTPError:
+                # Any HTTP answer means workerd is up: 401 is the bearer gate and 404/500 is the
+                # store, both of which only the running Worker can produce.
+                ready = True
+                break
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 pass
             time.sleep(0.25)
         if not ready:
             raise AssertionError(f"wrangler dev was not ready within {WRANGLER_START_TIMEOUT}s:\n{''.join(log)}")
-        print(f"[workerd] {url} assets={stage}")
+        print(f"[workerd] {url} persist-to={persist}")
         yield url
     finally:
         if child.poll() is None:

@@ -5,8 +5,9 @@ WHAT IS REAL HERE
   Every case starts from a REAL consumer checkout (``$ROSETTA_PUBLISH_ROOT``, default
   ``~/Projects/brain``): 293 agents whose prompts cite documents, and a resolver
   (``scripts/rogueone_bundle.py``) that decides what each citation means. The publisher stages
-  that checkout with ``--vendor-docs``, the REAL Worker in workerd (``wrangler dev --local``,
-  over TLS) serves the stage exactly as the deployed service serves a snapshot, and
+  that checkout with ``--vendor-docs``, the stage is uploaded into local R2 with the publisher's
+  own upload path, the REAL Worker in workerd (``wrangler dev --local``, over TLS) serves it
+  exactly as the deployed service serves a snapshot, and
   ``sync_agents.py`` mirrors it into a sandbox ``HOME`` that holds no checkout at all. Nothing
   here writes a manifest by hand, stubs a resolver, or fakes a download.
 
