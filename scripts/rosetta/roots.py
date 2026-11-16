@@ -99,13 +99,12 @@ def resolved_agents_dir(project: Path | None = None, warn: bool = True) -> Path:
     return resolved_dir("agents", project or _cwd_logical(), warn=warn)
 
 
-def resolved_citation_aliases(project: Path | None = None) -> dict[str, Path]:
-    """{citation prefix: absolute directory} from the repo's config. Empty when none declared.
+def _resolver_table(verb: str, project: Path | None) -> dict:
+    """Ask the resolver for one table verb and return its parsed JSON object.
 
-    A citation in a graph (``notes/widgets/vm.md``) resolves ONLY through this table, so the
-    spelling a project uses is data in its own config. A repo with a bad alias is refused here,
-    with the resolver's message naming the key.
-    """
+    ``resolver_path`` → subprocess → parse, with the refusal printed verbatim and the caller's
+    exit code honoured. One implementation because a second copy of this plumbing is how the
+    two tables drifted apart last time."""
     r = resolver_path()
     if r is None:
         print("rosetta-roots: ERROR: rosetta_config.py not found. Re-run install.sh from the "
@@ -114,14 +113,14 @@ def resolved_citation_aliases(project: Path | None = None) -> dict[str, Path]:
     repo = project or _cwd_logical()
     try:
         out = subprocess.run(
-            [sys.executable, str(r), "citation-aliases", "--project", str(repo)],
+            [sys.executable, str(r), verb, "--project", str(repo)],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"rosetta-roots: ERROR: resolver failed ({exc})", file=sys.stderr)
         raise SystemExit(2) from None
     if out.returncode != 0:
-        print((out.stderr or "").strip() or f"rosetta_config.py citation-aliases exited "
+        print((out.stderr or "").strip() or f"rosetta_config.py {verb} exited "
               f"{out.returncode}", file=sys.stderr)
         raise SystemExit(out.returncode if out.returncode > 0 else 2)
     if (out.stderr or "").strip():
@@ -129,12 +128,22 @@ def resolved_citation_aliases(project: Path | None = None) -> dict[str, Path]:
     try:
         data = json.loads(out.stdout or "{}")
     except json.JSONDecodeError as exc:
-        print(f"rosetta-roots: ERROR: citation-aliases printed invalid JSON ({exc})",
-              file=sys.stderr)
+        print(f"rosetta-roots: ERROR: {verb} printed invalid JSON ({exc})", file=sys.stderr)
         raise SystemExit(2) from None
     if not isinstance(data, dict):
         raise SystemExit(2)
-    return {str(k): Path(v) for k, v in data.items()}
+    return data
+
+
+def resolved_citation_aliases(project: Path | None = None) -> dict[str, Path]:
+    """{citation prefix: absolute directory} from the repo's config. Empty when none declared.
+
+    A citation in a graph (``notes/widgets/vm.md``) resolves ONLY through this table, so the
+    spelling a project uses is data in its own config. A repo with a bad alias is refused here,
+    with the resolver's message naming the key.
+    """
+    return {str(k): Path(v) for k, v in
+            _resolver_table("citation-aliases", project).items()}
 
 
 def resolved_agent_aliases(project: Path | None = None) -> dict[str, str]:
@@ -145,35 +154,7 @@ def resolved_agent_aliases(project: Path | None = None) -> dict[str, str]:
     that needs one declares it and a repo that does not is unaffected. A repo with a bad entry
     is refused here, with the resolver's message naming ``agent_aliases.<prefix>``.
     """
-    r = resolver_path()
-    if r is None:
-        print("rosetta-roots: ERROR: rosetta_config.py not found. Re-run install.sh from the "
-              "plugin checkout, or set $ROSETTA_CONFIG.", file=sys.stderr)
-        raise SystemExit(2)
-    repo = project or _cwd_logical()
-    try:
-        out = subprocess.run(
-            [sys.executable, str(r), "agent-aliases", "--project", str(repo)],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"rosetta-roots: ERROR: resolver failed ({exc})", file=sys.stderr)
-        raise SystemExit(2) from None
-    if out.returncode != 0:
-        print((out.stderr or "").strip() or f"rosetta_config.py agent-aliases exited "
-              f"{out.returncode}", file=sys.stderr)
-        raise SystemExit(out.returncode if out.returncode > 0 else 2)
-    if (out.stderr or "").strip():
-        print(out.stderr.strip(), file=sys.stderr)
-    try:
-        data = json.loads(out.stdout or "{}")
-    except json.JSONDecodeError as exc:
-        print(f"rosetta-roots: ERROR: agent-aliases printed invalid JSON ({exc})",
-              file=sys.stderr)
-        raise SystemExit(2) from None
-    if not isinstance(data, dict):
-        raise SystemExit(2)
-    return {str(k): str(v) for k, v in data.items()}
+    return {str(k): str(v) for k, v in _resolver_table("agent-aliases", project).items()}
 
 
 def _cwd_logical() -> Path:
