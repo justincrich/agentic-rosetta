@@ -53,7 +53,7 @@ import shutil
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -259,6 +259,34 @@ def restamp_composed(graph: dict) -> dict:
     return restamp(graph)
 
 
+def read_sibling_state(kb_dir: Path) -> tuple[list[dict], dict]:
+    """The pins and fact-sources a KB directory already records; missing or broken → default.
+
+    A composition verb does not research anything: it rewrites a graph whose sibling files
+    belong to an earlier research run, so it carries those forward unchanged and only
+    refreshes what the revision itself changed.
+    """
+    pins: list[dict] = []
+    prov_path = kb_dir / P.PROVENANCE_NAME
+    if prov_path.is_file():
+        try:
+            loaded = json.loads(prov_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                pins = list(loaded.get("sources") or [])
+        except json.JSONDecodeError:
+            pins = []
+    fact_sources: dict = {}
+    fs_path = kb_dir / P.FACT_SOURCES_NAME
+    if fs_path.is_file():
+        try:
+            loaded_fs = json.loads(fs_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_fs, dict):
+                fact_sources = loaded_fs
+        except json.JSONDecodeError:
+            fact_sources = {}
+    return pins, fact_sources
+
+
 def persist_siblings(
     dest: Path,
     graph: dict,
@@ -278,6 +306,50 @@ def persist_siblings(
     P.write_siblings(kb_dir, provenance=prov, fact_sources=fact_sources)
     P.upsert_readme_kb_line(kb_dir, graph, prov)
     return prov
+
+
+def snapshot_history(dest: Path, kb: str) -> Path:
+    """Copy the revision about to be overwritten into ``.history``; returns the copy's path."""
+    hist = dest.parent / ".history"
+    hist.mkdir(parents=True, exist_ok=True)
+    snap = hist / f"{date.today().isoformat()}-v{kb}.json"
+    shutil.copy2(dest, snap)
+    return snap
+
+
+def _commit_revision(
+    dest: Path,
+    graph: dict,
+    old_graph: dict,
+    old_kb: str,
+    *,
+    stempler: Callable[[dict], dict],
+    status: str,
+    pins: list[dict],
+    fact_sources: dict,
+) -> str:
+    """Publish one revision: bump → supersede → validate → stamp → write → refresh siblings.
+
+    Every verb that publishes a revision runs these steps in this order. What differs is
+    policy each caller owns, so it is passed explicitly, never defaulted: which ``stempler``
+    runs (a research stamp, a composition restamp, or neither for a legacy graph), what
+    ``status`` the provenance records, and where the pins/fact-sources come from (this
+    run's NRRA, or the siblings already on disk).
+
+    ``old_graph`` is the pre-merge revision the bump rule compares against; the copy that
+    composition makes never mutates it. Returns the new edition, so each caller reports in
+    its own words.
+    """
+    old_up = (old_graph.get("v") or {}).get("version")
+    new_up = (graph.get("v") or {}).get("version")
+    new_kb = bump_kb_version(old_kb, old_graph, graph, old_up, new_up)
+    graph.setdefault("v", {})["kb_version"] = new_kb
+    graph["v"]["supersedes"] = old_kb
+    validate_graph(graph)
+    graph = stempler(graph)
+    write_json(dest, graph)
+    persist_siblings(dest, graph, pins, fact_sources, status=status)
+    return new_kb
 
 
 def nrra_pins_and_sources(nrra_text: str) -> tuple[list[dict], dict]:
@@ -371,10 +443,7 @@ def cmd_update(
              f"declared composed graph(s) absent from the project: {', '.join(absent)}")
     old_snapshot = json.loads(json.dumps(current))
     kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
-    hist = dest.parent / ".history"
-    hist.mkdir(parents=True, exist_ok=True)
-    snap = hist / f"{date.today().isoformat()}-v{kb}.json"
-    shutil.copy2(dest, snap)
+    snap = snapshot_history(dest, kb)
 
     cs = load_json(changeset_path)
     fact_sources: dict[str, dict] = {}
@@ -437,15 +506,13 @@ def cmd_update(
                 f"kb_version={kb_edition(original)}"
             )
         current = factgraph.sync_composed_with(current)
-    old_up = (old_snapshot.get("v") or {}).get("version")
-    new_up = (current.get("v") or {}).get("version")
-    new_kb = bump_kb_version(kb, old_snapshot, current, old_up, new_up)
-    current.setdefault("v", {})["kb_version"] = new_kb
-    current["v"]["supersedes"] = kb
-    validate_graph(current)
-    current = stamp(current, ledger)
-    write_json(dest, current)
-    persist_siblings(dest, current, pins, fact_sources, status="updated")
+    new_kb = _commit_revision(
+        dest, current, old_snapshot, kb,
+        stempler=lambda graph: stamp(graph, ledger),
+        status="updated",
+        pins=pins,
+        fact_sources=fact_sources,
+    )
     for line in composed_reports:
         print(line)
     print(f"[write-graph] updated {dest} {kb} → {new_kb} (snapshot {snap.name})")
@@ -480,10 +547,7 @@ def cmd_apply_nrra(
     current = load_json(dest)
     old_snapshot = json.loads(json.dumps(current))
     kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
-    hist = dest.parent / ".history"
-    hist.mkdir(parents=True, exist_ok=True)
-    snap = hist / f"{date.today().isoformat()}-v{kb}.json"
-    shutil.copy2(dest, snap)
+    snap = snapshot_history(dest, kb)
 
     seed = seed_from_nrra(nrra, tech)
     pins, extra_sources = nrra_pins_and_sources(nrra)
@@ -520,15 +584,13 @@ def cmd_apply_nrra(
                     "confidence": conf or "MEDIUM",
                 }
 
-    old_up = (old_snapshot.get("v") or {}).get("version")
-    new_up = (current.get("v") or {}).get("version")
-    new_kb = bump_kb_version(kb, old_snapshot, current, old_up, new_up)
-    current.setdefault("v", {})["kb_version"] = new_kb
-    current["v"]["supersedes"] = kb
-    validate_graph(current)
-    current = stamp(current, ledger)
-    write_json(dest, current)
-    persist_siblings(dest, current, pins, fact_sources, status="updated")
+    new_kb = _commit_revision(
+        dest, current, old_snapshot, kb,
+        stempler=lambda graph: stamp(graph, ledger),
+        status="updated",
+        pins=pins,
+        fact_sources=fact_sources,
+    )
     for line in pin_reports:
         print(f"[write-graph] pin move {line}")
     print(f"[write-graph] applied {dest} {kb} → {new_kb} (snapshot {snap.name})")
@@ -744,39 +806,6 @@ def parse_borrower_selection(answer: str, borrowers: list[str]) -> list[str]:
     return wanted
 
 
-def persist_after_compose(dest: Path, graph: dict, status: str = "propagated") -> None:
-    """Rewrite the sibling files so provenance does not contradict the graph it describes."""
-    kb_dir = dest.parent
-    pins: list[dict] = []
-    prov_path = kb_dir / P.PROVENANCE_NAME
-    if prov_path.is_file():
-        try:
-            loaded = json.loads(prov_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                pins = list(loaded.get("sources") or [])
-        except json.JSONDecodeError:
-            pins = []
-    fact_sources: dict = {}
-    fs_path = kb_dir / P.FACT_SOURCES_NAME
-    if fs_path.is_file():
-        try:
-            loaded_fs = json.loads(fs_path.read_text(encoding="utf-8"))
-            if isinstance(loaded_fs, dict):
-                fact_sources = loaded_fs
-        except json.JSONDecodeError:
-            fact_sources = {}
-    v = graph.get("v") or {}
-    prov = P.build_provenance(
-        kb_version=str(v.get("kb_version") or ""),
-        upstream_version=v.get("version"),
-        pins=pins,
-        status=status,
-        graph_sha256=graph_sha(graph),
-    )
-    P.write_siblings(kb_dir, provenance=prov, fact_sources=fact_sources)
-    P.upsert_readme_kb_line(kb_dir, graph, prov)
-
-
 def cmd_propagate(
     original_slug: str,
     root: Path,
@@ -858,17 +887,16 @@ def cmd_propagate(
         dest = graph_path(root, name)
         graph = load_json(dest)
         old_kb = str((graph.get("v") or {}).get("kb_version") or "1.0.0")
-        old_up = (graph.get("v") or {}).get("version")
         updated = factgraph.compose_by_value(graph, original, original_slug)
         updated = factgraph.sync_composed_with(updated)
-        new_up = (updated.get("v") or {}).get("version")
-        new_kb = bump_kb_version(old_kb, graph, updated, old_up, new_up)
-        updated.setdefault("v", {})["kb_version"] = new_kb
-        updated["v"]["supersedes"] = old_kb
-        validate_graph(updated)
-        updated = restamp(updated)
-        write_json(dest, updated)
-        persist_after_compose(dest, updated)
+        pins, fact_sources = read_sibling_state(dest.parent)
+        new_kb = _commit_revision(
+            dest, updated, graph, old_kb,
+            stempler=restamp,
+            status="propagated",
+            pins=pins,
+            fact_sources=fact_sources,
+        )
         print(f"[write-graph] propagated {original_slug} -> {name} {old_kb} -> {new_kb}")
     return rc
 
@@ -925,21 +953,20 @@ def cmd_compose(tech: str, sources: list[str], root: Path, force: bool = False) 
 
     old_snapshot = json.loads(json.dumps(current))
     old_kb = str((current.get("v") or {}).get("kb_version") or "1.0.0")
-    old_up = (old_snapshot.get("v") or {}).get("version")
     for slug, original in pending:
         current = factgraph.compose_by_value(current, original, slug)
         print(f"[write-graph] composed {tech} <- {slug} kb_version={kb_edition(original)}")
     current = factgraph.sync_composed_with(current)
+    pins, fact_sources = read_sibling_state(dest.parent)
     # Composition is a content change, so it moves the host edition by the same rule every
     # other write uses — never a judgment call.
-    new_up = (current.get("v") or {}).get("version")
-    new_kb = bump_kb_version(old_kb, old_snapshot, current, old_up, new_up)
-    current.setdefault("v", {})["kb_version"] = new_kb
-    current["v"]["supersedes"] = old_kb
-    validate_graph(current)
-    current = restamp_composed(current)
-    write_json(dest, current)
-    persist_after_compose(dest, current, status="composed")
+    new_kb = _commit_revision(
+        dest, current, old_snapshot, old_kb,
+        stempler=restamp_composed,
+        status="composed",
+        pins=pins,
+        fact_sources=fact_sources,
+    )
     print(f"[write-graph] composed {dest} {old_kb} -> {new_kb}")
     return 0
 
