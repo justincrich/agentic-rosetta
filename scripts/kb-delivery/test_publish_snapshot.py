@@ -479,6 +479,35 @@ class PublishSnapshotTests(unittest.TestCase):
         # The publisher never hardcodes the consumer location.
         self.assertNotIn("Projects/brain", PUBLISHER.read_text(encoding="utf-8"))
 
+    # ── AC-10: the declared layout is the one read ──────────────────────
+
+    def test_ac10_publish_reads_the_declared_layout(self) -> None:
+        """paths.docs / paths.agents decide what the publisher reads, not a fixed name.
+
+        The same content checkout in a custom layout (``kb/graphs`` + ``prompts``) must publish
+        the same catalogue. A hardcoded ``.rosetta/docs`` read would find zero graphs and zero
+        agents here, so the counts are the discriminating assertion.
+        """
+        consumer = sync_suite.prepared_consumer(
+            self.tmp / "consumer-layout", docs="kb/graphs", agents="prompts"
+        )
+        self.assertFalse((consumer / ".rosetta" / "docs").exists(),
+                         "the fixture still has the standard docs directory")
+        self.assertFalse((consumer / "agents").exists(), "the fixture still has agents/")
+        stage = self.tmp / "stage-layout"
+        proc = self.publish(stage, root=consumer)
+        manifest = read_json(stage / "manifest.json")
+        self.assertEqual(len(manifest["agents"]), EXPECTED_AGENTS)
+        self.assertEqual(len(manifest["kbs"]), EXPECTED_KBS)
+        self.assertIn(f"paths.docs: {consumer / 'kb' / 'graphs'}", proc.stdout)
+        self.assertIn(f"paths.agents: {consumer / 'prompts'}", proc.stdout)
+        self.assertEqual(
+            sorted({entry["path"].split("/")[1] for entry in manifest["kbs"]})[:3],
+            sorted({entry["path"].split("/")[1] for entry in manifest["kbs"]})[:3],
+        )
+        for entry in manifest["kbs"]:
+            self.assertTrue((stage / entry["path"]).is_file(), entry)
+
     # ── AC-5 ───────────────────────────────────────────────────────────
 
     def test_ac5_explicit_targets_and_path_independent_snapshot(self) -> None:

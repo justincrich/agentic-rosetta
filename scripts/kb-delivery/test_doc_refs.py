@@ -209,11 +209,13 @@ class DocRefsTests(unittest.TestCase):
                 if token.startswith(("~", "/", "brain/")):
                     self.assertIn(token, recorded, f"{path}: {token} was left in the prompt unnamed")
 
-        # The four delivery scripts carry no brain citation literal of their own.
+        # The four delivery scripts carry no retired-checkout citation literal of their own.
+        # (Assembled, not typed: this suite must not be a carrier of the literal it forbids.)
+        retired_prefix = "brain" + "/docs"
         for name in ("publish_snapshot.py", "project_agents.py", "doc_refs.py", "sync_agents.py"):
             text = (HERE / name).read_text(encoding="utf-8")
             self.assertEqual(
-                text.count("brain/docs"), 0, f"{name} still carries a brain citation literal"
+                text.count(retired_prefix), 0, f"{name} still carries the retired citation literal"
             )
 
     # ── the config gate ────────────────────────────────────────────────
