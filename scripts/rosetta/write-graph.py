@@ -617,6 +617,7 @@ def cmd_backfill(tech: str, root: Path, overlay: dict | None = None) -> int:
         write_json(dest, graph)
     planned = P.plan_backfill(
         dest.parent, graph, root, seeds=P.load_seeds(), overlay=overlay,
+        aliases=RT.resolved_citation_aliases(root),
     )
     persist_siblings(
         dest, graph, planned["pins"], planned["fact_sources"], status=planned["status"],
@@ -624,7 +625,8 @@ def cmd_backfill(tech: str, root: Path, overlay: dict | None = None) -> int:
     n_fail = len(planned.get("failures") or [])
     print(
         f"[backfill] {tech} status={planned['status']} "
-        f"pins={len(planned['pins'])} failures={n_fail}"
+        f"pins={len(planned['pins'])} seeds={len(planned.get('seeds') or [])} "
+        f"failures={n_fail}"
     )
     if planned.get("failures"):
         for fail in planned["failures"]:
@@ -1023,10 +1025,8 @@ def main(argv: list[str]) -> int:
     if R is not None and args.root:
         R.set_repo_root(root)
     if _DOCS_DIR is not None:
-        if _DOCS_DIR != (root / ".rosetta" / "docs").resolve():
-            print(f"write-graph: docs root from config: {_DOCS_DIR} (cwd is {root})",
-                  file=sys.stderr)
-        RT.warn_if_orphaned(_DOCS_DIR)
+        print(f"write-graph: docs root from config: {_DOCS_DIR} (repo is {root})",
+              file=sys.stderr)
 
     try:
         composed = split_slugs(args.composed_with)

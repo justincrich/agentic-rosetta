@@ -66,6 +66,11 @@ old hand-written summary — should remain untouched outside the block
 EOF
 
 EG="$ROOT/scripts/kb-delivery/embed-graph.sh"
+# The fixture copies the scripts, so it must also say where the storage resolver lives: the
+# copied roots.py otherwise has no plugin checkout above it to find assets/rosetta_config.py.
+export ROSETTA_CONFIG="$PLUGIN_ROOT/assets/rosetta_config.py"
+export ROSETTA_HOME="$TMP/device-home"
+mkdir -p "$ROSETTA_HOME"
 
 # (a) INSERT into a block-less agent
 "$EG" cloudflare-workers-implementer >/dev/null 2>&1 || fail "insert-exit" "(rc=$?)"

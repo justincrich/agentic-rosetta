@@ -12,9 +12,13 @@ The ``full`` render is front-loaded with REJECT rules and the role's most-critic
 facts that matter most land at the top of context (mitigating lost-in-the-middle).
 
 Graphs resolve in this order (see :func:`resolve_graph`):
-  1. agent-local  ``agents/{name}/kb/fact-graph.json``   (morph-cloud)
-  2. repo-shared  ``.rosetta/docs/{domain}/fact-graph.json``  (cloudflare-workers, flyio, …)
-  3. shared via   ``naming.SHARED_GRAPHS``  (cloudflare-rust → cloudflare-workers graph)
+  1. agent-local  ``<paths.agents>/{name}/kb/fact-graph.json``
+  2. legacy       ``docs/<domain>/fact-graph.json``                (pre-config trees)
+  3. repo-shared  ``<paths.docs>/{domain}/fact-graph.json``
+  4. shared via   ``naming.SHARED_GRAPHS``  (cloudflare-rust → cloudflare-workers graph)
+
+``paths.docs`` and ``paths.agents`` come from the repo's own ``.rosetta/config.json``: this
+generator reads a repo's declared layout and refuses (exit 2) in a repo that has none.
 
 kb_version is ``<version> @ <pinned_date> sha:<8>`` — a content hash so graph drift is detectable.
 
@@ -51,6 +55,7 @@ from naming import (  # noqa: E402
     split_agent_name,
 )
 from resolve import project_root  # noqa: E402
+import roots  # noqa: E402
 from version_label import format_kb_version  # noqa: E402
 from versions import (  # noqa: E402
     COMPOSED_KEY,
@@ -102,12 +107,29 @@ BEGIN_MARKER = "<!-- rosetta-kb:begin"
 END_MARKER = "<!-- rosetta-kb:end -->"
 
 
+GRAPH_FILENAME = "fact-graph.json"
+
+#: Resolved per project and cached by the config's content: this generator reads a repo's
+#: declared layout and never assumes one.
+def layout(repo: Path | None = None) -> tuple[Path, Path]:
+    """``(docs_dir, agents_dir)`` for the repo. Refuses, exit 2, when the repo has no config."""
+    return roots.layout(Path(repo or REPO_ROOT))
+
+
+def docs_dir() -> Path:
+    return layout()[0]
+
+
+def agents_dir() -> Path:
+    return layout()[1]
+
+
 def fact_graph_path(domain: str) -> Path:
-    """Repo-shared graph for a domain (``.rosetta/docs/<domain>/fact-graph.json``).
+    """Repo-shared graph for a domain (``<paths.docs>/<domain>/fact-graph.json``).
 
     Shared/aliased domains (e.g. cloudflare-rust) are remapped to their backing graph."""
     domain = SHARED_DOMAIN_MAP.get(domain, domain)
-    return REPO_ROOT / ".rosetta" / "docs" / domain / "fact-graph.json"
+    return docs_dir() / domain / GRAPH_FILENAME
 
 
 def _docs_domain_for(stem: str) -> str | None:
@@ -132,21 +154,21 @@ def resolve_graph(agent_name_or_path: str) -> tuple[Path, str, str]:
         agent_name = raw.parent.name
     domain, role = _split_name_role(agent_name)
 
-    # 1. agent-local graph (morph-cloud): agents/{name}/kb/fact-graph.json
-    agent_dir = REPO_ROOT / "agents" / agent_name
-    local = agent_dir / "kb" / "fact-graph.json"
+    # 1. agent-local graph (morph-cloud): <paths.agents>/{name}/kb/fact-graph.json
+    agent_dir = agents_dir() / agent_name
+    local = agent_dir / "kb" / GRAPH_FILENAME
     if local.is_file():
         return local, domain, role
 
-    # 2. docs/<domain>/fact-graph.json (hetzner, mastra, rust, kotlin, swift, spacetimedb,
+    # 2. legacy docs/<domain>/fact-graph.json (hetzner, mastra, rust, kotlin, swift, spacetimedb,
     #    electron, ai-sdk, cmux). Domain slug may differ from the agent-name stem.
     docs_domain = _docs_domain_for(domain)
     if docs_domain:
-        docs_graph = REPO_ROOT / "docs" / docs_domain / "fact-graph.json"
+        docs_graph = REPO_ROOT / "docs" / docs_domain / GRAPH_FILENAME
         if docs_graph.is_file():
             return docs_graph, docs_domain, role
 
-    # 3. repo-shared graph (.rosetta/docs/{domain}/fact-graph.json, with shared-domain remap)
+    # 3. repo-shared graph (<paths.docs>/{domain}/fact-graph.json, with shared-domain remap)
     shared = fact_graph_path(domain)
     if shared.is_file():
         return shared, domain, role
@@ -395,16 +417,17 @@ def composed_excerpt(graph: dict, role: str) -> list[str]:
 
 
 def _original_graph_path(slug: str) -> Path:
-    """Where this project keeps a graph's own file (modern layout, then legacy)."""
+    """Where this project keeps a graph's own file: configured docs, then agent-local, then legacy."""
     remapped = SHARED_DOMAIN_MAP.get(slug, slug)
+    configured = docs_dir() / remapped / GRAPH_FILENAME
     for candidate in (
-        REPO_ROOT / ".rosetta" / "docs" / remapped / "fact-graph.json",
-        REPO_ROOT / "docs" / remapped / "fact-graph.json",
-        REPO_ROOT / "agents" / slug / "kb" / "fact-graph.json",
+        configured,
+        agents_dir() / slug / "kb" / GRAPH_FILENAME,
+        REPO_ROOT / "docs" / remapped / GRAPH_FILENAME,
     ):
         if candidate.is_file():
             return candidate
-    return REPO_ROOT / ".rosetta" / "docs" / remapped / "fact-graph.json"
+    return configured
 
 
 def assert_composed_complete(graph: dict, slug: str) -> None:

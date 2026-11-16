@@ -56,23 +56,42 @@ def _mini_graph(slug: str) -> dict:
     }
 
 
-def materialize(dest: Path) -> Path:
+def materialize(
+    dest: Path,
+    docs: str = ".rosetta/docs",
+    agents: str = "agents",
+    citation_aliases: dict[str, str] | None = None,
+) -> Path:
+    """Build a real fixture project. ``docs``/``agents`` are the layout its config declares.
+
+    The default is the standard layout; a caller that wants the config's authority proven
+    passes a custom one (``kb/graphs``, ``prompts``) and gets the same graphs and agents under
+    it, so every reader that honours the config finds them and every reader that hardcodes a
+    name does not.
+    """
     dest = dest.expanduser().resolve()
-    (dest / ".rosetta" / "docs").mkdir(parents=True, exist_ok=True)
-    (dest / "agents").mkdir(parents=True, exist_ok=True)
+    docs_dir = dest / docs
+    agents_dir = dest / agents
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    agents_dir.mkdir(parents=True, exist_ok=True)
     (dest / ".git").mkdir(exist_ok=True)
 
     # Every fixture project carries the version 2 config Rosetta requires. Without it the
     # resolver refuses to run, so a fixture without one would test the refusal, not the tool.
-    (dest / ".rosetta" / "config.json").write_text(json.dumps({
+    config: dict = {
         "version": 2,
         "paths": {
-            "docs": ".rosetta/docs",
-            "research": ".rosetta/research",
-            "probes": ".rosetta/probes",
-            "agents": "agents",
+            "docs": docs,
+            "research": "kb/research" if docs.startswith("kb/") else ".rosetta/research",
+            "probes": "kb/probes" if docs.startswith("kb/") else ".rosetta/probes",
+            "agents": agents,
         },
-    }, indent=2) + "\n", encoding="utf-8")
+    }
+    if citation_aliases:
+        config["citation_aliases"] = dict(citation_aliases)
+    (dest / ".rosetta").mkdir(parents=True, exist_ok=True)
+    (dest / ".rosetta" / "config.json").write_text(json.dumps(config, indent=2) + "\n",
+                                                   encoding="utf-8")
 
     # Real committed graphs.
     for slug, src_name in (
@@ -82,25 +101,25 @@ def materialize(dest: Path) -> Path:
         src = GRAPHS / src_name
         if not src.is_file():
             raise SystemExit(f"missing fixture {src}")
-        d = dest / ".rosetta" / "docs" / slug
+        d = docs_dir / slug
         d.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, d / "fact-graph.json")
 
     for slug in MINI_SLUGS:
-        d = dest / ".rosetta" / "docs" / slug
+        d = docs_dir / slug
         d.mkdir(parents=True, exist_ok=True)
         target = d / "fact-graph.json"
         if not target.is_file():
             target.write_text(json.dumps(_mini_graph(slug), indent=2) + "\n")
 
     morph_src = GRAPHS / "morph-cloud.fact-graph.json"
-    morph_dir = dest / "agents" / "morph-cloud-implementer" / "kb"
+    morph_dir = agents_dir / "morph-cloud-implementer" / "kb"
     morph_dir.mkdir(parents=True, exist_ok=True)
     if morph_src.is_file():
         shutil.copy2(morph_src, morph_dir / "fact-graph.json")
 
     for name in AGENTS:
-        ad = dest / "agents" / name
+        ad = agents_dir / name
         ad.mkdir(parents=True, exist_ok=True)
         md = ad / "agent.md"
         if not md.is_file():
