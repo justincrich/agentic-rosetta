@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """assign.py — deterministic per-session kb_source assignment (Phase 2 T2.3 coin-flip).
 
-The A/B in brain/docs/KB-DELIVERY-OBSERVABILITY-PLAN.md needs each session assigned to a cohort
+The A/B in the KB-delivery observability plan needs each session assigned to a cohort
 (condensed | full) BEFORE dispatch, recorded, and STABLE: the same session_key must always map
 to the same cohort so the assignment is reproducible and the warehouse can attribute outcomes.
 

@@ -8,13 +8,13 @@ WHY THIS EXISTS
   grok), the same frontmatter parsing, tool mapping, model policy, TOML escaping and harness
   side effects, driven by ``--root`` (the checkout) and ``--home`` (where the harnesses read).
 
-  It is a PORT, not a redesign, and that is a hard requirement: ``test_project_agents.py``
-  (AC-26) proves per-file sha256 equality with a real ``agentshare.py`` run for all 293 agents
-  across all five targets. Until brain's copy is retired the two must produce identical bytes,
-  so anything that looks redundant here (the ``agentshare: true`` marker, the codex
-  ``# Generated from`` line, the grok config markers) is part of the on-disk protocol the
-  harnesses and the device sync already understand — those strings name the *format*, not a
-  script that has to exist.
+  It is a PORT, not a redesign, and that is a hard requirement: the strings that look redundant
+  here (the ``agentshare: true`` marker, the codex ``# Generated from`` line, the grok config
+  markers) are part of the on-disk protocol the harnesses and the device sync already
+  understand — they name the *format*, not a script that has to exist. The program this was
+  ported from was retired on 2026-11-15, so ``test_project_agents.py`` proves the projection
+  against this module on a temp checkout (every agent in every tree, idempotent, side effects
+  applied) instead of against a copy that no longer exists.
 
 WHAT ONE RUN WRITES (all under ``--home``, never the real HOME unless you ask for it)
   .claude/agents/<name>/…            the agent directory, verbatim (claude reads the folder)
@@ -36,15 +36,20 @@ WHAT IS DELIBERATELY NOT PORTED
   ``doc_refs.py`` already does for this repo.
 
 PROVENANCE
-  Ported from brain ``scripts/agentshare.py`` (2026-11-13, sha256 a30931c7…812708). Where a
-  function is a faithful copy, its name and shape are kept so a reviewer can diff the two files
-  side by side; divergences are commented at the site.
+  Ported 2026-11-13 from the consumer's agent projector, which was retired on 2026-11-15.
+  Where a function is a faithful copy, its name and shape are kept; divergences are commented
+  at the site.
+
+WHERE THE AGENTS COME FROM
+  ``--root`` names a checkout whose own ``.rosetta/config.json`` declares ``paths.agents``.
+  A checkout that declares no layout is refused: this projector reads a declared location and
+  never guesses one.
 
 Usage:
-    python3 project_agents.py --root ~/Projects/brain --target claude --home /tmp/h
-    python3 project_agents.py --root ~/Projects/brain --targets claude,codex,opencode,droid,grok
-    python3 project_agents.py --root ~/Projects/brain --dry-run     # preview (only the dirs are made)
-    python3 project_agents.py --root ~/Projects/brain --list        # agents + targets
+    python3 project_agents.py --root <checkout> --target claude --home /tmp/h
+    python3 project_agents.py --root <checkout> --targets claude,codex,opencode,droid,grok
+    python3 project_agents.py --root <checkout> --dry-run     # preview (only the dirs are made)
+    python3 project_agents.py --root <checkout> --list        # agents + targets
 """
 from __future__ import annotations
 
@@ -59,6 +64,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts" / "rosetta"))
 from naming import ROLES  # noqa: E402  (the one home for the role vocabulary)
+import roots  # noqa: E402  (the checkout's declared layout)
 
 # ── where each harness reads its agents, relative to the home it runs as ────────────────
 
@@ -1040,7 +1046,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--root",
         required=True,
-        help="consumer checkout holding agents/<name>/agent.md (nothing else is read)",
+        help="consumer checkout whose .rosetta/config.json declares paths.agents "
+             "(nothing else is read)",
     )
     parser.add_argument(
         "--home",
@@ -1060,21 +1067,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = Path(args.root).expanduser().resolve()
-    if not (root / "agents").is_dir():
-        print(f"[project] {root}: no agents/ directory to project", file=sys.stderr)
+    # The layout is DECLARED by the checkout's own config. This raises SystemExit(2) with the
+    # resolver's message when the checkout has none, before a single file is written.
+    agents_dir = roots.resolved_dir("agents", root)
+    if not agents_dir.is_dir():
+        print(f"[project] {root}: no agents directory at {agents_dir} to project", file=sys.stderr)
         return 1
     home = Path(args.home).expanduser().resolve() if args.home else Path.home()
 
-    agents = discover_agents(root / "agents")
+    agents = discover_agents(agents_dir)
     if not agents:
         print(
-            f"[project] no agents found in {root / 'agents'}; refusing to project an empty fleet",
+            f"[project] no agents found in {agents_dir}; refusing to project an empty fleet",
             file=sys.stderr,
         )
         return 1
 
     if args.list:
-        print(f"Source: {root / 'agents'}")
+        print(f"Source: {agents_dir}")
         print(f"Agents ({len(agents)}):")
         for agent in agents:
             tools = ", ".join(agent["tools"]) or "(none)"

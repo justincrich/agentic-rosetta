@@ -27,6 +27,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,13 +41,15 @@ PUBLISHER = HERE / "publish_snapshot.py"
 SYNC = HERE / "sync_agents.py"
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
-import test_sync_agents as sync_suite  # noqa: E402  (the workerd-over-TLS helper both suites share)
+import test_sync_agents as sync_suite  # noqa: E402  (the TLS snapshot helpers both suites share)
 WRANGLER = PLUGIN / "worker" / "node_modules" / ".bin" / "wrangler"
 PAYLOAD_DIRS = ("targets", "kb", "docs")
 METADATA_FILES = ("manifest.json", "files.json", "scan-result.json")
 R2_BUCKET = "rosetta-kb-mcp-snapshots"
 EXPECTED_AGENTS = 293
-EXPECTED_KBS = 65
+#: The content repository now carries the one graph the plugin held alone (CONTENT_KB_ADDITIONS),
+#: so today's publish ships 66 graphs where the pre-move snapshot shipped 65.
+EXPECTED_KBS = 66
 EXPECTED_EXCLUDED = {"*.bak": 6, "*.log": 3, ".history/": 3}
 SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -126,18 +129,6 @@ def content_repo() -> Path:
     return root
 
 
-def source_root() -> Path:
-    raw = os.environ.get("ROSETTA_PUBLISH_ROOT") or (Path.home() / "Projects/brain")
-    root = Path(raw).expanduser()
-    required = ("agents", "scripts/agentshare.py", ".rosetta/docs")
-    missing = [name for name in required if not (root / name).exists()]
-    if missing:
-        raise AssertionError(
-            f"this suite proves the publisher against a real consumer checkout; {root} is missing "
-            f"{missing}. Set ROSETTA_PUBLISH_ROOT to a checkout that has agents/, "
-            "scripts/agentshare.py and .rosetta/docs/."
-        )
-    return root
 
 
 def sha256_of(path: Path) -> str:
@@ -194,13 +185,14 @@ class PublishSnapshotTests(unittest.TestCase):
     # ── helpers ────────────────────────────────────────────────────────
 
     def consumer(self) -> Path:
-        """The authoring checkout the brain-based requirements publish (AC-3/5/13/17).
+        """The checkout AC-3/5/13/17 publish: a temp copy of the content HEAD.
 
-        Resolved on demand, so AC-25 — which publishes a content clone on a machine with no
-        brain at all — never touches it.
+        It carries a config naming the standard layout, so the publisher reads a DECLARED
+        location and the real content tree is never written. Resolved on demand, so AC-25 —
+        which publishes its own clone — never touches it.
         """
         if self._consumer is None:
-            self._consumer = source_root()
+            self._consumer = sync_suite.prepared_consumer(self.tmp / "consumer")
         return self._consumer
 
     def run_publisher(
@@ -280,14 +272,8 @@ class PublishSnapshotTests(unittest.TestCase):
         return self.run_publisher("--stage", str(stage), "--scan-only", expect=expect)
 
     def checkout(self, dest: Path) -> Path:
-        """Extract a real checkout of the consumer's HEAD commit at ``dest``."""
-        dest.mkdir(parents=True, exist_ok=True)
-        archive = subprocess.run(
-            ["git", "-C", str(self.consumer()), "archive", "HEAD"], capture_output=True
-        )
-        self.assertEqual(archive.returncode, 0, f"git archive failed: {archive.stderr.decode()}")
-        extract = subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, capture_output=True)
-        self.assertEqual(extract.returncode, 0, f"tar failed: {extract.stderr.decode()}")
+        """A second copy of the consumer checkout at ``dest`` (its config travels with it)."""
+        shutil.copytree(self.consumer(), dest)
         return dest
 
     def wrangler(self, *args: str, expect: int = 0) -> subprocess.CompletedProcess:
@@ -440,7 +426,7 @@ class PublishSnapshotTests(unittest.TestCase):
     # ── AC-13 ──────────────────────────────────────────────────────────
 
     def test_ac13_manifest_catalog_and_fail_closed(self) -> None:
-        """A real brain checkout yields 293 agents / 65 KBs, a stable id, and fails closed."""
+        """A real content checkout yields 293 agents / 66 KBs, a stable id, and fails closed."""
         stage = self.tmp / "stage"
         first = self.publish(stage)
         manifest = read_json(stage / "manifest.json")
@@ -471,17 +457,20 @@ class PublishSnapshotTests(unittest.TestCase):
         self.assertIn(f"snapshot_id: {manifest['snapshot_id']}", second.stdout)
         self.assertEqual((stage / "files.json").read_bytes(), first_files_json)
 
-        # Fail closed when the root holds no agents to project: name the missing tree.
-        # (CONTENTPUB-01 moved projection into this repo, so a consumer no longer needs
-        # scripts/agentshare.py for a publish to succeed; what it must have is content.)
-        bare = self.tmp / "no-content-consumer"
+        # Fail closed on a checkout that declares NO layout: the refusal names the config file
+        # and nothing is staged. (A publish needs the consumer's own config; it never guesses.)
+        bare = self.tmp / "no-config-consumer"
         bare.mkdir()
-        bad = self.publish(self.tmp / "stage-bad", root=bare, expect=1)
-        self.assertIn("no agents/ directory", bad.stderr)
+        # A repo boundary, so the refusal is about THIS repo and not an enclosing checkout.
+        subprocess.run(["git", "init", "-q", str(bare)], check=True, capture_output=True)
+        bad = self.publish(self.tmp / "stage-bad", root=bare, expect=2)
+        self.assertIn(str(bare / ".rosetta" / "config.json"), bad.stderr)
+        self.assertIn('"version": 2', bad.stderr)
         self.assertFalse((self.tmp / "stage-bad" / "manifest.json").exists())
 
-        # Fail closed when agents/ holds no agent prompts: name the reason.
+        # Fail closed when the DECLARED agents directory holds no prompts: name the reason.
         empty = self.tmp / "empty-consumer"
+        sync_suite.write_consumer_config(empty, ".rosetta/docs", "agents")
         (empty / "agents").mkdir(parents=True)
         zero = self.publish(self.tmp / "stage-zero", root=empty, expect=1)
         self.assertIn("zero agent prompts", zero.stderr)
@@ -554,20 +543,20 @@ class PublishSnapshotTests(unittest.TestCase):
 
         # A vendored document lands beside the projections (doc vendoring writes docs/); the scan
         # is tree-recursive, so whatever a vendoring pass stages here is covered.
-        planted = stage / "docs" / "brain" / "docs" / "vendored-credential-fixture.md"
+        planted = stage / "docs" / "vendor" / "notes" / "vendored-credential-fixture.md"
         planted.parent.mkdir(parents=True, exist_ok=True)
         planted.write_text(
             "# vendored fixture\n\naws_access_key_id = AKIA" + "Q" * 16 + "\n", encoding="utf-8"
         )
 
         blocked = self.scan_only(stage, expect=1)
-        self.assertIn("docs/brain/docs/vendored-credential-fixture.md", blocked.stderr)
+        self.assertIn("docs/vendor/notes/vendored-credential-fixture.md", blocked.stderr)
 
         scanned = read_json(stage / "scan-result.json")
         self.assertEqual(scanned["status"], "findings")
         self.assertEqual(len(scanned["findings"]), 1, scanned["findings"])
         finding = scanned["findings"][0]
-        self.assertEqual(finding["path"], "docs/brain/docs/vendored-credential-fixture.md")
+        self.assertEqual(finding["path"], "docs/vendor/notes/vendored-credential-fixture.md")
         self.assertEqual(finding["pattern"], "AKIA")
         self.assertEqual(scanned["files_scanned"], len(payload_files(stage)))
         self.assertGreaterEqual(scanned["files_scanned"], EXPECTED_AGENTS)
@@ -627,6 +616,16 @@ class PublishSnapshotTests(unittest.TestCase):
         real sync through the real Worker in workerd.
         """
         clone = self.fresh_clone(self.tmp / "content-clone")
+        # A checkout Rosetta will run in declares its own layout. Committed, so the clone is
+        # still a clean checkout and its HEAD is still what the manifest records.
+        sync_suite.write_consumer_config(clone, ".rosetta/docs", "agents")
+        subprocess.run(["git", "-C", str(clone), "add", ".rosetta/config.json"], check=True,
+                       capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(clone), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "declare the content layout"],
+            check=True, capture_output=True,
+        )
 
         # The clone is content and nothing else: no projector inside it, nothing untracked.
         self.assertFalse(
@@ -715,11 +714,11 @@ class PublishSnapshotTests(unittest.TestCase):
         )
         print(f"[ac25] targets digest {digest_of(targets)} == pre-move {PRE_MOVE_TARGETS_DIGEST}")
 
-        # Serve that stage from the real Worker in workerd (over TLS, from the local R2 store the
-        # publisher's own upload filled) and sync it onto the bare HOME.
+        # Serve that stage over real TLS at the routes the deployed service answers, and sync it
+        # onto the bare HOME.
         token = "ac25-" + secrets.token_hex(16)
         certfile, keyfile = self.tls_certificate()
-        with sync_suite.workerd_snapshot(stage, token, certfile, keyfile) as url:
+        with sync_suite.served_stage(stage, token, certfile, keyfile) as url:
             sync_env = {key: value for key, value in os.environ.items() if key != "ROSETTA_MCP_URL"}
             sync_env.update(
                 {"HOME": str(home), "ROSETTA_MCP_TOKEN": token, "SSL_CERT_FILE": str(certfile)}

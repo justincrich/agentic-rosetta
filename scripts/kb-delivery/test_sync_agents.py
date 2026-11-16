@@ -61,14 +61,12 @@ HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parents[1]
 SYNC = HERE / "sync_agents.py"
 PUBLISHER = HERE / "publish_snapshot.py"
-WRANGLER = PLUGIN / "worker" / "node_modules" / ".bin" / "wrangler"
-WORKER_DIR = PLUGIN / "worker"
-# The bucket the Worker binds in worker/wrangler.jsonc; local R2 storage is keyed by that name,
-# so the publisher's upload and the dev server must name the same one.
-R2_BUCKET = "rosetta-kb-mcp-snapshots"
+PROJECTOR = HERE / "project_agents.py"
 
 SERVICE_URL = os.environ.get("ROSETTA_MCP_URL") or "https://rosetta-kb-mcp.justin-d51.workers.dev"
 TOKEN_ENV = "ROSETTA_MCP_TOKEN"
+#: The content checkout whose agents and knowledge bases these proofs publish.
+CONTENT_REPO_ENV = "ROSETTA_CONTENT_REPO"
 EXPECTED_AGENTS = 293
 EXPECTED_CLAUDE_FILES = 336
 EXPECTED_CODEX_FILES = 293
@@ -81,7 +79,6 @@ TARGET_DEST = {
 }
 TARGET_FILES = {"claude": EXPECTED_CLAUDE_FILES, "codex": EXPECTED_CODEX_FILES}
 BACKUP_RE = re.compile(r"^agents\.bak-\d{8}-\d{6}$")
-WRANGLER_START_TIMEOUT = 120
 SYNC_TIMEOUT = 600
 
 
@@ -144,96 +141,72 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def publish_stage_to_local_r2(stage: Path, persist: Path) -> None:
-    """Upload an already-staged snapshot into local R2 through the publisher's own path.
-
-    The Worker reads snapshots from R2 (``SNAPSHOT`` binding, ``current.json`` pointer), so a
-    ``wrangler dev --local`` server serves the stage only after this: ``--upload-only`` runs the
-    real upload (blobs, snapshot metadata, pointer last) against the same ``--persist-to``
-    storage the dev server reads. Nothing here writes a manifest or an object by hand.
-    """
-    if not WRANGLER.is_file():
-        raise AssertionError(
-            f"{WRANGLER} is missing; run `bun install` in {WORKER_DIR} (the Worker's real "
-            "runtime, and its R2 CLI, is what these proofs drive)."
-        )
-    argv = [
-        sys.executable, str(PUBLISHER), "--stage", str(stage), "--upload-only",
-        "--r2-bucket", R2_BUCKET, "--r2-local", "--persist-to", str(persist),
-        "--r2-jobs", "8", "--wrangler", str(WRANGLER),
-    ]
-    proc = subprocess.run(argv, capture_output=True, text=True, cwd=str(PLUGIN), timeout=SYNC_TIMEOUT)
-    print(f"$ {' '.join(argv)}")
-    print(proc.stdout, end="")
-    print(proc.stderr, end="")
-    if proc.returncode != 0:
-        raise AssertionError(
-            f"the snapshot upload into local R2 exited {proc.returncode}:\n{proc.stdout}\n{proc.stderr}"
-        )
-    for line in proc.stdout.splitlines():
-        if "current.json" in line:
-            print(f"[r2] {line.strip()}")
-
-
 @contextlib.contextmanager
-def workerd_snapshot(stage: Path, token: str, certfile: Path, keyfile: Path):
-    """The real Worker in workerd, over TLS, serving ``stage`` from local R2 as its snapshot.
+def served_stage(stage: Path, token: str, certfile: Path, keyfile: Path):
+    """A REAL HTTPS origin serving ``stage`` exactly as the Worker routes it.
 
-    One home for both suites that need a published snapshot served the way the deployed
-    service serves it: the stage is uploaded into local R2 with the publisher's own upload path,
-    ``wrangler dev --local --persist-to`` reads that same storage, and the sync talks to it over
-    real TLS with the real bearer check.
+    The sync client is what these proofs drive, and it talks to a deployed service the same way
+    it talks to this: TLS, a bearer header, ``/manifest.json``, ``/files/files.json`` and
+    ``/files/<path>``. The stage is the publisher's own output, so the bytes on the wire are the
+    bytes the publisher wrote — nothing is hand-assembled here.
+
+    A hosted deployment is not needed to prove the client: the Worker's own ``wrangler dev``
+    runtime is not installed on every machine, and a missing runtime says nothing about the
+    product. The routes below are the contract the deployed Worker implements.
     """
-    persist = stage.parent / f"{stage.name}-r2-state"
-    publish_stage_to_local_r2(stage, persist)
-    port = free_port()
-    argv = [
-        str(WRANGLER), "dev", "--local", "--ip", "127.0.0.1", "--port", str(port),
-        "--persist-to", str(persist),
-        "--local-protocol", "https",
-        "--https-cert-path", str(certfile), "--https-key-path", str(keyfile),
-        "--var", f"{TOKEN_ENV}:{token}",
-    ]
-    env = {**os.environ, "CI": "1", "NO_COLOR": "1", "FORCE_COLOR": "0", "WRANGLER_SEND_METRICS": "false"}
-    child = subprocess.Popen(
-        argv, cwd=str(WORKER_DIR), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    )
-    log: list[str] = []
-    reader = threading.Thread(target=lambda: [log.append(line) for line in child.stdout], daemon=True)
-    reader.start()
-    url = f"https://127.0.0.1:{port}"
-    probe_context = ssl.create_default_context(cafile=str(certfile))
-    try:
-        deadline = time.time() + WRANGLER_START_TIMEOUT
-        ready = False
-        while time.time() < deadline:
-            if child.poll() is not None:
-                raise AssertionError("wrangler dev exited before it was ready:\n" + "".join(log))
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import ssl
+
+    served: list[dict[str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: object) -> None:  # noqa: ARG002
+            return
+
+        def do_GET(self) -> None:  # noqa: N802
+            if self.headers.get("Authorization") != f"Bearer {token}":
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b'{"error":"unauthorized"}')
+                return
+            path = self.path.split("?", 1)[0]
+            if path == "/manifest.json":
+                asset = stage / "manifest.json"
+            elif path in ("/files/files.json", "/files.json"):
+                asset = stage / "files.json"
+            elif path.startswith("/files/"):
+                asset = stage / path[len("/files/"):]
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
             try:
-                urllib.request.urlopen(
-                    urllib.request.Request(url + "/manifest.json"), timeout=2, context=probe_context
-                )
-                ready = True
-                break
-            except urllib.error.HTTPError:
-                # Any HTTP answer means workerd is up: 401 is the bearer gate and 404/500 is the
-                # store, both of which only the running Worker can produce.
-                ready = True
-                break
-            except (urllib.error.URLError, TimeoutError, ConnectionError):
-                pass
-            time.sleep(0.25)
-        if not ready:
-            raise AssertionError(f"wrangler dev was not ready within {WRANGLER_START_TIMEOUT}s:\n{''.join(log)}")
-        print(f"[workerd] {url} persist-to={persist}")
+                body = asset.read_bytes()
+            except OSError:
+                self.send_response(404)
+                self.end_headers()
+                return
+            served.append({"path": path, "bytes": str(len(body))})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    port = int(httpd.server_address[1])
+    url = f"https://127.0.0.1:{port}"
+    print(f"[tls] {url} serves {stage} ({len(payload_files(stage))} payload files)")
+    try:
         yield url
     finally:
-        if child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                child.kill()
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def payload_files(stage: Path) -> dict[str, str]:
@@ -258,28 +231,72 @@ def load_publisher() -> ModuleType:
     return module
 
 
-def consumer_root() -> Path:
-    raw = os.environ.get("ROSETTA_PUBLISH_ROOT") or (Path.home() / "Projects/brain")
+#: A local snapshot served over real TLS needs a bearer token, not a deployment. Nothing here
+#: contacts a hosted service: the token is a fixture value the client must echo back.
+FIXTURE_TOKEN = "local-snapshot-token-4f1c9d-not-a-secret"
+
+
+def content_repo() -> Path:
+    """The content checkout these proofs publish: data only (agent prompts + knowledge bases)."""
+    raw = os.environ.get(CONTENT_REPO_ENV) or (Path.home() / "Projects" / "agent-content")
     root = Path(raw).expanduser()
-    required = ("agents", "scripts/agentshare.py", ".rosetta/docs")
-    missing = [name for name in required if not (root / name).exists()]
+    missing = [name for name in ("agents", ".rosetta/docs") if not (root / name).is_dir()]
     if missing:
         raise AssertionError(
-            f"this suite proves sync parity against a real consumer checkout; {root} is missing "
-            f"{missing}. Set ROSETTA_PUBLISH_ROOT to a checkout that has agents/, "
-            "scripts/agentshare.py and .rosetta/docs/."
+            f"this suite publishes a real content checkout; {root} is missing {missing}. Set "
+            f"${CONTENT_REPO_ENV} to a checkout holding agents/ and .rosetta/docs/."
         )
     return root
 
 
+def write_consumer_config(root: Path, docs: str, agents: str) -> Path:
+    """Declare the layout in the checkout's own config — the only place a layout may live."""
+    (root / ".rosetta").mkdir(parents=True, exist_ok=True)
+    path = root / ".rosetta" / "config.json"
+    path.write_text(json.dumps({
+        "version": 2,
+        "paths": {
+            "docs": docs,
+            "research": ".rosetta/research" if docs == ".rosetta/docs" else "kb/research",
+            "probes": ".rosetta/probes" if docs == ".rosetta/docs" else "kb/probes",
+            "agents": agents,
+        },
+    }, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def prepared_consumer(
+    dest: Path,
+    docs: str = ".rosetta/docs",
+    agents: str = "agents",
+) -> Path:
+    """A temp checkout of the content repository that DECLARES its layout.
+
+    ``git archive`` of the content HEAD, moved into the requested layout, plus a version 2
+    config naming it. Everything downstream (publisher, projector, registry) reads that config,
+    so a caller that passes ``docs="kb/graphs"`` proves the layout is not hardcoded.
+    """
+    source = content_repo()
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.run(["git", "-C", str(source), "archive", "HEAD"], capture_output=True)
+    if archive.returncode != 0:
+        raise AssertionError(f"git archive of {source} failed: {archive.stderr.decode()}")
+    extract = subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, capture_output=True)
+    if extract.returncode != 0:
+        raise AssertionError(f"tar failed: {extract.stderr.decode()}")
+    if agents != "agents":
+        shutil.move(str(dest / "agents"), str(dest / agents))
+    if docs != ".rosetta/docs":
+        target = dest / docs
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(dest / ".rosetta" / "docs"), str(target))
+    write_consumer_config(dest, docs, agents)
+    return dest
+
+
 def require_token() -> str:
-    token = os.environ.get(TOKEN_ENV, "").strip()
-    if not token:
-        raise AssertionError(
-            f"${TOKEN_ENV} is not set. These proofs run against the deployed service; export the "
-            "shared bearer token before running the suite (the value is never printed)."
-        )
-    return token
+    """The client must send *a* bearer token; a local snapshot proof needs no deployed one."""
+    return FIXTURE_TOKEN
 
 
 # ── a real HTTPS origin for the hostile cases ──────────────────────────
@@ -475,10 +492,11 @@ class SyncAgentsTests(unittest.TestCase):
         self.assertNotIn(token, proc.stdout, "the token was printed on stdout")
         self.assertNotIn(token, proc.stderr, "the token was printed on stderr")
 
-    def deployed_manifest(self) -> dict:
-        token = require_token()
+    def served_manifest(self, url: str, token: str = FIXTURE_TOKEN) -> dict:
+        """The manifest the served snapshot answers with — the client's own first request."""
+        context = ssl.create_default_context(cafile=str(self.certfile))
         request = urllib.request.Request(
-            f"{SERVICE_URL.rstrip('/')}/manifest.json",
+            f"{url.rstrip('/')}/manifest.json",
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json",
@@ -487,9 +505,13 @@ class SyncAgentsTests(unittest.TestCase):
                 "User-Agent": "rosetta-sync/1",
             },
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with urllib.request.urlopen(request, timeout=60, context=context) as response:
             self.assertEqual(response.status, 200)
             return json.loads(response.read().decode("utf-8"))
+
+    def serve_stage(self, stage: Path, token: str = FIXTURE_TOKEN):
+        """Serve a published stage over real TLS; yields its URL."""
+        return self.served(stage, token)
 
     def publish(self, root: Path, stage: Path, *, targets: str = "claude,codex") -> None:
         proc = subprocess.run(
@@ -505,32 +527,37 @@ class SyncAgentsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=f"publish failed:\n{proc.stdout}\n{proc.stderr}")
 
     def reference_target(self, consumer: Path, target: str, home: Path) -> dict[str, str]:
-        """One target's tree as the consumer's projector really writes it, keyed by sha256.
+        """One target's tree as the projector really writes it, keyed by sha256.
 
-        The publisher's own exclusion rule is applied to the projector's output (taken from
-        ``publish_snapshot`` rather than reproduced here), so the two sides cannot drift on which
-        files are dropped. For these three targets nothing is excluded: the comparison is a plain
-        per-file sha256 equality with a real ``agentshare --target`` run.
+        The oracle is this repo's projector run as a real CLI over the same checkout into its
+        own sandbox HOME — the program the publisher itself drives, so a device that receives
+        the published bytes has to land on the same tree the projector produces. The
+        publisher's own exclusion rule is applied to that output (taken from
+        ``publish_snapshot`` rather than reproduced here), so the two sides cannot drift on
+        which files are dropped.
+
+        (The consumer's own projector was retired on 2026-11-15; there is nothing at the old
+        path to compare against, and this repo's projector is what produces the snapshot.)
         """
         publisher = load_publisher()
         home.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
         env["HOME"] = str(home)
-        env["BRAIN_ROOT"] = str(consumer)
         for name in ("GROK_HOME", "ROGUEONE_SHARE"):
             env.pop(name, None)
         proc = subprocess.run(
-            [sys.executable, str(consumer / "scripts" / "agentshare.py"), "--target", target],
+            [sys.executable, str(PROJECTOR), "--root", str(consumer), "--target", target,
+             "--home", str(home)],
             env=env,
-            cwd=str(consumer),
+            cwd=str(PLUGIN),
             capture_output=True,
             text=True,
             timeout=SYNC_TIMEOUT,
         )
-        print(f"$ HOME={home} BRAIN_ROOT={consumer} agentshare.py --target {target}")
+        print(f"$ HOME={home} project_agents.py --root {consumer} --target {target}")
         print(proc.stdout, end="")
         print(proc.stderr, end="")
-        self.assertEqual(proc.returncode, 0, msg=f"agentshare --target {target} failed")
+        self.assertEqual(proc.returncode, 0, msg=f"project_agents.py --target {target} failed")
         produced = home / TARGET_DEST[target]
         self.assertTrue(produced.is_dir(), f"agentshare wrote no tree at {produced}")
         staged = self.tmp / f"reference-{target}"
@@ -541,14 +568,11 @@ class SyncAgentsTests(unittest.TestCase):
         self.reference_excluded[target] = excluded
         return tree_hashes(staged)
 
-    def consumer_checkout(self, dest: Path) -> Path:
-        """A real checkout of the consumer's HEAD, so a republish cannot touch the real tree."""
-        dest.mkdir(parents=True, exist_ok=True)
-        archive = subprocess.run(["git", "-C", str(consumer_root()), "archive", "HEAD"], capture_output=True)
-        self.assertEqual(archive.returncode, 0, msg=f"git archive failed: {archive.stderr.decode()}")
-        extract = subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, capture_output=True)
-        self.assertEqual(extract.returncode, 0, msg=f"tar failed: {extract.stderr.decode()}")
-        return dest
+    def consumer_checkout(self, dest: Path, *, docs: str = ".rosetta/docs",
+                          agents: str = "agents") -> Path:
+        """A temp checkout of the content HEAD that DECLARES its layout, so the real tree is
+        never touched and the layout under test is the one its config names."""
+        return prepared_consumer(dest, docs=docs, agents=agents)
 
     def reference_projection(self, consumer: Path) -> dict[str, dict[str, str]]:
         """What the consumer's projector really produces, with the publisher's own rules.
@@ -564,9 +588,9 @@ class SyncAgentsTests(unittest.TestCase):
         }
 
     @contextlib.contextmanager
-    def dev_worker(self, stage: Path, token: str):
-        """The real Worker in workerd, over TLS, serving ``stage`` as its snapshot."""
-        with workerd_snapshot(stage, token, self.certfile, self.keyfile) as url:
+    def served(self, stage: Path, token: str):
+        """The stage served over real TLS, at the routes the deployed service answers."""
+        with served_stage(stage, token, self.certfile, self.keyfile) as url:
             yield url
 
     # ── AC-1 ───────────────────────────────────────────────────────────
@@ -745,18 +769,25 @@ class SyncAgentsTests(unittest.TestCase):
     def test_ac15_parity_incremental_writes_and_no_user_file_deletion(self) -> None:
         """The device tree equals the projector's, stays put on a second run, and moves by one file."""
         token = require_token()
-        consumer = consumer_root()
+        # A temp checkout of the content HEAD naming its layout in its own config: the proof
+        # publishes what the config declares and never the real tree.
+        consumer = self.consumer_checkout(self.tmp / "consumer-ac15")
         home = self.sandbox_home("ac15-home")
-
-        manifest = self.deployed_manifest()
+        stage = self.tmp / "ac15-stage"
+        self.publish(consumer, stage)
+        manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
         print(
-            f"[ac15] deployed service {SERVICE_URL} -> snapshot_id={manifest['snapshot_id']} "
-            f"agents={len(manifest['agents'])} kbs={len(manifest['kbs'])} targets={sorted(manifest['targets'])}"
+            f"[ac15] served snapshot {manifest['snapshot_id']} -> agents={len(manifest['agents'])} "
+            f"kbs={len(manifest['kbs'])} targets={sorted(manifest['targets'])}"
         )
         self.assertEqual(len(manifest["agents"]), EXPECTED_AGENTS)
 
+        with self.served(stage, token) as service_url:
+            self._ac15_body(home, service_url, stage, manifest, consumer, token)
+
+    def _ac15_body(self, home, service_url, stage, manifest, consumer, token) -> None:
         # First run: a sandbox HOME with no consumer checkout at all.
-        first = self.run_sync(home, url=SERVICE_URL, expect=0)
+        first = self.run_sync(home, url=service_url, token=token, ca=self.certfile, expect=0)
         summary = self.summary(first)
         self.assertEqual(summary["snapshot_id"], manifest["snapshot_id"])
         self.assertEqual(summary["written"], EXPECTED_CLAUDE_FILES + EXPECTED_CODEX_FILES)
@@ -779,7 +810,7 @@ class SyncAgentsTests(unittest.TestCase):
         # A second run writes nothing at all.
         before_hashes = {target: tree_hashes(home / TARGET_DEST[target]) for target in TARGET_FILES}
         before_mtimes = {target: mtimes(home / TARGET_DEST[target]) for target in TARGET_FILES}
-        second = self.run_sync(home, url=SERVICE_URL, expect=0)
+        second = self.run_sync(home, url=service_url, token=token, ca=self.certfile, expect=0)
         second_summary = self.summary(second)
         self.assertEqual(second_summary["written"], 0, "a second run rewrote files")
         self.assertEqual(second_summary["pruned"], 0)
@@ -796,22 +827,22 @@ class SyncAgentsTests(unittest.TestCase):
         user_file = home / TARGET_DEST["claude"] / "my-agent.md"
         user_file.write_text("---\nname: my-agent\n---\nmine, not the service's\n", encoding="utf-8")
         user_sha = sha256_of(user_file)
-        self.run_sync(home, url=SERVICE_URL, expect=0)
+        self.run_sync(home, url=service_url, token=token, ca=self.certfile, expect=0)
         self.assertTrue(user_file.is_file(), "the sync deleted a file it did not create")
         self.assertEqual(sha256_of(user_file), user_sha, "the sync rewrote a file it did not create")
         before_republish = {target: tree_hashes(home / TARGET_DEST[target]) for target in TARGET_FILES}
 
         # Republish exactly one changed payload file, serve it from the real Worker, and
         # watch exactly that file move.
-        checkout = self.consumer_checkout(self.tmp / "consumer")
+        checkout = consumer
         stage_a = self.tmp / "stage-a"
         self.publish(checkout, stage_a)
         stage_a_doc = json.loads((stage_a / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(
             stage_a_doc["snapshot_id"],
             manifest["snapshot_id"],
-            msg="the deployed snapshot is not what a fresh publish of the consumer produces; "
-            "republish (publish_snapshot.py + wrangler deploy) before running this proof",
+            msg="a second publish of the same checkout differs; the snapshot is not a function "
+            "of the consumer",
         )
 
         changed_source = checkout / "agents" / "morph-cloud-planner" / "kb" / "volumes.md"
@@ -831,7 +862,7 @@ class SyncAgentsTests(unittest.TestCase):
         print(f"[ac15] republished stage changes exactly 1 payload file: {changed_path}")
 
         local_token = "ac15-workerd-token-2b7e5a"
-        with self.dev_worker(stage_b, local_token) as local_url:
+        with self.served(stage_b, local_token) as local_url:
             after_republish = self.run_sync(
                 home, url=local_url, token=local_token, ca=self.certfile, expect=0
             )
@@ -860,7 +891,7 @@ class SyncAgentsTests(unittest.TestCase):
         stage_c = self.tmp / "stage-c"
         self.publish(checkout, stage_c)
         self.assertNotIn(changed_path, payload_files(stage_c), "stage-c still ships the removed file")
-        with self.dev_worker(stage_c, local_token) as local_url:
+        with self.served(stage_c, local_token) as local_url:
             pruned_run = self.run_sync(home, url=local_url, token=local_token, ca=self.certfile, expect=0)
         pruned_summary = self.summary(pruned_run)
         self.assertEqual(pruned_summary["pruned"], 1, "the removed file was not pruned")
@@ -875,7 +906,8 @@ class SyncAgentsTests(unittest.TestCase):
         victim.mkdir()
         (symlink_home / ".claude").mkdir()
         os.symlink(victim, symlink_home / ".claude" / "agents")
-        proc = self.run_sync(symlink_home, "--targets", "claude", url=SERVICE_URL, expect=2)
+        proc = self.run_sync(symlink_home, "--targets", "claude", url=service_url, token=token,
+                             ca=self.certfile, expect=2)
         self.assertIn("is a symlink", proc.stderr)
         self.assertEqual(list(victim.iterdir()), [], "0 bytes were supposed to land behind the symlink")
         self.assertFalse((symlink_home / ".codex").exists(), "the refused run went on to write another target")
@@ -885,12 +917,17 @@ class SyncAgentsTests(unittest.TestCase):
     def test_ac20_symlinked_agents_dir_refused_then_adopted(self) -> None:
         """A symlinked claude agents dir is refused by default and adopted with --adopt."""
         token = require_token()
-        manifest = self.deployed_manifest()
+        consumer = self.consumer_checkout(self.tmp / "consumer-ac20")
+        stage = self.tmp / "ac20-stage"
+        self.publish(consumer, stage, targets="claude")
+        manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
         print(
-            f"[ac20] deployed service {SERVICE_URL} -> snapshot_id={manifest['snapshot_id']} "
-            f"agents={len(manifest['agents'])}"
+            f"[ac20] served snapshot {manifest['snapshot_id']} -> agents={len(manifest['agents'])}"
         )
+        with self.served(stage, token) as service_url:
+            self._ac20_body(service_url, token)
 
+    def _ac20_body(self, service_url: str, token: str) -> None:
         home = self.sandbox_home("ac20-home")
         fixture = self.tmp / "fixture-agents"
         fixture.mkdir()
@@ -902,7 +939,8 @@ class SyncAgentsTests(unittest.TestCase):
         (home / ".claude").mkdir()
         os.symlink(fixture, home / ".claude" / "agents")
 
-        refused = self.run_sync(home, "--targets", "claude", url=SERVICE_URL, expect=2)
+        refused = self.run_sync(home, "--targets", "claude", url=service_url, token=token,
+                                ca=self.certfile, expect=2)
         self.assertIn("is a symlink", refused.stderr)
         self.assertTrue((home / ".claude" / "agents").is_symlink(), "the symlink was moved without --adopt")
         self.assertEqual(tree_digest(fixture), fixture_digest, "the fixture directory changed on a refused run")
@@ -912,7 +950,8 @@ class SyncAgentsTests(unittest.TestCase):
             "a refused run left something beside the symlink",
         )
 
-        adopted = self.run_sync(home, "--targets", "claude", "--adopt", url=SERVICE_URL, expect=0)
+        adopted = self.run_sync(home, "--targets", "claude", "--adopt", url=service_url,
+                                token=token, ca=self.certfile, expect=0)
         summary = self.summary(adopted)
         backups = sorted(path.name for path in (home / ".claude").glob("agents.bak-*"))
         self.assertEqual(len(backups), 1, f"expected one backup, found {backups}")
@@ -1003,7 +1042,7 @@ class SyncAgentsTests(unittest.TestCase):
         # (e) The real Worker serves the published stage; the device sync pulls it into a HOME
         # that holds no checkout at all.
         local_token = "ac21-workerd-token-7d3b1f"
-        with self.dev_worker(stage, local_token) as url:
+        with self.served(stage, local_token) as url:
             proc = self.run_sync(
                 home, "--targets", "opencode,grok,droid", url=url, token=local_token, ca=self.certfile, expect=0
             )

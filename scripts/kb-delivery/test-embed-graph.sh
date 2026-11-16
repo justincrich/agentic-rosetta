@@ -198,6 +198,109 @@ cp "$TMP/first.md" "$TMP/corrupt.md"
 verify_rule_bytes "$TMP/corrupt.md" || fail "rule-prose-control-restored" "(restore failed)"
 echo "rule-regression: real registry + renderer + three syncs + readonly check exercised"
 
+# ══════════════ the repo's config decides the layout (AC-2 / AC-8 / AC-9) ══════════════
+CUSTOM="$TMP/custom"
+mkdir -p "$CUSTOM/.rosetta" "$CUSTOM/kb/graphs/x" "$CUSTOM/prompts/x-implementer" \
+         "$CUSTOM/scripts/kb-delivery" "$CUSTOM/scripts/rosetta"
+cp "$HERE/generate_excerpt.py" "$CUSTOM/scripts/kb-delivery/"
+cp "$HERE/embed-graph.sh" "$CUSTOM/scripts/kb-delivery/"
+cp "$PLUGIN_ROOT/scripts/rosetta/"*.py "$CUSTOM/scripts/rosetta/"
+chmod +x "$CUSTOM/scripts/kb-delivery/embed-graph.sh"
+cp "$GRAPH_FIXTURE" "$CUSTOM/kb/graphs/x/fact-graph.json"
+cat > "$CUSTOM/.rosetta/config.json" <<'JSON'
+{
+  "version": 2,
+  "paths": {
+    "docs": "kb/graphs",
+    "research": "kb/research",
+    "probes": "kb/probes",
+    "agents": "prompts"
+  }
+}
+JSON
+cat > "$CUSTOM/prompts/x-implementer/agent.md" <<'EOF'
+---
+name: x-implementer
+description: custom-layout agent
+---
+# X Implementer
+
+## Hand prose that must survive the splice
+do the x thing
+EOF
+cp "$CUSTOM/prompts/x-implementer/agent.md" "$TMP/custom-original.md"
+CEG="$CUSTOM/scripts/kb-delivery/embed-graph.sh"
+
+# AC-8: --sync x writes the sentinel region of the configured agents dir and nothing else.
+"$CEG" --sync x >"$TMP/custom-sync.stdout" 2>"$TMP/custom-sync.stderr" \
+  || fail "custom-sync-exit" "$(cat "$TMP/custom-sync.stderr")"
+grep -q 'rosetta-kb:begin' "$CUSTOM/prompts/x-implementer/agent.md" \
+  || fail "custom-sync-block" "(no block written under prompts/)"
+grep -q 'do the x thing' "$CUSTOM/prompts/x-implementer/agent.md" \
+  || fail "custom-sync-prose" "(hand prose outside the block lost)"
+python3 - "$TMP/custom-original.md" "$CUSTOM/prompts/x-implementer/agent.md" <<'PYCUSTOM'
+import sys
+from pathlib import Path
+before, after = (Path(p).read_bytes() for p in sys.argv[1:])
+begin, end = b"<!-- rosetta-kb:begin", b"<!-- rosetta-kb:end -->"
+# The writer inserts the block after the closing frontmatter line with one separator newline,
+# so the exact oracle is: before == prefix + suffix and after == prefix + "\n" + block + suffix.
+lines = before.splitlines(keepends=True)
+cut = sum(map(len, lines[:1 + next(i for i in range(1, len(lines)) if lines[i] == b"---\n")]))
+prefix, suffix = before[:cut], before[cut:]
+assert after.count(begin) == 1 and after.count(end) == 1, "block duplicated"
+block = after[after.index(begin):after.index(end) + len(end)]
+# The writer separates the block from the prose by one newline on each side.
+assert after == prefix + b"\n" + block + b"\n" + suffix, "bytes outside the sentinels changed"
+assert after[:len(prefix)] == prefix, "frontmatter bytes changed"
+assert after[len(prefix) + 2 + len(block):] == suffix, "hand prose bytes changed"
+PYCUSTOM
+[ "$?" -eq 0 ] || fail "custom-sync-only-sentinels" "(bytes outside the sentinels changed)"
+"$CEG" --root "$CUSTOM" --check x-implementer >"$TMP/custom-check.stdout" 2>&1 \
+  || fail "custom-check-exit0" "$(cat "$TMP/custom-check.stdout")"
+[ ! -d "$CUSTOM/.rosetta/docs" ] || fail "custom-no-legacy-docs" "(.rosetta/docs exists)"
+[ ! -d "$CUSTOM/agents" ] || fail "custom-no-agents-dir" "(agents/ exists)"
+grep -q "kb/graphs/x/fact-graph.json" <(python3 "$CUSTOM/scripts/rosetta/registry.py" --root "$CUSTOM" list) \
+  || fail "custom-registry-path" "(registry does not list kb/graphs/x/fact-graph.json)"
+
+# AC-9: changing ONLY paths.docs moves where embed-graph reads; the old root stops being read.
+python3 - "$CUSTOM/.rosetta/config.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+cfg = json.load(open(p))
+cfg["paths"]["docs"] = "kb/other"
+json.dump(cfg, open(p, "w"), indent=2)
+PY
+if "$CEG" --root "$CUSTOM" --check x-implementer >"$TMP/custom-moved.stdout" 2>&1; then
+  fail "custom-docs-move-detected" "(check passed with the graph only under the old root)"
+else
+  echo "custom-docs-move-detected: ok"
+fi
+mkdir -p "$CUSTOM/kb/other"
+cp -R "$CUSTOM/kb/graphs/x" "$CUSTOM/kb/other/x"
+"$CEG" --root "$CUSTOM" --check x-implementer >"$TMP/custom-moved2.stdout" 2>&1 \
+  || fail "custom-docs-move-reads-new-root" "$(cat "$TMP/custom-moved2.stdout")"
+
+# AC-2: a repo with no config is refused, naming the file, and no agent.md is touched.
+BARE="$TMP/bare"
+mkdir -p "$BARE/prompts/x-implementer" "$BARE/scripts/kb-delivery" "$BARE/scripts/rosetta"
+cp "$HERE/generate_excerpt.py" "$HERE/embed-graph.sh" "$BARE/scripts/kb-delivery/"
+cp "$PLUGIN_ROOT/scripts/rosetta/"*.py "$BARE/scripts/rosetta/"
+chmod +x "$BARE/scripts/kb-delivery/embed-graph.sh"
+printf '# untouched\n' > "$BARE/prompts/x-implementer/agent.md"
+BEG="$BARE/scripts/kb-delivery/embed-graph.sh"
+if "$BEG" --root "$BARE" --sync x >"$TMP/bare.stdout" 2>"$TMP/bare.stderr"; then
+  fail "bare-refused" "(sync succeeded with no config)"
+else
+  echo "bare-refused: ok"
+fi
+grep -qF "$BARE/.rosetta/config.json" "$TMP/bare.stderr" \
+  || fail "bare-names-config" "$(cat "$TMP/bare.stderr")"
+[ "$(cat "$BARE/prompts/x-implementer/agent.md")" = "# untouched" ] \
+  || fail "bare-leaves-agent-md" "(agent.md was modified)"
+[ ! -e "$BARE/.rosetta" ] || fail "bare-creates-nothing" "(.rosetta was created)"
+
+
 if [ "$fail" -eq 0 ]; then
   echo "ok — embed-graph.sh insert + drift-detect + idempotency + fail-closed all passed"
   exit 0

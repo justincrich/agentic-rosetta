@@ -213,6 +213,70 @@ def main() -> int:
         raw_p = pinned_only.read_bytes()
         label = GE.kb_version(json.loads(raw_p), raw_p)
         check("pinned-fallback-date", " @ 2026-03 " in label, f"({label})")
+
+        # ── the config decides the layout (AC-2 / AC-8 / AC-9) ──────────────────────────
+        os.environ["ROSETTA_HOME"] = str(tmp / "device-home")
+        (tmp / "device-home").mkdir()
+
+        # AC-2: an unconfigured repo is refused, naming the file, and renders nothing.
+        bare = tmp / "bare-gen"
+        (bare / ".git").mkdir(parents=True)
+        bare_run = subprocess.run(
+            [sys.executable, str(GEN), "--root", str(bare), "--domain", "cloudflare-workers",
+             "--embed"],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+        check("bare-refused", bare_run.returncode != 0, f"(rc={bare_run.returncode})")
+        check("bare-names-config", str(bare / ".rosetta" / "config.json") in bare_run.stderr,
+              bare_run.stderr)
+        check("bare-renders-nothing", bare_run.stdout == "", bare_run.stdout)
+        check("bare-creates-nothing", (bare / ".rosetta").exists() is False,
+              str(sorted(p.name for p in bare.iterdir())))
+
+        # AC-8: a graph under the configured docs directory renders with the same bytes as the
+        # standard layout — the layout name is the only difference.
+        custom = M.materialize(tmp / "custom", docs="kb/graphs", agents="prompts")
+        standard_embed = run("--agent", "cloudflare-workers-implementer", "--embed").stdout
+        custom_run = subprocess.run(
+            [sys.executable, str(GEN), "--root", str(custom),
+             "--agent", "cloudflare-workers-implementer", "--embed"],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+        check("custom-embed-exit0", custom_run.returncode == 0, custom_run.stderr)
+        check("custom-embed-same-render", custom_run.stdout == standard_embed,
+              custom_run.stderr)
+        check("custom-uses-configured-docs",
+              (custom / "kb" / "graphs" / "cloudflare-workers" / "fact-graph.json").is_file(),
+              str(sorted(p.as_posix() for p in (custom / "kb").rglob("*"))[:4]))
+        check("custom-makes-no-legacy-docs", (custom / ".rosetta" / "docs").exists() is False,
+              str(sorted(p.name for p in (custom / ".rosetta").iterdir())))
+
+        # AC-9: changing only paths.docs moves where the generator reads.
+        cfg_path = custom / ".rosetta" / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["paths"]["docs"] = "kb/other"
+        cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+        moved_before = subprocess.run(
+            [sys.executable, str(GEN), "--root", str(custom),
+             "--agent", "cloudflare-workers-implementer", "--embed"],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+        check("docs-move-reads-nothing-at-old-root", moved_before.returncode == 2,
+              f"(rc={moved_before.returncode})")
+        check("docs-move-names-new-path",
+              "kb/other" in moved_before.stderr or "no fact-graph" in moved_before.stderr,
+              moved_before.stderr)
+        (custom / "kb" / "other").mkdir(parents=True)
+        shutil.copytree(custom / "kb" / "graphs" / "cloudflare-workers",
+                        custom / "kb" / "other" / "cloudflare-workers")
+        moved_after = subprocess.run(
+            [sys.executable, str(GEN), "--root", str(custom),
+             "--agent", "cloudflare-workers-implementer", "--embed"],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+        check("docs-move-reads-new-root", moved_after.returncode == 0, moved_after.stderr)
+        check("docs-move-same-render", moved_after.stdout == standard_embed, moved_after.stderr)
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

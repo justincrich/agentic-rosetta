@@ -152,7 +152,79 @@ def main() -> int:
               and "no-such-graph" in cli_reg_bad.stderr, cli_reg_bad.stderr.strip())
 
 
-        # No path in the written registry escapes the target project.
+        # ── the repo's config decides the layout (AC-2 / AC-8 / AC-9) ────────────────
+        # A fixture's layout comes from its own config: point the device home at an empty
+        # directory so no machine-wide file can take part.
+        os.environ["ROSETTA_HOME"] = str(tmp / "device-home")
+        (tmp / "device-home").mkdir()
+
+        # AC-2: an unconfigured repo is refused before anything is written.
+        bare = tmp / "bare-repo"
+        bare.mkdir()
+        subprocess.run(["git", "init", "-q", str(bare)], check=True, capture_output=True)
+        for cmd in ("scan", "list"):
+            cli_bare = subprocess.run(
+                [sys.executable, str(HERE / "registry.py"), "--root", str(bare), cmd],
+                capture_output=True, text=True, env=dict(os.environ),
+            )
+            check(f"bare-{cmd}-refused", cli_bare.returncode != 0, f"(rc={cli_bare.returncode})")
+            check(f"bare-{cmd}-names-config",
+                  str(bare / ".rosetta" / "config.json") in cli_bare.stderr, cli_bare.stderr)
+        check("bare-writes-no-registry", (bare / ".rosetta" / "registry.json").exists() is False,
+              str(sorted(p.name for p in bare.iterdir())))
+
+        # AC-8: a layout named only by the config is indexed where it is, agents included.
+        custom = M.materialize(tmp / "custom", docs="kb/graphs", agents="prompts")
+        cli_custom = subprocess.run(
+            [sys.executable, str(HERE / "registry.py"), "--root", str(custom), "scan"],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+        check("custom-scan-exit0", cli_custom.returncode == 0,
+              cli_custom.stdout + cli_custom.stderr)
+        custom_reg = json.loads((custom / ".rosetta" / "registry.json").read_text())
+        check("custom-graph-path",
+              custom_reg["graphs"].get("rust", {}).get("path") == "kb/graphs/rust/fact-graph.json",
+              str(custom_reg["graphs"].get("rust")))
+        # A graph may also live in the configured agents directory (an agent-local KB).
+        outside = [g["path"] for g in custom_reg["graphs"].values()
+                   if not g["path"].startswith(("kb/graphs/", "prompts/"))]
+        check("custom-every-path-under-docs", outside == [], str(outside))
+        custom_consumers = custom_reg["graphs"]["cloudflare-workers"]["consumers"]
+        check("custom-agents-from-config",
+              "cloudflare-rust-implementer" in custom_consumers, str(custom_consumers))
+        cli_list = subprocess.run(
+            [sys.executable, str(HERE / "registry.py"), "--root", str(custom), "list"],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+        check("custom-list-shows-path", "kb/graphs/rust/fact-graph.json" in cli_list.stdout,
+              cli_list.stdout)
+        check("custom-created-no-legacy-docs", (custom / ".rosetta" / "docs").exists() is False,
+              str(sorted(p.name for p in (custom / ".rosetta").iterdir())))
+        check("custom-created-no-agents-dir", (custom / "agents").exists() is False,
+              str(sorted(p.name for p in custom.iterdir())))
+
+        # AC-9: changing ONLY paths.docs moves every path the index records.
+        before = {g["path"] for g in custom_reg["graphs"].values()}
+        config_path = custom / ".rosetta" / "config.json"
+        cfg = json.loads(config_path.read_text())
+        cfg["paths"]["docs"] = "kb/other"
+        config_path.write_text(json.dumps(cfg, indent=2) + "\n")
+        moved = subprocess.run(
+            [sys.executable, str(HERE / "registry.py"), "--root", str(custom), "scan"],
+            capture_output=True, text=True, env=dict(os.environ),
+        )
+        check("docs-move-scan-exit0", moved.returncode == 0, moved.stdout + moved.stderr)
+        after_reg = json.loads((custom / ".rosetta" / "registry.json").read_text())
+        after = {g["path"] for g in after_reg["graphs"].values()}
+        stale = [p for p in after if not p.startswith(("kb/other/", "prompts/"))]
+        check("docs-move-uses-new-root", stale == [], str(stale))
+        kept = sorted(p for p in after if p.startswith("kb/graphs/"))
+        check("docs-move-drops-old-root", kept == [], str(kept))
+        check("docs-move-changed-paths", sorted(after) != sorted(before), str(sorted(after)[:3]))
+        check("docs-move-created-no-other-dir", (custom / "kb" / "other").exists() is False,
+              str(sorted(p.name for p in (custom / "kb").iterdir())))
+
+
         for slug, g in R.load()["graphs"].items():
             p = R.repo_root() / g["path"]
             check(f"path-inside-target-{slug}",
