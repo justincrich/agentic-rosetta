@@ -688,8 +688,9 @@ def cmd_check(tech: str, root: Path) -> int:
 
 # ─────────────────────────── composed sources ───────────────────────────
 
-#: Exit code for "a composed copy is not current" — the repo's established stale code, shared
-#: with ``provenance.py --check-stale`` and ``--propagate``'s divergence report.
+#: Exit code for "a composed copy is not current" — the repo's established stale code. Two users
+#: here: ``--check-composed`` and ``--propagate``'s divergence report; ``provenance.py
+#: --check-stale`` uses the same value for the same meaning.
 EXIT_COMPOSED_STALE = 10
 
 
@@ -846,7 +847,7 @@ def cmd_propagate(
             print(f"[write-graph] SKIP {name}: copy fingerprint mismatch — its recorded copy "
                   f"diverged from its own facts (a local edit changed the copy); refusing to "
                   f"overwrite", file=sys.stderr)
-            rc = 10
+            rc = EXIT_COMPOSED_STALE
             continue
         if borrower["status"] == COMPOSED_FRESH and not force:
             # No-op churn guard: re-copying an identical body would still bump the host
@@ -1084,7 +1085,7 @@ def main(argv: list[str]) -> int:
         if args.adopt:
             return cmd_adopt(args.adopt, root)
         if args.propagate:
-            subset = [s.strip() for s in (args.borrowers or "").split(",") if s.strip()]
+            subset = split_slugs(args.borrowers)
             return cmd_propagate(args.propagate, root, subset or None, args.confirm,
                                  list_only=args.list, force=args.force)
         if args.check_composed:
