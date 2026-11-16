@@ -14,12 +14,54 @@
       "title": "Compose Rosetta graphs by value with versioned dependent sync",
       "dir": ".",
       "depends_on": [],
-      "status": "planned",
+      "status": "completed",
       "history": [
         {
           "status": "planned",
           "at": "2026-11-04T20:59:39Z",
           "by": "agent"
+        },
+        {
+          "status": "completed",
+          "at": "2026-11-16T23:07:07Z",
+          "by": "agent",
+          "basis": "goal_state",
+          "run_state": "/Users/inference1/Projects/agentic-rosetta/.kb-run-sprint/imp-graph-composition-1793812559/state.json",
+          "counts": {
+            "scope": "sprint",
+            "sprint": "imp-graph-composition-1793812559",
+            "questions": {
+              "total": 0,
+              "open": 0,
+              "forwarded": 0,
+              "triaged": 0,
+              "defaulted": 0,
+              "answered": 0,
+              "moot": 0,
+              "withdrawn": 0
+            },
+            "resolved_by": {
+              "owner": 0,
+              "reader": 0,
+              "standing": 0,
+              "default": 0,
+              "moot": 0,
+              "withdrawn": 0
+            },
+            "overturned": 0,
+            "held_gate_steps": [],
+            "distinct_gate_steps": [],
+            "standing": {
+              "active": 0,
+              "revoked": 0
+            },
+            "attempts": {
+              "tasks": 0,
+              "total": 0,
+              "due": []
+            },
+            "repeat_answers": []
+          }
         }
       ],
       "branch": null,
