@@ -29,8 +29,9 @@ judgment); this writer never invents URLs.
 
 --composed-with copies the named graphs' v/w/r/a/x/t facts into this graph's body by
 value (``composed[<slug>]``) and rebuilds ``_meta.composed_with`` from that copy. It is an
-input to ``--create`` and ``--update`` only (composing two graphs that already exist is an
-``--update``); on any other verb it is a usage error, never a silent no-op.
+input to ``--create`` and ``--update`` only — composing two graphs that already exist is an
+``--update`` when a closed census ledger exists, and ``--compose`` (sources from ``--from``)
+when it does not; on any other verb it is a usage error, never a silent no-op.
 --propagate lists every borrower and its editions, then re-copies one original's facts into
 them; it asks update-all / a named subset / skip and refuses to write without ``--confirm``
 when stdin is not a terminal. ``--list`` prints the table and exits without prompting or
@@ -971,8 +972,11 @@ def cmd_compose(tech: str, sources: list[str], root: Path, force: bool = False) 
     return 0
 
 
-#: Verbs in the order ``main()`` dispatches them, with the name used in messages. One place
-#: names the verb that will run, so a flag guard cannot drift from the dispatch it guards.
+#: Every verb flag, in the order ``active_verb()`` picks one when several are set. This is the
+#: guard/message order, NOT the dispatch order: ``main()`` tries ``--compose`` first (refusing it
+#: beside any other verb) and its dispatch stays hand-written. Two guards read the tuple:
+#: ``active_verb()`` names the verb a usage message reports, and the ``--compose`` exclusion
+#: walks it to list every other verb that was set.
 _VERB_ORDER = (
     ("create", "--create"),
     ("apply_nrra", "--apply-nrra"),
