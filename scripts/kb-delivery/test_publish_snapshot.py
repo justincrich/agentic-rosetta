@@ -47,7 +47,13 @@ METADATA_FILES = ("manifest.json", "files.json", "scan-result.json")
 R2_BUCKET = "rosetta-kb-mcp-snapshots"
 EXPECTED_AGENTS = 293
 EXPECTED_KBS = 65
-EXPECTED_EXCLUDED = {"*.bak": 6, "*.log": 3, ".history/": 3}
+# The publisher's exclusion patterns. Their counts are re-measured, never pinned: brain's own
+# housekeeping creates and removes *.pre-refresh.bak backups, so a count pinned to brain's working
+# tree measures brain rather than the publisher and fails for a reason that has nothing to do with
+# the code under test. What must hold is that every pattern is counted and that nothing excluded
+# reaches the payload — proven on a planted fixture by
+# test_ac13_excluded_scratch_is_counted_and_never_staged.
+EXCLUDED_PATTERNS = ("*.bak", "*.log", ".history/")
 SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PATTERNS = ["sk-", "ghp_", "AKIA", "BEGIN PRIVATE KEY"]
@@ -447,7 +453,10 @@ class PublishSnapshotTests(unittest.TestCase):
 
         self.assertEqual(len(manifest["agents"]), EXPECTED_AGENTS)
         self.assertEqual(len(manifest["kbs"]), EXPECTED_KBS)
-        self.assertEqual(manifest["excluded"], EXPECTED_EXCLUDED)
+        self.assertEqual(set(manifest["excluded"]), set(EXCLUDED_PATTERNS))
+        for pattern, count in manifest["excluded"].items():
+            self.assertIsInstance(count, int, pattern)
+            self.assertGreaterEqual(count, 0, pattern)
         self.assertRegex(manifest["snapshot_id"], SNAPSHOT_ID_RE)
         self.assertIn(f"snapshot_id: {manifest['snapshot_id']}", first.stdout)
         self.assertEqual(manifest["targets"]["claude"]["dest"], ".claude/agents")
@@ -456,6 +465,11 @@ class PublishSnapshotTests(unittest.TestCase):
         # files.json carries a correct sha256 for every staged payload file.
         files_doc = read_json(stage / "files.json")
         staged = payload_files(stage)
+        leaked = sorted(
+            path for path in staged
+            if path.endswith((".bak", ".log")) or "/.history/" in path
+        )
+        self.assertEqual(leaked, [], f"an excluded pattern reached the payload: {leaked}")
         self.assertEqual(len(files_doc["files"]), len(staged))
         self.assertEqual(set(files_doc["files"]), set(staged))
         for relative, path in staged.items():
@@ -489,6 +503,34 @@ class PublishSnapshotTests(unittest.TestCase):
 
         # The publisher never hardcodes the consumer location.
         self.assertNotIn("Projects/brain", PUBLISHER.read_text(encoding="utf-8"))
+
+    def test_ac13_excluded_scratch_is_counted_and_never_staged(self) -> None:
+        """A planted *.bak and *.log are counted by the manifest and never reach the payload.
+
+        The counter is proven on a planted fixture rather than on brain's working tree. Brain's
+        own housekeeping creates and removes ``*.pre-refresh.bak`` backups, so a count pinned to
+        brain measures brain's cleanliness rather than this code — which is exactly how this
+        assertion came to fail while the publisher was working.
+        """
+        root = self.tmp / "exclusion-consumer"
+        agent = root / "agents" / "example-agent"
+        agent.mkdir(parents=True)
+        (agent / "agent.md").write_text(
+            "---\nname: example-agent\n---\n\nbody\n", encoding="utf-8"
+        )
+        (agent / "agent.md.pre-refresh.bak").write_text("stale backup\n", encoding="utf-8")
+        (agent / "engine.log").write_text("log line\n", encoding="utf-8")
+
+        stage = self.tmp / "stage-exclusion"
+        self.publish(stage, root=root, expect=0)
+        manifest = read_json(stage / "manifest.json")
+
+        self.assertEqual(len(manifest["agents"]), 1)
+        self.assertEqual(manifest["excluded"]["*.bak"], 1)
+        self.assertEqual(manifest["excluded"]["*.log"], 1)
+        staged = payload_files(stage)
+        leaked = sorted(path for path in staged if path.endswith((".bak", ".log")))
+        self.assertEqual(leaked, [], f"an excluded pattern reached the payload: {leaked}")
 
     # ── AC-5 ───────────────────────────────────────────────────────────
 
