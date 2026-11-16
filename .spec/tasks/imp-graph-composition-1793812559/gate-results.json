@@ -1,0 +1,67 @@
+{
+  "sprint": "imp-graph-composition-1793812559",
+  "head": "388b1ffe8f677ecdcc7072654fc388d203c4aa3b",
+  "judge": "fresh independent judge (python-implementer subagent), 2026-11-16",
+  "verdict": "pass",
+  "steps": [
+    {
+      "n": 1,
+      "exit": 0,
+      "observed": "composed herdrdev <- rust kb_version=1.0.0; host 1.0.0 -> 1.0.1; embed has reject-unwrap x1 and composed x1",
+      "ok": true
+    },
+    {
+      "n": 2,
+      "exit": 0,
+      "observed": "updated rust 1.0.0 -> 2.0.0; --list: 1 borrower, herdrdev recorded=1.0.0 current=2.0.0 stale; no prompt, digest unchanged",
+      "ok": true
+    },
+    {
+      "n": 3,
+      "exit": 10,
+      "observed": "STALE herdrdev: rust=stale; recorded=1.0.0 current=2.0.0",
+      "ok": true
+    },
+    {
+      "n": 4,
+      "exit": 0,
+      "observed": "propagated rust -> herdrdev 1.0.1 -> 1.0.2; --check-composed exit 0 fresh",
+      "ok": true
+    },
+    {
+      "n": 5,
+      "exit": 2,
+      "observed": "updated rust 2.0.0 -> 3.0.0; no --confirm: exit 2 'confirmation required'; digest unchanged",
+      "ok": true
+    },
+    {
+      "n": 6,
+      "exit": 2,
+      "observed": "composed graph 'ghost' has no fact-graph at .../docs/ghost/fact-graph.json",
+      "ok": true
+    },
+    {
+      "n": 7,
+      "exit": 2,
+      "observed": "hand edit: stamp: graph_sha256 mismatch (file was hand-edited?); restore --compose --force exit 0; --check exit 0",
+      "ok": true
+    },
+    {
+      "n": 8,
+      "exit": 10,
+      "observed": "SKIP herdrdev: copy fingerprint mismatch ... refusing to overwrite; local edit preserved",
+      "ok": true
+    },
+    {
+      "n": 9,
+      "exit": 0,
+      "observed": "all eight gate scripts exit 0 and print ok",
+      "ok": true
+    }
+  ],
+  "embed_delivery": {
+    "ok": true,
+    "observed": "embed-graph.sh --sync wrote the borrowed rule into agents/herdrdev-implementer/agent.md (reject-unwrap x1, composed x1, hand prose preserved)"
+  },
+  "failures": []
+}

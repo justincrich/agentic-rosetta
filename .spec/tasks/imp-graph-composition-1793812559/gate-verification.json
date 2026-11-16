@@ -1,0 +1,29 @@
+{
+  "sprint": "imp-graph-composition-1793812559",
+  "head": "388b1ffe8f677ecdcc7072654fc388d203c4aa3b",
+  "verdict": "pass",
+  "gate_results": "gate-results.json",
+  "steps_total": 9,
+  "steps_passed": 9,
+  "cleanup_subgate": ".tmp/imp-graph-composition-1793812559/subgates/cleanup.json",
+  "cleanup_overall": "PASS",
+  "adversarial_review": {
+    "skill": "review-red-hat",
+    "findings": 10,
+    "critical": 1,
+    "high": 2,
+    "fixed": [
+      "F3 AC-4 on --update --composed-with (commit 388b1ff)",
+      "F2 --propagate used a guessed path (commit 388b1ff)"
+    ],
+    "recorded": [
+      "F1 writer resolves one layout, renderer three (known-problems #17)",
+      "F5 unversioned original reports fresh",
+      "F7 markdown composed body drops dict rules (#14)",
+      "F8 empty answer at the prompt means update-all",
+      "F9 no un-compose verb",
+      "F10 no CHANGELOG/version bump"
+    ]
+  },
+  "verified_at": "2026-11-16T23:07:03Z"
+}
